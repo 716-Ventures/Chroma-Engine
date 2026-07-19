@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -26,6 +27,25 @@ pub struct NativeChunk {
     pub duration: TimeDelta,
     pub packet_range: PacketRange,
     pub key_aligned: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtractedChunk {
+    pub track_id: String,
+    pub chunk: NativeChunk,
+    pub packet_count: u32,
+    pub byte_count: u64,
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum PacketExtractError {
+    #[error("packet range start is after range end")]
+    InvalidRange,
+    #[error("packet range is outside the packet index")]
+    RangeOutOfBounds,
+    #[error("packet byte range is outside the source")]
+    SourceOutOfBounds,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -160,6 +180,42 @@ pub fn plan_track_chunks(track_id: &str, packets: &[PacketRef], target_ms: u64) 
     ChunkPlan { track_ids, chunks }
 }
 
+pub fn extract_packet_payload(
+    source: &[u8],
+    packets: &[PacketRef],
+    range: PacketRange,
+) -> Result<Vec<u8>, PacketExtractError> {
+    if range.start > range.end {
+        return Err(PacketExtractError::InvalidRange);
+    }
+    let start = range.start as usize;
+    let end = range.end as usize;
+    if end > packets.len() {
+        return Err(PacketExtractError::RangeOutOfBounds);
+    }
+
+    let byte_count = packets[start..end]
+        .iter()
+        .map(|packet| u64::from(packet.size))
+        .sum::<u64>();
+    let capacity = usize::try_from(byte_count).unwrap_or(usize::MAX);
+    let mut out = Vec::with_capacity(capacity.min(source.len()));
+
+    for packet in &packets[start..end] {
+        let packet_start = packet.source_offset as usize;
+        let packet_size = packet.size as usize;
+        let packet_end = packet_start
+            .checked_add(packet_size)
+            .ok_or(PacketExtractError::SourceOutOfBounds)?;
+        if packet_end > source.len() {
+            return Err(PacketExtractError::SourceOutOfBounds);
+        }
+        out.extend_from_slice(&source[packet_start..packet_end]);
+    }
+
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,6 +246,15 @@ mod tests {
         );
     }
 
+    #[test]
+    fn extracts_packet_payload_ranges() {
+        let source = b"00112233445566778899";
+        let packets = vec![packet_at(2, 4), packet_at(10, 2), packet_at(16, 4)];
+        let payload =
+            extract_packet_payload(source, &packets, PacketRange { start: 0, end: 2 }).unwrap();
+        assert_eq!(payload, b"112255");
+    }
+
     fn packet(start_ms: u64, keyframe: bool) -> PacketRef {
         PacketRef {
             source_offset: start_ms,
@@ -198,6 +263,17 @@ mod tests {
             dts: TimePoint::millis(start_ms),
             duration: TimeDelta::millis(1000),
             keyframe,
+        }
+    }
+
+    fn packet_at(source_offset: u64, size: u32) -> PacketRef {
+        PacketRef {
+            source_offset,
+            size,
+            pts: TimePoint::millis(0),
+            dts: TimePoint::millis(0),
+            duration: TimeDelta::millis(1),
+            keyframe: true,
         }
     }
 }

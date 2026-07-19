@@ -10,6 +10,7 @@ Chroma Engine is not a command-compatible FFmpeg replacement. It is a media engi
 - **Playback planning is selective by default.** A session plan selects the primary video and primary audio track unless the caller explicitly asks for broader work, such as all audio tracks. This keeps startup fast and avoids waste.
 - **Copy paths stay separate from decode paths.** Remuxing and segmenting copy-compatible streams should avoid decoders, frame allocation, and encoder scheduling entirely.
 - **Chunks are packet windows.** The engine plans native chunk ranges from compressed packet indexes first; delivery protocols can adapt after that.
+- **Extraction is byte-range native.** Copy-compatible chunk emission should copy planned packet byte ranges directly from mapped source data before any decode, encode, or mux work is considered.
 - **Multi-output work should share stages.** Multiple audio/subtitle outputs should not duplicate video demux/decode/encode work.
 - **Compatibility is outside the core.** If a deployment later needs a legacy transport, that layer must adapt from the native session model. It should not dictate the engine core or public CLI.
 

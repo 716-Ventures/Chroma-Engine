@@ -3,7 +3,10 @@ use std::path::PathBuf;
 use anyhow::{bail, Result};
 use chroma_engine::container::{
     matroska::{looks_like_ebml, parse_chunk_plan as parse_matroska_chunk_plan},
-    mp4::{looks_like_mp4, parse_chunk_plan as parse_mp4_chunk_plan},
+    mp4::{
+        extract_chunk as extract_mp4_chunk, looks_like_mp4,
+        parse_chunk_plan as parse_mp4_chunk_plan,
+    },
 };
 use chroma_engine::probe::probe_media_source;
 use chroma_engine::session::{plan_playback, AudioSelection, PlaybackConstraints, PlaybackTarget};
@@ -37,6 +40,17 @@ enum Command {
         file: PathBuf,
         #[arg(long)]
         track: Option<String>,
+        #[arg(long, default_value_t = 4_000)]
+        target_ms: u64,
+    },
+    /// Write a native compressed chunk payload and emit its manifest.
+    ExtractChunk {
+        input: PathBuf,
+        output: PathBuf,
+        #[arg(long)]
+        track: Option<String>,
+        #[arg(long, default_value_t = 0)]
+        chunk_index: u32,
         #[arg(long, default_value_t = 4_000)]
         target_ms: u64,
     },
@@ -105,6 +119,23 @@ fn main() -> Result<()> {
             }
             .ok_or_else(|| anyhow::anyhow!("no matching packet-indexed track found"))?;
             println!("{}", serde_json::to_string_pretty(&plan)?);
+        }
+        Command::ExtractChunk {
+            input,
+            output,
+            track,
+            chunk_index,
+            target_ms,
+        } => {
+            let source = std::fs::File::open(&input)?;
+            let bytes = unsafe { Mmap::map(&source)? };
+            if !looks_like_mp4(&bytes) {
+                bail!("native chunk extraction currently supports MP4/MOV packet tables");
+            }
+            let (manifest, payload) =
+                extract_mp4_chunk(&bytes, track.as_deref(), target_ms, chunk_index)?;
+            std::fs::write(output, payload)?;
+            println!("{}", serde_json::to_string_pretty(&manifest)?);
         }
         Command::EncoderProbe => {
             let probe = chroma_engine::platform::encoder_probe();

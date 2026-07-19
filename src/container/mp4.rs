@@ -1,6 +1,9 @@
 use crate::{
     container::ContainerKind,
-    packet::{ChunkPlan, NativeChunk, PacketRange, PacketRef, TimeDelta, TimePoint, TimeScale},
+    packet::{
+        extract_packet_payload, plan_track_chunks, ChunkPlan, ExtractedChunk, NativeChunk,
+        PacketExtractError, PacketRange, PacketRef, TimeDelta, TimePoint, TimeScale,
+    },
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -188,6 +191,44 @@ pub fn parse_chunk_plan(
     }
 
     None
+}
+
+pub fn extract_chunk(
+    bytes: &[u8],
+    requested_track_id: Option<&str>,
+    target_ms: u64,
+    chunk_index: u32,
+) -> Result<(ExtractedChunk, Vec<u8>), Mp4ChunkExtractError> {
+    let track =
+        parse_packet_track(bytes, requested_track_id).ok_or(Mp4ChunkExtractError::NoTrack)?;
+    let plan = plan_track_chunks(&track.track_id, &track.packets, target_ms);
+    let chunk = plan
+        .chunks
+        .into_iter()
+        .find(|chunk| chunk.index == chunk_index)
+        .ok_or(Mp4ChunkExtractError::NoChunk)?;
+    let payload = extract_packet_payload(bytes, &track.packets, chunk.packet_range)?;
+    let packet_count = chunk
+        .packet_range
+        .end
+        .saturating_sub(chunk.packet_range.start);
+    let manifest = ExtractedChunk {
+        track_id: track.track_id,
+        chunk,
+        packet_count,
+        byte_count: payload.len() as u64,
+    };
+    Ok((manifest, payload))
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum Mp4ChunkExtractError {
+    #[error("no matching MP4 packet-indexed track found")]
+    NoTrack,
+    #[error("no matching native chunk found")]
+    NoChunk,
+    #[error("{0}")]
+    Packet(#[from] PacketExtractError),
 }
 
 fn parse_ftyp(payload: &[u8], meta: &mut Mp4BasicMetadata) {
@@ -1031,6 +1072,33 @@ mod tests {
             plan.chunks[2].packet_range,
             PacketRange { start: 4, end: 5 }
         );
+    }
+
+    #[test]
+    fn extracts_mp4_chunk_payload_from_sample_offsets() {
+        let mut data = ftyp();
+        data.extend_from_slice(&atom(
+            b"moov",
+            &trak_with_samples(
+                b"vide",
+                b"avc1",
+                &[4, 3, 2],
+                &[1000, 1000, 1000],
+                &[1, 3],
+                &[700, 900],
+                &[(1, 2), (2, 1)],
+            ),
+        ));
+        data.resize(1_000, 0);
+        data[700..704].copy_from_slice(b"aaaa");
+        data[704..707].copy_from_slice(b"bbb");
+        data[900..902].copy_from_slice(b"cc");
+
+        let (manifest, payload) = extract_chunk(&data, None, 2_000, 0).unwrap();
+        assert_eq!(manifest.track_id, "v0");
+        assert_eq!(manifest.packet_count, 2);
+        assert_eq!(manifest.byte_count, 7);
+        assert_eq!(payload, b"aaaabbb");
     }
 
     fn ftyp() -> Vec<u8> {
