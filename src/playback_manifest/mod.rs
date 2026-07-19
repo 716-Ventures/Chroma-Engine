@@ -174,13 +174,7 @@ fn matroska_manifest_track(
 ) -> Option<ManifestTrack> {
     let chunks = parse_matroska_chunk_plan(bytes, Some(track_id), target_ms)
         .map(|plan| plan.chunks)
-        .or_else(|| {
-            if track.kind == MatroskaTrackKind::Audio {
-                Some(duration_chunks(duration_ms?, target_ms))
-            } else {
-                None
-            }
-        })?;
+        .or_else(|| Some(duration_chunks(duration_ms?, target_ms)))?;
     let private = track.codec_private.as_deref();
     Some(ManifestTrack {
         id: track_id.to_string(),
