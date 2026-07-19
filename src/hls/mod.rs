@@ -27,6 +27,7 @@ const VIDEO_STREAM_ID: u8 = 0xe0;
 const AUDIO_STREAM_ID: u8 = 0xc0;
 const PRIVATE_STREAM_ID: u8 = 0xbd;
 const TS_CLOCK: u64 = 90_000;
+const MIN_SEGMENT_MS: u64 = 1_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HlsOptions {
@@ -355,7 +356,32 @@ fn segment_windows(video_packets: &[PacketRef], target_ms: u64) -> Vec<SegmentWi
         start_ms,
         end_ms,
     });
-    windows
+    collapse_short_windows(windows, MIN_SEGMENT_MS)
+}
+
+fn collapse_short_windows(windows: Vec<SegmentWindow>, min_duration_ms: u64) -> Vec<SegmentWindow> {
+    if windows.len() <= 1 || min_duration_ms == 0 {
+        return windows;
+    }
+    let mut out: Vec<SegmentWindow> = Vec::with_capacity(windows.len());
+    for window in windows {
+        let duration = window.end_ms.saturating_sub(window.start_ms);
+        if duration < min_duration_ms {
+            if let Some(last) = out.last_mut() {
+                last.end_ms = window.end_ms;
+                continue;
+            }
+        }
+        out.push(window);
+    }
+    if out.len() > 1 && out[0].end_ms.saturating_sub(out[0].start_ms) < min_duration_ms {
+        let first = out.remove(0);
+        out[0].start_ms = first.start_ms;
+    }
+    for (index, window) in out.iter_mut().enumerate() {
+        window.index = index;
+    }
+    out
 }
 
 fn packet_end_ms(packet: &PacketRef) -> u64 {
@@ -401,7 +427,9 @@ fn mux_segment(bytes: &[u8], tracks: &HlsTrackSet, window: SegmentWindow) -> Res
     }
     samples.sort_by_key(|sample| (sample.0, !sample.1));
 
+    let mut timestamps = OutputTimestampSanitizer::default();
     for (_, is_video, pts90, dts90, payload) in samples {
+        let (pts90, dts90) = timestamps.sanitize(is_video, pts90, dts90);
         let timed = TimedPayload {
             pts90,
             dts90,
@@ -420,6 +448,28 @@ fn mux_segment(bytes: &[u8], tracks: &HlsTrackSet, window: SegmentWindow) -> Res
     }
 
     Ok(mux.into_bytes())
+}
+
+#[derive(Debug, Default)]
+struct OutputTimestampSanitizer {
+    last_video_dts90: Option<u64>,
+    last_audio_dts90: Option<u64>,
+}
+
+impl OutputTimestampSanitizer {
+    fn sanitize(&mut self, is_video: bool, pts90: u64, dts90: u64) -> (u64, u64) {
+        let slot = if is_video {
+            &mut self.last_video_dts90
+        } else {
+            &mut self.last_audio_dts90
+        };
+        let out_dts = match *slot {
+            Some(last) if dts90 <= last => last.saturating_add(1),
+            _ => dts90,
+        };
+        *slot = Some(out_dts);
+        (pts90.max(out_dts), out_dts)
+    }
 }
 
 fn packet_to_payload(bytes: &[u8], packet: &PacketRef, kind: &PayloadKind) -> Result<Vec<u8>> {
@@ -850,5 +900,56 @@ mod tests {
         assert!(body.contains("#EXTINF:1.500,"));
         assert!(body.contains("seg-00001.ts"));
         assert!(body.ends_with("#EXT-X-ENDLIST\n"));
+    }
+
+    #[test]
+    fn collapses_pathological_short_windows() {
+        let windows = vec![
+            SegmentWindow {
+                index: 0,
+                start_ms: 0,
+                end_ms: 40,
+            },
+            SegmentWindow {
+                index: 1,
+                start_ms: 40,
+                end_ms: 4_000,
+            },
+            SegmentWindow {
+                index: 2,
+                start_ms: 4_000,
+                end_ms: 4_120,
+            },
+            SegmentWindow {
+                index: 3,
+                start_ms: 4_120,
+                end_ms: 8_500,
+            },
+        ];
+        let collapsed = collapse_short_windows(windows, 1_000);
+        assert_eq!(
+            collapsed,
+            vec![
+                SegmentWindow {
+                    index: 0,
+                    start_ms: 0,
+                    end_ms: 4_120,
+                },
+                SegmentWindow {
+                    index: 1,
+                    start_ms: 4_120,
+                    end_ms: 8_500,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn sanitizes_output_timestamps_per_stream() {
+        let mut sanitizer = OutputTimestampSanitizer::default();
+        assert_eq!(sanitizer.sanitize(true, 90, 90), (90, 90));
+        assert_eq!(sanitizer.sanitize(true, 80, 90), (91, 91));
+        assert_eq!(sanitizer.sanitize(false, 20, 10), (20, 10));
+        assert_eq!(sanitizer.sanitize(false, 5, 10), (11, 11));
     }
 }
