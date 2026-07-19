@@ -4,7 +4,7 @@
 
 - [x] Create Rust repo and library/CLI skeleton.
 - [x] Define native `MediaProbe` JSON with typed tracks, source facts, and capability hints.
-- [x] Define command surface: `probe`, `plan`, `chunks`, `codec-config`, `extract-chunk`, `remux-mp4`, `encoder-probe`, `warmup`.
+- [x] Define command surface: `probe`, `plan`, `manifest`, `chunks`, `codec-config`, `extract-chunk`, `remux-mp4`, `encoder-probe`, `warmup`.
 - [x] Define native playback `plan` command with target-specific pipeline stages.
 - [ ] Add real-library probe fixtures from `/Volumes/Movies` and `/Volumes/TVShows`.
 - [ ] Add Chroma-native snapshot tests for representative MP4/MKV/HDR/audio/subtitle combinations.
@@ -39,7 +39,7 @@
 
 ## Native Playback
 
-- [ ] Define Chroma-native playback session manifest.
+- [x] Define initial Chroma-native MP4/MOV playback manifest with selected tracks, decoder config, and chunk windows.
 - [x] Add initial Chroma-native playback plan: selected tracks, shared demux, copy/decode/encode, mux, transport adapters.
 - [x] Default playback planning selects primary video/audio and excludes target-unusable bitmap subtitles for browser/Apple targets.
 - [x] Remove legacy transport assumptions from the public core command/module surface.

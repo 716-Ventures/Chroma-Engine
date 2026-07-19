@@ -2,6 +2,7 @@ pub mod codec;
 pub mod container;
 pub mod packet;
 pub mod platform;
+pub mod playback_manifest;
 pub mod probe;
 pub mod remux;
 pub mod session;

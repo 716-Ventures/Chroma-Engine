@@ -8,6 +8,7 @@ use chroma_engine::container::{
         parse_chunk_plan as parse_mp4_chunk_plan, parse_codec_config as parse_mp4_codec_config,
     },
 };
+use chroma_engine::playback_manifest::{build_mp4_playback_manifest, Mp4ManifestOptions};
 use chroma_engine::probe::probe_media_source;
 use chroma_engine::session::{plan_playback, AudioSelection, PlaybackConstraints, PlaybackTarget};
 use clap::{Parser, Subcommand};
@@ -48,6 +49,14 @@ enum Command {
         file: PathBuf,
         #[arg(long)]
         track: Option<String>,
+    },
+    /// Emit a Chroma-native playback manifest for a source.
+    Manifest {
+        file: PathBuf,
+        #[arg(long, default_value_t = 4_000)]
+        target_ms: u64,
+        #[arg(long, default_value_t = true)]
+        include_audio: bool,
     },
     /// Write a native compressed chunk payload and emit its manifest.
     ExtractChunk {
@@ -135,6 +144,27 @@ fn main() -> Result<()> {
             let config = parse_mp4_codec_config(&bytes, track.as_deref())
                 .ok_or_else(|| anyhow::anyhow!("no matching MP4 codec config found"))?;
             println!("{}", serde_json::to_string_pretty(&config)?);
+        }
+        Command::Manifest {
+            file,
+            target_ms,
+            include_audio,
+        } => {
+            let source = std::fs::File::open(&file)?;
+            let bytes = unsafe { Mmap::map(&source)? };
+            if !looks_like_mp4(&bytes) {
+                bail!("native playback manifest currently supports MP4/MOV");
+            }
+            let manifest = build_mp4_playback_manifest(
+                &bytes,
+                &file,
+                Mp4ManifestOptions {
+                    chunk_target_ms: target_ms,
+                    include_primary_audio: include_audio,
+                },
+            )
+            .ok_or_else(|| anyhow::anyhow!("could not build native playback manifest"))?;
+            println!("{}", serde_json::to_string_pretty(&manifest)?);
         }
         Command::ExtractChunk {
             input,
