@@ -3,6 +3,8 @@ use std::path::Path;
 
 use anyhow::{bail, Result};
 
+use crate::codec::subtitles::WebVttSegment;
+
 pub fn run_hls_session(
     input: &Path,
     work_dir: &Path,
@@ -21,6 +23,27 @@ pub fn run_hls_session(
 
     fs::create_dir_all(work_dir)?;
     bail!("hls fMP4 writer not implemented yet")
+}
+
+pub fn render_webvtt_media_playlist(segments: &[WebVttSegment]) -> String {
+    let target_duration = segments
+        .iter()
+        .map(|segment| segment.duration_ms.div_ceil(1000))
+        .max()
+        .unwrap_or(0)
+        .max(1);
+    let mut out = format!(
+        "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:{target_duration}\n#EXT-X-MEDIA-SEQUENCE:0\n"
+    );
+    for segment in segments {
+        out.push_str(&format!(
+            "#EXTINF:{:.3},\n{}\n",
+            segment.duration_ms as f64 / 1000.0,
+            segment.uri
+        ));
+    }
+    out.push_str("#EXT-X-ENDLIST\n");
+    out
 }
 
 pub fn render_master_playlist(
@@ -90,5 +113,20 @@ mod tests {
         );
         assert!(playlist.contains("#EXTM3U"));
         assert!(playlist.contains("#EXT-X-STREAM-INF"));
+    }
+
+    #[test]
+    fn renders_webvtt_media_playlist() {
+        let playlist = super::render_webvtt_media_playlist(&[WebVttSegment {
+            index: 0,
+            start_ms: 0,
+            duration_ms: 6000,
+            uri: "s0/seg-00000.vtt".to_string(),
+            body: "WEBVTT\n\n".to_string(),
+        }]);
+        assert!(playlist.contains("#EXT-X-TARGETDURATION:6"));
+        assert!(playlist.contains("#EXTINF:6.000,"));
+        assert!(playlist.contains("s0/seg-00000.vtt"));
+        assert!(playlist.ends_with("#EXT-X-ENDLIST\n"));
     }
 }

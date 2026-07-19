@@ -11,12 +11,16 @@
 ## Probe
 
 - [x] File existence and basic container sniffing.
-- [ ] MP4/MOV box parser: `ftyp`, `moov`, `trak`, `mdia`, `minf`, `stbl`, `stsd`, `mvhd`, `tkhd`, `mdhd`.
-- [ ] Matroska/WebM EBML parser: Segment Info, Tracks, Chapters, Attachments.
-- [ ] Extract video fields: codec, dimensions, frame rate, bitrate, pixel format, HDR/DV hints.
-- [ ] Extract audio fields: codec, channels, bitrate, language/title, default/forced disposition, Atmos/JOC hints.
-- [ ] Extract subtitles: text vs bitmap classification, language/title, default/forced disposition.
-- [ ] Extract chapters and duration.
+- [x] MP4/MOV box parser: `ftyp`, `moov`, `trak`, `mdia`, `minf`, `stbl`, `stsd`, `mvhd`, `tkhd`, `mdhd`.
+- [x] Matroska/WebM EBML parser: Segment Info, Tracks, Attachments.
+- [ ] Matroska/WebM EBML parser: Chapters.
+- [x] Extract video fields: codec, dimensions.
+- [ ] Extract video fields: frame rate, bitrate, pixel format, HDR/DV hints.
+- [ ] Extract audio fields: codec, channels, language/title, default/forced disposition.
+- [ ] Extract audio fields: bitrate, Atmos/JOC hints.
+- [x] Extract subtitles: text vs bitmap classification, language/title, default/forced disposition.
+- [ ] Extract chapters.
+- [x] Extract duration.
 - [ ] Match GenusServer error envelopes.
 
 ## Remux MP4
@@ -40,6 +44,7 @@
 - [ ] Keyframe-aligned segmentation.
 - [ ] Input-side seek anchoring and copy-path coarse seek behavior.
 - [ ] Optional program date time tags.
+- [x] WebVTT sidecar parsing/rendering and media playlist generation foundation.
 - [ ] Single-process WebVTT sidecar generation for all selected text subtitles.
 - [ ] Multi-audio output without duplicating video encode.
 
