@@ -3,6 +3,11 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    codec::aac::parse_audio_specific_config,
+    container::matroska::{
+        parse_basic_metadata as parse_matroska_basic_metadata,
+        parse_chunk_plan as parse_matroska_chunk_plan, MatroskaTrack, MatroskaTrackKind,
+    },
     container::mp4::{parse_basic_metadata, parse_chunk_plan, parse_codec_config, Mp4TrackKind},
     packet::NativeChunk,
 };
@@ -33,6 +38,21 @@ pub struct ManifestTrack {
 pub struct Mp4ManifestOptions {
     pub chunk_target_ms: u64,
     pub include_primary_audio: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MatroskaManifestOptions {
+    pub chunk_target_ms: u64,
+    pub include_primary_audio: bool,
+}
+
+impl Default for MatroskaManifestOptions {
+    fn default() -> Self {
+        Self {
+            chunk_target_ms: 4_000,
+            include_primary_audio: true,
+        }
+    }
 }
 
 impl Default for Mp4ManifestOptions {
@@ -80,6 +100,57 @@ pub fn build_mp4_playback_manifest(
     })
 }
 
+pub fn build_matroska_playback_manifest(
+    bytes: &[u8],
+    source_path: &Path,
+    options: MatroskaManifestOptions,
+) -> Option<NativePlaybackManifest> {
+    let metadata = parse_matroska_basic_metadata(bytes);
+    let mut tracks = Vec::new();
+
+    if let Some(video) = metadata
+        .tracks
+        .iter()
+        .filter(|track| track.kind == MatroskaTrackKind::Video)
+        .find(|track| matches!(track.codec.as_str(), "h264" | "hevc"))
+    {
+        tracks.push(matroska_manifest_track(
+            bytes,
+            video,
+            "v0",
+            options.chunk_target_ms,
+            metadata.duration_ms,
+        )?);
+    }
+
+    if options.include_primary_audio {
+        if let Some(audio) = metadata
+            .tracks
+            .iter()
+            .filter(|track| track.kind == MatroskaTrackKind::Audio)
+            .next()
+        {
+            if let Some(track) = matroska_manifest_track(
+                bytes,
+                audio,
+                "a0",
+                options.chunk_target_ms,
+                metadata.duration_ms,
+            ) {
+                tracks.push(track);
+            }
+        }
+    }
+
+    Some(NativePlaybackManifest {
+        schema_version: 1,
+        source_path: source_path.display().to_string(),
+        duration_ms: metadata.duration_ms,
+        chunk_target_ms: options.chunk_target_ms,
+        tracks,
+    })
+}
+
 fn manifest_track(bytes: &[u8], track_id: &str, target_ms: u64) -> Option<ManifestTrack> {
     let config = parse_codec_config(bytes, Some(track_id))?;
     let plan = parse_chunk_plan(bytes, Some(track_id), target_ms)?;
@@ -92,6 +163,116 @@ fn manifest_track(bytes: &[u8], track_id: &str, target_ms: u64) -> Option<Manife
         decoder_config_hex: config.description_hex,
         chunks: plan.chunks,
     })
+}
+
+fn matroska_manifest_track(
+    bytes: &[u8],
+    track: &MatroskaTrack,
+    track_id: &str,
+    target_ms: u64,
+    duration_ms: Option<u64>,
+) -> Option<ManifestTrack> {
+    let chunks = parse_matroska_chunk_plan(bytes, Some(track_id), target_ms)
+        .map(|plan| plan.chunks)
+        .or_else(|| {
+            if track.kind == MatroskaTrackKind::Audio {
+                Some(duration_chunks(duration_ms?, target_ms))
+            } else {
+                None
+            }
+        })?;
+    let private = track.codec_private.as_deref();
+    Some(ManifestTrack {
+        id: track_id.to_string(),
+        kind: matroska_track_kind_name(track.kind).to_string(),
+        codec: track.codec.clone(),
+        codec_string: matroska_codec_string(track, private),
+        config_box: matroska_config_box(track, private).map(str::to_string),
+        decoder_config_hex: private.map(hex_string),
+        chunks,
+    })
+}
+
+fn duration_chunks(duration_ms: u64, target_ms: u64) -> Vec<NativeChunk> {
+    if duration_ms == 0 || target_ms == 0 {
+        return Vec::new();
+    }
+    let mut chunks = Vec::new();
+    let mut start = 0_u64;
+    while start < duration_ms {
+        let len = duration_ms.saturating_sub(start).min(target_ms);
+        chunks.push(NativeChunk {
+            index: chunks.len() as u32,
+            start: crate::packet::TimePoint::millis(start),
+            duration: crate::packet::TimeDelta::millis(len),
+            packet_range: crate::packet::PacketRange { start: 0, end: 0 },
+            key_aligned: true,
+        });
+        start = start.saturating_add(len);
+    }
+    chunks
+}
+
+fn matroska_track_kind_name(kind: MatroskaTrackKind) -> &'static str {
+    match kind {
+        MatroskaTrackKind::Video => "video",
+        MatroskaTrackKind::Audio => "audio",
+        MatroskaTrackKind::Subtitle => "subtitle",
+        MatroskaTrackKind::Unknown => "unknown",
+    }
+}
+
+fn matroska_config_box(track: &MatroskaTrack, private: Option<&[u8]>) -> Option<&'static str> {
+    match (track.codec.as_str(), private) {
+        ("h264", Some(_)) => Some("avcC"),
+        ("hevc", Some(_)) => Some("hvcC"),
+        ("aac", Some(_)) => Some("asc"),
+        _ => None,
+    }
+}
+
+fn matroska_codec_string(track: &MatroskaTrack, private: Option<&[u8]>) -> Option<String> {
+    match (track.codec.as_str(), private) {
+        ("h264", Some(config)) if config.len() >= 4 => Some(format!(
+            "avc1.{:02X}{:02X}{:02X}",
+            config[1], config[2], config[3]
+        )),
+        ("hevc", Some(config)) => hevc_codec_string(config),
+        ("aac", Some(config)) => parse_audio_specific_config(config)
+            .ok()
+            .map(|config| format!("mp4a.40.{}", config.object_type)),
+        _ => None,
+    }
+}
+
+fn hevc_codec_string(config: &[u8]) -> Option<String> {
+    if config.len() < 13 {
+        return None;
+    }
+    let profile_space = match (config[1] >> 6) & 0x03 {
+        0 => "",
+        1 => "A",
+        2 => "B",
+        3 => "C",
+        _ => "",
+    };
+    let tier = if config[1] & 0x20 != 0 { "H" } else { "L" };
+    let profile_idc = config[1] & 0x1f;
+    let compatibility = u32::from_be_bytes(config[2..6].try_into().ok()?);
+    let level_idc = config[12];
+    Some(format!(
+        "hvc1.{profile_space}{profile_idc}.{compatibility:X}.{tier}{level_idc}"
+    ))
+}
+
+fn hex_string(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
 }
 
 #[cfg(test)]

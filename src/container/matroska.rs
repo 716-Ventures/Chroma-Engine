@@ -1,4 +1,9 @@
-use crate::packet::{ChunkPlan, NativeChunk, PacketRange, TimeDelta, TimePoint};
+use thiserror::Error;
+
+use crate::packet::{
+    extract_packet_payload, packet_samples_for_range, ChunkPlan, ExtractedChunk, NativeChunk,
+    PacketExtractError, PacketRange, PacketRef, TimeDelta, TimePoint, TimeScale,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MatroskaBasicMetadata {
@@ -21,6 +26,7 @@ pub struct MatroskaTrack {
     pub height: Option<u32>,
     pub channels: Option<u32>,
     pub sample_rate: Option<u32>,
+    pub codec_private: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,8 +37,187 @@ pub enum MatroskaTrackKind {
     Unknown,
 }
 
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum MatroskaChunkExtractError {
+    #[error("no matching Matroska track found")]
+    NoTrack,
+    #[error("no matching Matroska chunk found")]
+    NoChunk,
+    #[error("Matroska packet payload extraction failed: {0}")]
+    Packet(#[from] PacketExtractError),
+}
+
 pub fn looks_like_ebml(head: &[u8]) -> bool {
     head.len() >= 4 && head[0..4] == [0x1a, 0x45, 0xdf, 0xa3]
+}
+
+pub fn extract_chunk(
+    bytes: &[u8],
+    requested_track_id: Option<&str>,
+    target_ms: u64,
+    chunk_index: u32,
+) -> Result<(ExtractedChunk, Vec<u8>), MatroskaChunkExtractError> {
+    extract_window(bytes, requested_track_id, target_ms, chunk_index, 1)?
+        .into_iter()
+        .next()
+        .ok_or(MatroskaChunkExtractError::NoChunk)
+}
+
+pub fn extract_window(
+    bytes: &[u8],
+    requested_track_id: Option<&str>,
+    target_ms: u64,
+    start_chunk: u32,
+    chunk_count: u32,
+) -> Result<Vec<(ExtractedChunk, Vec<u8>)>, MatroskaChunkExtractError> {
+    let meta = parse_basic_metadata(bytes);
+    let selected = select_chunk_track(&meta.tracks, requested_track_id)
+        .ok_or(MatroskaChunkExtractError::NoTrack)?;
+    let segment = find_first_child(bytes, 0x1853_8067).ok_or(MatroskaChunkExtractError::NoTrack)?;
+    let timecode_scale = parse_segment_timecode_scale(segment);
+    let end_chunk = start_chunk.saturating_add(chunk_count);
+    let mut out = Vec::new();
+    let mut current_index = 0_u32;
+    let mut chunk_start_ms = 0_u64;
+    let mut last_seen_ms = 0_u64;
+    let mut key_aligned = true;
+    let mut saw_block = false;
+    let mut packets: Vec<PacketRef> = Vec::new();
+    let mut absolute_packet_index = 0_u32;
+
+    for cluster in ElementIter::new(segment).filter(|element| element.id == 0x1f43_b675) {
+        let cluster_timecode = parse_cluster_timecode(cluster.payload).unwrap_or(0);
+        for block in ClusterBlockIter::new_with_base(cluster.payload, cluster.payload_offset) {
+            if block.track_number != selected.number {
+                continue;
+            }
+
+            let timestamp_ms = matroska_timecode_to_ms(
+                cluster_timecode.saturating_add_signed(i64::from(block.relative_timecode)),
+                timecode_scale,
+            );
+            if !saw_block {
+                chunk_start_ms = timestamp_ms;
+                last_seen_ms = timestamp_ms;
+                key_aligned = block.keyframe;
+                saw_block = true;
+            }
+
+            let should_cut = absolute_packet_index > 0
+                && block.keyframe
+                && timestamp_ms.saturating_sub(chunk_start_ms) >= target_ms;
+            if should_cut {
+                if current_index >= start_chunk && current_index < end_chunk {
+                    let chunk = NativeChunk {
+                        index: current_index,
+                        start: TimePoint::millis(chunk_start_ms),
+                        duration: TimeDelta::millis(last_seen_ms.saturating_sub(chunk_start_ms)),
+                        packet_range: PacketRange {
+                            start: 0,
+                            end: packets.len() as u32,
+                        },
+                        key_aligned,
+                    };
+                    out.push(extract_packets_as_chunk(
+                        bytes,
+                        &selected.id,
+                        chunk,
+                        &packets,
+                    )?);
+                }
+                current_index = current_index.saturating_add(1);
+                if current_index >= end_chunk {
+                    return Ok(out);
+                }
+                packets.clear();
+                chunk_start_ms = timestamp_ms;
+                key_aligned = block.keyframe;
+            }
+
+            let collect = current_index >= start_chunk && current_index < end_chunk;
+            if collect {
+                if let Some(previous) = packets.last_mut() {
+                    previous.duration =
+                        TimeDelta::millis(timestamp_ms.saturating_sub(previous.pts.as_millis()));
+                }
+                packets.push(PacketRef {
+                    source_offset: block.payload_offset,
+                    size: block.payload_size,
+                    pts: TimePoint::millis(timestamp_ms),
+                    dts: TimePoint::millis(timestamp_ms),
+                    duration: TimeDelta::millis(0),
+                    keyframe: block.keyframe,
+                });
+            }
+            last_seen_ms = timestamp_ms;
+            absolute_packet_index = absolute_packet_index.saturating_add(1);
+        }
+    }
+
+    if saw_block && current_index >= start_chunk && current_index < end_chunk {
+        let last_duration =
+            infer_last_packet_duration(&packets).unwrap_or_else(|| TimeDelta::millis(0));
+        if let Some(last) = packets.last_mut() {
+            last.duration = last_duration;
+        }
+        let chunk = NativeChunk {
+            index: current_index,
+            start: TimePoint::millis(chunk_start_ms),
+            duration: TimeDelta::millis(last_seen_ms.saturating_sub(chunk_start_ms)),
+            packet_range: PacketRange {
+                start: 0,
+                end: packets.len() as u32,
+            },
+            key_aligned,
+        };
+        out.push(extract_packets_as_chunk(
+            bytes,
+            &selected.id,
+            chunk,
+            &packets,
+        )?);
+    }
+
+    Ok(out)
+}
+
+fn extract_packets_as_chunk(
+    bytes: &[u8],
+    track_id: &str,
+    chunk: NativeChunk,
+    packets: &[PacketRef],
+) -> Result<(ExtractedChunk, Vec<u8>), MatroskaChunkExtractError> {
+    let payload = extract_packet_payload(bytes, packets, chunk.packet_range)?;
+    let samples = packet_samples_for_range(packets, chunk.packet_range)?;
+    let packet_count = chunk
+        .packet_range
+        .end
+        .saturating_sub(chunk.packet_range.start);
+    Ok((
+        ExtractedChunk {
+            track_id: track_id.to_string(),
+            chunk,
+            packet_count,
+            byte_count: payload.len() as u64,
+            samples,
+        },
+        payload,
+    ))
+}
+
+pub fn parse_packet_track(
+    bytes: &[u8],
+    requested_track_id: Option<&str>,
+) -> Option<MatroskaPacketTrack> {
+    let meta = parse_basic_metadata(bytes);
+    let selected = select_chunk_track(&meta.tracks, requested_track_id)?;
+    let segment = find_first_child(bytes, 0x1853_8067)?;
+    let timecode_scale = parse_segment_timecode_scale(segment);
+    let packets = parse_track_packets(segment, selected.number, timecode_scale)?;
+    Some(MatroskaPacketTrack {
+        id: selected.id,
+        packets,
+    })
 }
 
 pub fn parse_basic_metadata(bytes: &[u8]) -> MatroskaBasicMetadata {
@@ -337,12 +522,14 @@ fn parse_track_entry(payload: &[u8], index: u32) -> Option<MatroskaTrack> {
     let mut height = None;
     let mut channels = None;
     let mut sample_rate = None;
+    let mut codec_private = None;
 
     for child in ElementIter::new(payload) {
         match child.id {
             0xd7 => number = read_uint(child.payload),
             0x83 => kind = track_type(read_uint(child.payload).unwrap_or_default()),
             0x86 => codec_id = read_string(child.payload),
+            0x63a2 => codec_private = Some(child.payload.to_vec()),
             0x0022_b59c | 0x0022_b59d => language = read_string(child.payload),
             0x536e => name = read_string(child.payload),
             0x88 => default = read_uint(child.payload).unwrap_or(0) != 0,
@@ -375,6 +562,7 @@ fn parse_track_entry(payload: &[u8], index: u32) -> Option<MatroskaTrack> {
         height,
         channels,
         sample_rate,
+        codec_private,
     })
 }
 
@@ -453,6 +641,12 @@ struct SelectedChunkTrack {
     number: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatroskaPacketTrack {
+    pub id: String,
+    pub packets: Vec<PacketRef>,
+}
+
 fn select_chunk_track(
     tracks: &[MatroskaTrack],
     requested_track_id: Option<&str>,
@@ -501,15 +695,23 @@ struct ClusterBlock {
     track_number: u64,
     relative_timecode: i16,
     keyframe: bool,
+    payload_offset: u64,
+    payload_size: u32,
 }
 
 struct ClusterBlockIter<'a> {
+    base_offset: usize,
     inner: ElementIter<'a>,
 }
 
 impl<'a> ClusterBlockIter<'a> {
     fn new(cluster: &'a [u8]) -> Self {
+        Self::new_with_base(cluster, 0)
+    }
+
+    fn new_with_base(cluster: &'a [u8], base_offset: usize) -> Self {
         Self {
+            base_offset,
             inner: ElementIter::new(cluster),
         }
     }
@@ -522,12 +724,19 @@ impl Iterator for ClusterBlockIter<'_> {
         for element in self.inner.by_ref() {
             match element.id {
                 0xa3 => {
-                    if let Some(block) = parse_block(element.payload, None) {
+                    if let Some(block) = parse_block(
+                        element.payload,
+                        self.base_offset + element.payload_offset,
+                        None,
+                    ) {
                         return Some(block);
                     }
                 }
                 0xa0 => {
-                    if let Some(block) = parse_block_group(element.payload) {
+                    if let Some(block) = parse_block_group(
+                        element.payload,
+                        self.base_offset + element.payload_offset,
+                    ) {
                         return Some(block);
                     }
                 }
@@ -538,12 +747,75 @@ impl Iterator for ClusterBlockIter<'_> {
     }
 }
 
-fn parse_block_group(payload: &[u8]) -> Option<ClusterBlock> {
+fn parse_track_packets(
+    segment: &[u8],
+    track_number: u64,
+    timecode_scale: u64,
+) -> Option<Vec<PacketRef>> {
+    let mut packets: Vec<PacketRef> = Vec::new();
+    let mut last_pts = None;
+
+    for cluster in ElementIter::new(segment).filter(|element| element.id == 0x1f43_b675) {
+        let cluster_timecode = parse_cluster_timecode(cluster.payload).unwrap_or(0);
+        for block in ClusterBlockIter::new_with_base(cluster.payload, cluster.payload_offset) {
+            if block.track_number != track_number {
+                continue;
+            }
+            let timestamp_ms = matroska_timecode_to_ms(
+                cluster_timecode.saturating_add_signed(i64::from(block.relative_timecode)),
+                timecode_scale,
+            );
+            if let Some(prev) = last_pts {
+                if let Some(previous) = packets.last_mut() {
+                    previous.duration = TimeDelta::millis(timestamp_ms.saturating_sub(prev));
+                }
+            }
+            packets.push(PacketRef {
+                source_offset: block.payload_offset,
+                size: block.payload_size,
+                pts: TimePoint::millis(timestamp_ms),
+                dts: TimePoint::millis(timestamp_ms),
+                duration: TimeDelta::millis(0),
+                keyframe: block.keyframe,
+            });
+            last_pts = Some(timestamp_ms);
+        }
+    }
+
+    if packets.is_empty() {
+        return None;
+    }
+
+    let last_duration =
+        infer_last_packet_duration(&packets).unwrap_or_else(|| TimeDelta::millis(0));
+    if let Some(last) = packets.last_mut() {
+        last.duration = last_duration;
+    }
+    Some(packets)
+}
+
+fn infer_last_packet_duration(packets: &[PacketRef]) -> Option<TimeDelta> {
+    let [.., prev, last] = packets else {
+        return None;
+    };
+    Some(TimeDelta {
+        units: last.pts.units.saturating_sub(prev.pts.units),
+        scale: TimeScale::MILLIS,
+    })
+}
+
+fn parse_block_group(payload: &[u8], base_offset: usize) -> Option<ClusterBlock> {
     let mut block = None;
     let mut has_reference = false;
     for element in ElementIter::new(payload) {
         match element.id {
-            0xa1 => block = parse_block(element.payload, Some(false)),
+            0xa1 => {
+                block = parse_block(
+                    element.payload,
+                    base_offset + element.payload_offset,
+                    Some(false),
+                )
+            }
             0xfb => has_reference = true,
             _ => {}
         }
@@ -554,7 +826,11 @@ fn parse_block_group(payload: &[u8]) -> Option<ClusterBlock> {
     })
 }
 
-fn parse_block(payload: &[u8], forced_keyframe: Option<bool>) -> Option<ClusterBlock> {
+fn parse_block(
+    payload: &[u8],
+    payload_base_offset: usize,
+    forced_keyframe: Option<bool>,
+) -> Option<ClusterBlock> {
     let (track_number, track_len) = read_vint_size(payload)?;
     if payload.len() < track_len + 3 {
         return None;
@@ -566,10 +842,17 @@ fn parse_block(payload: &[u8], forced_keyframe: Option<bool>) -> Option<ClusterB
             .ok()?,
     );
     let flags = payload[timecode_offset + 2];
+    if flags & 0x06 != 0 {
+        return None;
+    }
+    let data_offset = track_len + 3;
+    let payload_size = payload.len().checked_sub(data_offset)?;
     Some(ClusterBlock {
         track_number: track_number as u64,
         relative_timecode,
         keyframe: forced_keyframe.unwrap_or(flags & 0x80 != 0),
+        payload_offset: (payload_base_offset + data_offset) as u64,
+        payload_size: u32::try_from(payload_size).ok()?,
     })
 }
 
@@ -636,6 +919,7 @@ fn read_string(bytes: &[u8]) -> Option<String> {
 struct Element<'a> {
     id: u32,
     payload: &'a [u8],
+    payload_offset: usize,
 }
 
 struct ElementIter<'a> {
@@ -669,6 +953,7 @@ impl<'a> Iterator for ElementIter<'a> {
         Some(Element {
             id,
             payload: &self.bytes[payload_start..payload_end],
+            payload_offset: payload_start,
         })
     }
 }

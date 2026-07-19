@@ -10,7 +10,10 @@ use chroma_engine::container::{
         parse_chunk_plan as parse_mp4_chunk_plan, parse_codec_config as parse_mp4_codec_config,
     },
 };
-use chroma_engine::playback_manifest::{build_mp4_playback_manifest, Mp4ManifestOptions};
+use chroma_engine::playback_manifest::{
+    build_matroska_playback_manifest, build_mp4_playback_manifest, MatroskaManifestOptions,
+    Mp4ManifestOptions,
+};
 use chroma_engine::probe::probe_media_source;
 use chroma_engine::session::{plan_playback, AudioSelection, PlaybackConstraints, PlaybackTarget};
 use clap::{Parser, Subcommand};
@@ -217,17 +220,27 @@ fn main() -> Result<()> {
         } => {
             let source = std::fs::File::open(&file)?;
             let bytes = unsafe { Mmap::map(&source)? };
-            if !looks_like_mp4(&bytes) {
-                bail!("native playback manifest currently supports MP4/MOV");
+            let manifest = if looks_like_mp4(&bytes) {
+                build_mp4_playback_manifest(
+                    &bytes,
+                    &file,
+                    Mp4ManifestOptions {
+                        chunk_target_ms: target_ms,
+                        include_primary_audio: include_audio,
+                    },
+                )
+            } else if looks_like_ebml(&bytes) {
+                build_matroska_playback_manifest(
+                    &bytes,
+                    &file,
+                    MatroskaManifestOptions {
+                        chunk_target_ms: target_ms,
+                        include_primary_audio: include_audio,
+                    },
+                )
+            } else {
+                None
             }
-            let manifest = build_mp4_playback_manifest(
-                &bytes,
-                &file,
-                Mp4ManifestOptions {
-                    chunk_target_ms: target_ms,
-                    include_primary_audio: include_audio,
-                },
-            )
             .ok_or_else(|| anyhow::anyhow!("could not build native playback manifest"))?;
             println!("{}", serde_json::to_string_pretty(&manifest)?);
         }
@@ -240,11 +253,18 @@ fn main() -> Result<()> {
         } => {
             let source = std::fs::File::open(&input)?;
             let bytes = unsafe { Mmap::map(&source)? };
-            if !looks_like_mp4(&bytes) {
-                bail!("native chunk extraction currently supports MP4/MOV packet tables");
-            }
-            let (manifest, payload) =
-                extract_mp4_chunk(&bytes, track.as_deref(), target_ms, chunk_index)?;
+            let (manifest, payload) = if looks_like_mp4(&bytes) {
+                extract_mp4_chunk(&bytes, track.as_deref(), target_ms, chunk_index)?
+            } else if looks_like_ebml(&bytes) {
+                chroma_engine::container::matroska::extract_chunk(
+                    &bytes,
+                    track.as_deref(),
+                    target_ms,
+                    chunk_index,
+                )?
+            } else {
+                bail!("native chunk extraction currently supports MP4/MOV and Matroska/WebM packet tables");
+            };
             std::fs::write(output, payload)?;
             println!("{}", serde_json::to_string_pretty(&manifest)?);
         }
@@ -258,17 +278,27 @@ fn main() -> Result<()> {
         } => {
             let source = std::fs::File::open(&input)?;
             let bytes = unsafe { Mmap::map(&source)? };
-            if !looks_like_mp4(&bytes) {
-                bail!("native chunk window extraction currently supports MP4/MOV packet tables");
-            }
-            let written = extract_mp4_window(
-                &bytes,
-                &output_dir,
-                track.as_deref(),
-                start_chunk,
-                chunk_count,
-                target_ms,
-            )?;
+            let written = if looks_like_mp4(&bytes) {
+                extract_mp4_window(
+                    &bytes,
+                    &output_dir,
+                    track.as_deref(),
+                    start_chunk,
+                    chunk_count,
+                    target_ms,
+                )?
+            } else if looks_like_ebml(&bytes) {
+                extract_matroska_window(
+                    &bytes,
+                    &output_dir,
+                    track.as_deref(),
+                    start_chunk,
+                    chunk_count,
+                    target_ms,
+                )?
+            } else {
+                bail!("native chunk window extraction currently supports MP4/MOV and Matroska/WebM packet tables");
+            };
             println!("{}", serde_json::to_string_pretty(&written)?);
         }
         Command::H264Nalus {
@@ -463,6 +493,45 @@ fn extract_mp4_window(
                 Ok(chunk) => chunk,
                 Err(_) => break,
             };
+        let safe_track = safe_cache_component(&manifest.track_id);
+        let payload_path = output_dir.join(format!("{safe_track}-{chunk_index}.bin"));
+        let metadata_path = output_dir.join(format!("{safe_track}-{chunk_index}.json"));
+        write_atomic(&payload_path, &payload)?;
+        write_atomic(&metadata_path, serde_json::to_string(&manifest)?.as_bytes())?;
+        chunks.push(ExtractedWindowChunk {
+            track_id: manifest.track_id,
+            chunk_index,
+            metadata_path,
+            payload_path,
+            byte_count: payload.len() as u64,
+        });
+    }
+    Ok(ExtractedWindow {
+        track_id: requested_track_id.map(str::to_string),
+        start_chunk,
+        requested_chunk_count: chunk_count,
+        chunks,
+    })
+}
+
+fn extract_matroska_window(
+    bytes: &[u8],
+    output_dir: &Path,
+    requested_track_id: Option<&str>,
+    start_chunk: u32,
+    chunk_count: u32,
+    target_ms: u64,
+) -> Result<ExtractedWindow> {
+    std::fs::create_dir_all(output_dir)?;
+    let mut chunks = Vec::new();
+    for (manifest, payload) in chroma_engine::container::matroska::extract_window(
+        bytes,
+        requested_track_id,
+        target_ms,
+        start_chunk,
+        chunk_count,
+    )? {
+        let chunk_index = manifest.chunk.index;
         let safe_track = safe_cache_component(&manifest.track_id);
         let payload_path = output_dir.join(format!("{safe_track}-{chunk_index}.bin"));
         let metadata_path = output_dir.join(format!("{safe_track}-{chunk_index}.json"));
