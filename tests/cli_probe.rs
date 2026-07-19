@@ -64,6 +64,40 @@ fn probe_cli_reports_mkv_streams() {
     assert_eq!(json["tracks"][2]["subtitle"]["format"], "text");
 }
 
+#[test]
+fn plan_cli_reports_browser_decode_for_mkv_hevc_truehd() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("sample.mkv");
+    std::fs::write(&file, minimal_browser_unfriendly_mkv()).unwrap();
+
+    let output = Command::cargo_bin("chroma-engine")
+        .unwrap()
+        .arg("plan")
+        .arg(&file)
+        .arg("--target")
+        .arg("browser")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(json["constraints"]["target"], "browser");
+    assert_eq!(json["selectedTracks"], serde_json::json!(["v0", "a0"]));
+    assert_eq!(json["stages"][0]["kind"], "demux");
+    assert!(json["stages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|stage| stage["id"] == "decode0"));
+    assert!(json["transports"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|transport| transport["kind"] == "hlsFmp4"));
+}
+
 fn minimal_mp4() -> Vec<u8> {
     let mut out = atom(
         b"ftyp",
@@ -213,6 +247,48 @@ fn minimal_mkv() -> Vec<u8> {
     );
     let subtitle = mkv_track(3, 0x11, "S_TEXT/UTF8", &[]);
     let tracks = ebml_elem(0x1654_ae6b, &[video, audio, subtitle].concat());
+    let segment = ebml_elem(0x1853_8067, &[info, tracks].concat());
+    let mut bytes = ebml_elem(0x1a45_dfa3, &[]);
+    bytes.extend_from_slice(&segment);
+    bytes
+}
+
+fn minimal_browser_unfriendly_mkv() -> Vec<u8> {
+    let info = ebml_elem(
+        0x1549_a966,
+        &[
+            ebml_elem(0x002a_d7b1, &1_000_000_u64.to_be_bytes()[5..]),
+            ebml_elem(0x4489, &12_500_f64.to_be_bytes()),
+        ]
+        .concat(),
+    );
+    let video = mkv_track(
+        1,
+        1,
+        "V_MPEGH/ISO/HEVC",
+        &[ebml_elem(
+            0xe0,
+            &[
+                ebml_elem(0xb0, &[0x0f, 0x00]),
+                ebml_elem(0xba, &[0x08, 0x70]),
+            ]
+            .concat(),
+        )],
+    );
+    let audio = mkv_track(
+        2,
+        2,
+        "A_TRUEHD",
+        &[ebml_elem(
+            0xe1,
+            &[
+                ebml_elem(0x9f, &[0x08]),
+                ebml_elem(0xb5, &48_000_f64.to_be_bytes()),
+            ]
+            .concat(),
+        )],
+    );
+    let tracks = ebml_elem(0x1654_ae6b, &[video, audio].concat());
     let segment = ebml_elem(0x1853_8067, &[info, tracks].concat());
     let mut bytes = ebml_elem(0x1a45_dfa3, &[]);
     bytes.extend_from_slice(&segment);

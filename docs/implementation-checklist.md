@@ -5,6 +5,7 @@
 - [x] Create Rust repo and library/CLI skeleton.
 - [x] Define native `MediaProbe` JSON with typed tracks, source facts, and capability hints.
 - [x] Define command surface: `probe`, `hls`, `remux-mp4`, `encoder-probe`, `warmup`.
+- [x] Define native playback `plan` command with target-specific pipeline stages.
 - [ ] Add real-library probe fixtures from `/Volumes/Movies` and `/Volumes/TVShows`.
 - [ ] Add Chroma-native snapshot tests for representative MP4/MKV/HDR/audio/subtitle combinations.
 
@@ -38,6 +39,8 @@
 ## fMP4 HLS
 
 - [ ] Define Chroma-native playback session manifest.
+- [x] Add initial Chroma-native playback plan: selected tracks, shared demux, copy/decode/encode, mux, transport adapters.
+- [x] Default playback planning selects primary video/audio and excludes target-unusable bitmap subtitles for browser/Apple targets.
 - [ ] Emit HLS compatibility artifacts only as one transport adapter, not as the core engine model.
 - [ ] Emit stream chunks through reusable packet/decode/encode stages.
 - [ ] H.264/AAC stream-copy HLS.
