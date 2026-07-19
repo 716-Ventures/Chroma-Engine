@@ -172,12 +172,18 @@ mod tests {
 
     #[test]
     fn classifies_subtitles() {
-        assert_eq!(classify_text_subtitle_codec("ass"), SourceSubtitleKind::Text);
+        assert_eq!(
+            classify_text_subtitle_codec("ass"),
+            SourceSubtitleKind::Text
+        );
         assert_eq!(
             classify_text_subtitle_codec("hdmv_pgs_subtitle"),
             SourceSubtitleKind::Bitmap
         );
-        assert_eq!(classify_text_subtitle_codec("weird"), SourceSubtitleKind::Unknown);
+        assert_eq!(
+            classify_text_subtitle_codec("weird"),
+            SourceSubtitleKind::Unknown
+        );
     }
 
     #[test]

@@ -38,7 +38,10 @@ pub enum VideoCodec {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum AudioOp {
-    Copy { source_index: u32, codec: String },
+    Copy {
+        source_index: u32,
+        codec: String,
+    },
     Transcode {
         source_index: u32,
         codec: AudioCodec,

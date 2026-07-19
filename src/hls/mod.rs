@@ -23,7 +23,10 @@ pub fn run_hls_session(
     bail!("hls fMP4 writer not implemented yet")
 }
 
-pub fn render_master_playlist(variants: &[HlsVariant], subtitles: &[HlsSubtitleRendition]) -> String {
+pub fn render_master_playlist(
+    variants: &[HlsVariant],
+    subtitles: &[HlsSubtitleRendition],
+) -> String {
     let mut out = String::from("#EXTM3U\n#EXT-X-VERSION:7\n");
     for sub in subtitles {
         out.push_str(&format!(

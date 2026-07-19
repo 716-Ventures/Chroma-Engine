@@ -15,18 +15,13 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Emit GenusServer-compatible source probe JSON.
-    Probe {
-        file: PathBuf,
-    },
+    Probe { file: PathBuf },
     /// Emit platform encoder capabilities.
     EncoderProbe,
     /// Warm the selected encoder backend.
     Warmup,
     /// Remux a source into faststart MP4.
-    RemuxMp4 {
-        input: PathBuf,
-        output: PathBuf,
-    },
+    RemuxMp4 { input: PathBuf, output: PathBuf },
     /// Run a live fMP4 HLS session.
     Hls {
         input: PathBuf,
@@ -68,7 +63,12 @@ fn main() -> Result<()> {
             anchor_seconds,
             segment_seconds,
         } => {
-            chroma_engine::hls::run_hls_session(&input, &work_dir, anchor_seconds, segment_seconds)?;
+            chroma_engine::hls::run_hls_session(
+                &input,
+                &work_dir,
+                anchor_seconds,
+                segment_seconds,
+            )?;
             println!("{}", serde_json::json!({ "ok": true }));
         }
     }

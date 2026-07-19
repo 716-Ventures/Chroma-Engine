@@ -73,7 +73,10 @@ fn default_cpu_profile() -> EncoderProfile {
 
 fn native_candidate_names() -> Vec<String> {
     match std::env::consts::OS {
-        "macos" => vec!["videotoolbox:h264".to_string(), "videotoolbox:hevc".to_string()],
+        "macos" => vec![
+            "videotoolbox:h264".to_string(),
+            "videotoolbox:hevc".to_string(),
+        ],
         "windows" => vec![
             "nvenc:h264".to_string(),
             "nvenc:hevc".to_string(),
