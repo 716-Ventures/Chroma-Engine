@@ -1,8 +1,9 @@
 use crate::{
     container::ContainerKind,
     packet::{
-        extract_packet_payload, plan_track_chunks, ChunkPlan, ExtractedChunk, NativeChunk,
-        PacketExtractError, PacketRange, PacketRef, TimeDelta, TimePoint, TimeScale,
+        extract_packet_payload, packet_samples_for_range, plan_track_chunks, ChunkPlan,
+        ExtractedChunk, NativeChunk, PacketExtractError, PacketRange, PacketRef, TimeDelta,
+        TimePoint, TimeScale,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -221,6 +222,7 @@ pub fn extract_chunk(
         .find(|chunk| chunk.index == chunk_index)
         .ok_or(Mp4ChunkExtractError::NoChunk)?;
     let payload = extract_packet_payload(bytes, &track.packets, chunk.packet_range)?;
+    let samples = packet_samples_for_range(&track.packets, chunk.packet_range)?;
     let packet_count = chunk
         .packet_range
         .end
@@ -230,6 +232,7 @@ pub fn extract_chunk(
         chunk,
         packet_count,
         byte_count: payload.len() as u64,
+        samples,
     };
     Ok((manifest, payload))
 }
@@ -1360,6 +1363,11 @@ mod tests {
         assert_eq!(manifest.track_id, "v0");
         assert_eq!(manifest.packet_count, 2);
         assert_eq!(manifest.byte_count, 7);
+        assert_eq!(manifest.samples.len(), 2);
+        assert_eq!(manifest.samples[0].payload_offset, 0);
+        assert_eq!(manifest.samples[0].byte_count, 4);
+        assert_eq!(manifest.samples[1].payload_offset, 4);
+        assert_eq!(manifest.samples[1].byte_count, 3);
         assert_eq!(payload, b"aaaabbb");
     }
 

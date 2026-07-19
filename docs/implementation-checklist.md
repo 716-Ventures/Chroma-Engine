@@ -48,12 +48,13 @@
 - [x] Add Matroska/WebM Cues-based chunk planning with bounded cluster fallback.
 - [x] Emit native MP4/MOV compressed chunk payloads from packet byte ranges.
 - [x] Extract MP4/MOV decoder initialization facts for compressed tracks.
+- [x] Emit sample-level timing and payload layout for native MP4/MOV chunks.
 - [ ] Emit stream chunks through reusable packet/decode/encode stages.
 - [ ] H.264/AAC native stream-copy chunks.
 - [ ] HEVC native stream-copy chunks.
 - [ ] AC-3/E-AC-3/MP3/FLAC/ALAC native copy paths.
 - [x] Keyframe-aligned chunk planning.
-- [ ] Keyframe-aligned chunk emission.
+- [x] Keyframe-aligned MP4/MOV chunk emission.
 - [ ] Input-side seek anchoring and copy-path coarse seek behavior.
 - [x] WebVTT parsing/rendering foundation.
 - [ ] Single-process WebVTT sidecar generation for all selected text subtitles.

@@ -36,6 +36,19 @@ pub struct ExtractedChunk {
     pub chunk: NativeChunk,
     pub packet_count: u32,
     pub byte_count: u64,
+    pub samples: Vec<ChunkSample>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ChunkSample {
+    pub index: u32,
+    pub payload_offset: u64,
+    pub byte_count: u32,
+    pub pts: TimePoint,
+    pub dts: TimePoint,
+    pub duration: TimeDelta,
+    pub keyframe: bool,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -216,6 +229,36 @@ pub fn extract_packet_payload(
     Ok(out)
 }
 
+pub fn packet_samples_for_range(
+    packets: &[PacketRef],
+    range: PacketRange,
+) -> Result<Vec<ChunkSample>, PacketExtractError> {
+    if range.start > range.end {
+        return Err(PacketExtractError::InvalidRange);
+    }
+    let start = range.start as usize;
+    let end = range.end as usize;
+    if end > packets.len() {
+        return Err(PacketExtractError::RangeOutOfBounds);
+    }
+
+    let mut payload_offset = 0_u64;
+    let mut samples = Vec::with_capacity(end.saturating_sub(start));
+    for (relative_idx, packet) in packets[start..end].iter().enumerate() {
+        samples.push(ChunkSample {
+            index: range.start + relative_idx as u32,
+            payload_offset,
+            byte_count: packet.size,
+            pts: packet.pts,
+            dts: packet.dts,
+            duration: packet.duration,
+            keyframe: packet.keyframe,
+        });
+        payload_offset = payload_offset.saturating_add(u64::from(packet.size));
+    }
+    Ok(samples)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -253,6 +296,19 @@ mod tests {
         let payload =
             extract_packet_payload(source, &packets, PacketRange { start: 0, end: 2 }).unwrap();
         assert_eq!(payload, b"112255");
+    }
+
+    #[test]
+    fn builds_packet_samples_for_range() {
+        let packets = vec![packet_at(2, 4), packet_at(10, 2), packet_at(16, 4)];
+        let samples = packet_samples_for_range(&packets, PacketRange { start: 1, end: 3 }).unwrap();
+        assert_eq!(samples.len(), 2);
+        assert_eq!(samples[0].index, 1);
+        assert_eq!(samples[0].payload_offset, 0);
+        assert_eq!(samples[0].byte_count, 2);
+        assert_eq!(samples[1].index, 2);
+        assert_eq!(samples[1].payload_offset, 2);
+        assert_eq!(samples[1].byte_count, 4);
     }
 
     fn packet(start_ms: u64, keyframe: bool) -> PacketRef {
