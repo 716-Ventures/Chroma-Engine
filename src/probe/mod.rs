@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::container::{mp4, sniff_container, ContainerKind};
+use crate::container::{matroska, mp4, sniff_container, ContainerKind};
 
 #[derive(Debug, Error)]
 pub enum ProbeError {
@@ -122,24 +122,162 @@ pub fn probe_media_source(path: &Path) -> Result<SourceProbe, ProbeError> {
         .map_err(|err| ProbeError::ReadFailed(err.to_string()))?;
 
     let container = sniff_container(&head[..n]);
-    let duration_ms = if matches!(container, ContainerKind::Mp4 | ContainerKind::Mov) {
+    let mut duration_ms = None;
+    let mut video_streams = Vec::new();
+    let mut audio_streams = Vec::new();
+    let mut subtitle_streams = Vec::new();
+    let mut attachment_count = 0;
+
+    if matches!(container, ContainerKind::Mp4 | ContainerKind::Mov) {
         let bytes = std::fs::read(path).map_err(|err| ProbeError::ReadFailed(err.to_string()))?;
-        mp4::parse_basic_metadata(&bytes).duration_ms
-    } else {
-        None
-    };
+        let meta = mp4::parse_basic_metadata(&bytes);
+        duration_ms = meta.duration_ms;
+        (video_streams, audio_streams, subtitle_streams) = source_streams_from_mp4(&meta);
+    } else if matches!(container, ContainerKind::Matroska | ContainerKind::Webm) {
+        let bytes = std::fs::read(path).map_err(|err| ProbeError::ReadFailed(err.to_string()))?;
+        let meta = matroska::parse_basic_metadata(&bytes);
+        duration_ms = meta.duration_ms;
+        attachment_count = meta.attachment_count;
+        (video_streams, audio_streams, subtitle_streams) = source_streams_from_matroska(&meta);
+    }
 
     Ok(SourceProbe {
         file_path: path.to_path_buf(),
         duration_ms,
         container: container.public_name().to_string(),
         container_direct_play: container.direct_play(),
-        video_streams: Vec::new(),
-        audio_streams: Vec::new(),
-        subtitle_streams: Vec::new(),
+        video_streams,
+        audio_streams,
+        subtitle_streams,
         chapters: Vec::new(),
-        attachment_count: 0,
+        attachment_count,
     })
+}
+
+fn source_streams_from_mp4(
+    meta: &mp4::Mp4BasicMetadata,
+) -> (
+    Vec<SourceVideoStream>,
+    Vec<SourceAudioStream>,
+    Vec<SourceSubtitleStream>,
+) {
+    let mut videos = Vec::new();
+    let mut audios = Vec::new();
+    let mut subtitles = Vec::new();
+
+    for track in &meta.tracks {
+        match track.kind {
+            mp4::Mp4TrackKind::Video => videos.push(SourceVideoStream {
+                index: track.index,
+                codec: track.codec.clone(),
+                width: track.width,
+                height: track.height,
+                frame_rate: None,
+                profile: None,
+                bitrate: None,
+                pixel_format: None,
+                high_bit_depth: false,
+                color_primaries: None,
+                color_transfer: None,
+                color_space: None,
+                color_range: None,
+                dynamic_range: SourceVideoDynamicRange::Unknown,
+                dolby_vision: false,
+                hdr10_plus: false,
+                duration_ms: track.duration_ms,
+            }),
+            mp4::Mp4TrackKind::Audio => audios.push(SourceAudioStream {
+                index: track.index,
+                codec: normalize_audio_codec(&track.codec),
+                profile: None,
+                channels: track.channels.unwrap_or(2),
+                bitrate: None,
+                language: None,
+                title: None,
+                default: false,
+                forced: false,
+                atmos: false,
+                atmos_joc: false,
+            }),
+            mp4::Mp4TrackKind::Subtitle => subtitles.push(SourceSubtitleStream {
+                index: track.index,
+                codec: track.codec.clone(),
+                kind: classify_text_subtitle_codec(&track.codec),
+                language: None,
+                title: None,
+                default: false,
+                forced: false,
+            }),
+            mp4::Mp4TrackKind::Unknown => {}
+        }
+    }
+
+    (videos, audios, subtitles)
+}
+
+fn source_streams_from_matroska(
+    meta: &matroska::MatroskaBasicMetadata,
+) -> (
+    Vec<SourceVideoStream>,
+    Vec<SourceAudioStream>,
+    Vec<SourceSubtitleStream>,
+) {
+    let mut videos = Vec::new();
+    let mut audios = Vec::new();
+    let mut subtitles = Vec::new();
+
+    for track in &meta.tracks {
+        match track.kind {
+            matroska::MatroskaTrackKind::Video => videos.push(SourceVideoStream {
+                index: track.index,
+                codec: track.codec.clone(),
+                width: track.width,
+                height: track.height,
+                frame_rate: None,
+                profile: None,
+                bitrate: None,
+                pixel_format: None,
+                high_bit_depth: false,
+                color_primaries: None,
+                color_transfer: None,
+                color_space: None,
+                color_range: None,
+                dynamic_range: SourceVideoDynamicRange::Unknown,
+                dolby_vision: false,
+                hdr10_plus: false,
+                duration_ms: meta.duration_ms,
+            }),
+            matroska::MatroskaTrackKind::Audio => audios.push(SourceAudioStream {
+                index: track.index,
+                codec: normalize_audio_codec(&track.codec),
+                profile: None,
+                channels: track.channels.unwrap_or(2),
+                bitrate: None,
+                language: track.language.clone(),
+                title: track.name.clone(),
+                default: track.default,
+                forced: track.forced,
+                atmos: track.codec == "eac3"
+                    && track
+                        .name
+                        .as_deref()
+                        .is_some_and(|name| name.to_ascii_lowercase().contains("atmos")),
+                atmos_joc: false,
+            }),
+            matroska::MatroskaTrackKind::Subtitle => subtitles.push(SourceSubtitleStream {
+                index: track.index,
+                codec: track.codec.clone(),
+                kind: classify_text_subtitle_codec(&track.codec),
+                language: track.language.clone(),
+                title: track.name.clone(),
+                default: track.default,
+                forced: track.forced,
+            }),
+            matroska::MatroskaTrackKind::Unknown => {}
+        }
+    }
+
+    (videos, audios, subtitles)
 }
 
 pub fn classify_text_subtitle_codec(codec: &str) -> SourceSubtitleKind {
