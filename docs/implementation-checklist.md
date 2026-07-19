@@ -4,7 +4,7 @@
 
 - [x] Create Rust repo and library/CLI skeleton.
 - [x] Define native `MediaProbe` JSON with typed tracks, source facts, and capability hints.
-- [x] Define command surface: `probe`, `plan`, `manifest`, `chunks`, `codec-config`, `extract-chunk`, `remux-mp4`, `encoder-probe`, `warmup`.
+- [x] Define command surface: `probe`, `plan`, `manifest`, `chunks`, `codec-config`, `h264-nalus`, `extract-chunk`, `remux-mp4`, `encoder-probe`, `warmup`.
 - [x] Define native playback `plan` command with target-specific pipeline stages.
 - [ ] Add real-library probe fixtures from `/Volumes/Movies` and `/Volumes/TVShows`.
 - [ ] Add Chroma-native snapshot tests for representative MP4/MKV/HDR/audio/subtitle combinations.
@@ -49,6 +49,7 @@
 - [x] Emit native MP4/MOV compressed chunk payloads from packet byte ranges.
 - [x] Extract MP4/MOV decoder initialization facts for compressed tracks.
 - [x] Emit sample-level timing and payload layout for native MP4/MOV chunks.
+- [x] Parse AVC/H.264 NAL-unit layout from native MP4/MOV chunks.
 - [ ] Emit stream chunks through reusable packet/decode/encode stages.
 - [ ] H.264/AAC native stream-copy chunks.
 - [ ] HEVC native stream-copy chunks.

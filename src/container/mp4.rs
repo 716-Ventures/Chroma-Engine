@@ -51,6 +51,7 @@ pub struct Mp4CodecConfig {
     pub sample_entry: String,
     pub config_box: Option<String>,
     pub codec_string: Option<String>,
+    pub nalu_length_size: Option<u8>,
     pub description_hex: Option<String>,
 }
 
@@ -461,6 +462,7 @@ fn parse_trak_codec_config(
         codec_string: config
             .as_ref()
             .and_then(|config| config.codec_string.clone()),
+        nalu_length_size: config.as_ref().and_then(|config| config.nalu_length_size),
         description_hex: config.map(|config| hex_string(config.description)),
     })
 }
@@ -827,6 +829,7 @@ fn parse_stsd_entry(payload: &[u8]) -> Option<SampleEntry<'_>> {
 struct SampleEntryCodecConfig {
     box_type: [u8; 4],
     codec_string: Option<String>,
+    nalu_length_size: Option<u8>,
     description: Vec<u8>,
 }
 
@@ -841,6 +844,7 @@ fn codec_config_from_sample_entry(
                 return Some(SampleEntryCodecConfig {
                     box_type: atom.kind,
                     codec_string: avc_codec_string(atom.payload),
+                    nalu_length_size: avc_nalu_length_size(atom.payload),
                     description: atom.payload.to_vec(),
                 });
             }
@@ -848,6 +852,7 @@ fn codec_config_from_sample_entry(
                 return Some(SampleEntryCodecConfig {
                     box_type: atom.kind,
                     codec_string: hevc_codec_string(atom.payload, &entry.codec_fourcc),
+                    nalu_length_size: hevc_nalu_length_size(atom.payload),
                     description: atom.payload.to_vec(),
                 });
             }
@@ -858,6 +863,7 @@ fn codec_config_from_sample_entry(
                     codec_string: asc
                         .as_ref()
                         .map(|config| format!("mp4a.40.{}", config.audio_object_type)),
+                    nalu_length_size: None,
                     description: asc.map_or_else(|| atom.payload.to_vec(), |config| config.bytes),
                 });
             }
@@ -894,6 +900,10 @@ fn avc_codec_string(payload: &[u8]) -> Option<String> {
     ))
 }
 
+fn avc_nalu_length_size(payload: &[u8]) -> Option<u8> {
+    payload.get(4).map(|byte| (byte & 0x03) + 1)
+}
+
 fn hevc_codec_string(payload: &[u8], sample_entry: &[u8; 4]) -> Option<String> {
     if payload.len() < 13 {
         return None;
@@ -918,6 +928,10 @@ fn hevc_codec_string(payload: &[u8], sample_entry: &[u8; 4]) -> Option<String> {
         "{prefix}.{space}{profile_idc}.{:X}.{tier}{level}",
         compatibility.reverse_bits()
     ))
+}
+
+fn hevc_nalu_length_size(payload: &[u8]) -> Option<u8> {
+    payload.get(21).map(|byte| (byte & 0x03) + 1)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1393,6 +1407,7 @@ mod tests {
         assert_eq!(config.sample_entry, "avc1");
         assert_eq!(config.config_box.as_deref(), Some("avcC"));
         assert_eq!(config.codec_string.as_deref(), Some("avc1.64001F"));
+        assert_eq!(config.nalu_length_size, Some(4));
         assert_eq!(config.description_hex.as_deref(), Some("0164001fffe10000"));
     }
 
@@ -1427,6 +1442,7 @@ mod tests {
         assert_eq!(config.sample_entry, "mp4a");
         assert_eq!(config.config_box.as_deref(), Some("esds"));
         assert_eq!(config.codec_string.as_deref(), Some("mp4a.40.2"));
+        assert_eq!(config.nalu_length_size, None);
         assert_eq!(config.description_hex.as_deref(), Some("1210"));
     }
 
