@@ -26,6 +26,7 @@ pub struct MatroskaTrack {
     pub height: Option<u32>,
     pub channels: Option<u32>,
     pub sample_rate: Option<u32>,
+    pub default_duration_ns: Option<u64>,
     pub codec_private: Option<Vec<u8>>,
 }
 
@@ -136,18 +137,12 @@ pub fn extract_window(
 
             let collect = current_index >= start_chunk && current_index < end_chunk;
             if collect {
-                if let Some(previous) = packets.last_mut() {
-                    previous.duration =
-                        TimeDelta::millis(timestamp_ms.saturating_sub(previous.pts.as_millis()));
-                }
-                packets.push(PacketRef {
-                    source_offset: block.payload_offset,
-                    size: block.payload_size,
-                    pts: TimePoint::millis(timestamp_ms),
-                    dts: TimePoint::millis(timestamp_ms),
-                    duration: TimeDelta::millis(0),
-                    keyframe: block.keyframe,
-                });
+                push_block_packets(
+                    &mut packets,
+                    &block,
+                    timestamp_ms,
+                    selected.frame_duration_ms,
+                );
             }
             last_seen_ms = timestamp_ms;
             absolute_packet_index = absolute_packet_index.saturating_add(1);
@@ -522,6 +517,7 @@ fn parse_track_entry(payload: &[u8], index: u32) -> Option<MatroskaTrack> {
     let mut height = None;
     let mut channels = None;
     let mut sample_rate = None;
+    let mut default_duration_ns = None;
     let mut codec_private = None;
 
     for child in ElementIter::new(payload) {
@@ -534,6 +530,7 @@ fn parse_track_entry(payload: &[u8], index: u32) -> Option<MatroskaTrack> {
             0x536e => name = read_string(child.payload),
             0x88 => default = read_uint(child.payload).unwrap_or(0) != 0,
             0x55aa => forced = read_uint(child.payload).unwrap_or(0) != 0,
+            0x23e3_83 => default_duration_ns = read_uint(child.payload),
             0xe0 => {
                 let (w, h) = parse_video(child.payload);
                 width = w;
@@ -562,6 +559,7 @@ fn parse_track_entry(payload: &[u8], index: u32) -> Option<MatroskaTrack> {
         height,
         channels,
         sample_rate,
+        default_duration_ns,
         codec_private,
     })
 }
@@ -639,6 +637,7 @@ fn normalize_codec_id(id: &str) -> String {
 struct SelectedChunkTrack {
     id: String,
     number: u64,
+    frame_duration_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -670,6 +669,7 @@ fn select_chunk_track(
             return Some(SelectedChunkTrack {
                 id,
                 number: track.number,
+                frame_duration_ms: track_frame_duration_ms(track),
             });
         }
     }
@@ -683,6 +683,25 @@ fn next_track_id(prefix: &str, counter: &mut u32) -> String {
     id
 }
 
+fn track_frame_duration_ms(track: &MatroskaTrack) -> Option<u64> {
+    if let Some(ns) = track.default_duration_ns {
+        let ms = (ns.saturating_add(500_000)) / 1_000_000;
+        if ms > 0 {
+            return Some(ms);
+        }
+    }
+    if track.kind == MatroskaTrackKind::Audio && track.codec == "aac" {
+        let sample_rate = u64::from(track.sample_rate?);
+        return Some(
+            1024_u64
+                .saturating_mul(1000)
+                .saturating_add(sample_rate / 2)
+                / sample_rate,
+        );
+    }
+    None
+}
+
 fn matroska_timecode_to_ms(timecode: i64, scale_ns: u64) -> u64 {
     if timecode <= 0 {
         return 0;
@@ -690,11 +709,16 @@ fn matroska_timecode_to_ms(timecode: i64, scale_ns: u64) -> u64 {
     (timecode as u64).saturating_mul(scale_ns) / 1_000_000
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct ClusterBlock {
     track_number: u64,
     relative_timecode: i16,
     keyframe: bool,
+    frames: Vec<BlockFrame>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BlockFrame {
     payload_offset: u64,
     payload_size: u32,
 }
@@ -770,14 +794,7 @@ fn parse_track_packets(
                     previous.duration = TimeDelta::millis(timestamp_ms.saturating_sub(prev));
                 }
             }
-            packets.push(PacketRef {
-                source_offset: block.payload_offset,
-                size: block.payload_size,
-                pts: TimePoint::millis(timestamp_ms),
-                dts: TimePoint::millis(timestamp_ms),
-                duration: TimeDelta::millis(0),
-                keyframe: block.keyframe,
-            });
+            push_block_packets(&mut packets, &block, timestamp_ms, None);
             last_pts = Some(timestamp_ms);
         }
     }
@@ -802,6 +819,29 @@ fn infer_last_packet_duration(packets: &[PacketRef]) -> Option<TimeDelta> {
         units: last.pts.units.saturating_sub(prev.pts.units),
         scale: TimeScale::MILLIS,
     })
+}
+
+fn push_block_packets(
+    packets: &mut Vec<PacketRef>,
+    block: &ClusterBlock,
+    timestamp_ms: u64,
+    frame_duration_ms: Option<u64>,
+) {
+    let frame_duration_ms = frame_duration_ms.unwrap_or(0);
+    for (idx, frame) in block.frames.iter().enumerate() {
+        let pts = timestamp_ms.saturating_add(frame_duration_ms.saturating_mul(idx as u64));
+        if let Some(previous) = packets.last_mut() {
+            previous.duration = TimeDelta::millis(pts.saturating_sub(previous.pts.as_millis()));
+        }
+        packets.push(PacketRef {
+            source_offset: frame.payload_offset,
+            size: frame.payload_size,
+            pts: TimePoint::millis(pts),
+            dts: TimePoint::millis(pts),
+            duration: TimeDelta::millis(frame_duration_ms),
+            keyframe: block.keyframe,
+        });
+    }
 }
 
 fn parse_block_group(payload: &[u8], base_offset: usize) -> Option<ClusterBlock> {
@@ -842,18 +882,128 @@ fn parse_block(
             .ok()?,
     );
     let flags = payload[timecode_offset + 2];
-    if flags & 0x06 != 0 {
-        return None;
-    }
     let data_offset = track_len + 3;
-    let payload_size = payload.len().checked_sub(data_offset)?;
+    let frames = parse_block_frames(payload, payload_base_offset, data_offset, flags)?;
     Some(ClusterBlock {
         track_number: track_number as u64,
         relative_timecode,
         keyframe: forced_keyframe.unwrap_or(flags & 0x80 != 0),
-        payload_offset: (payload_base_offset + data_offset) as u64,
-        payload_size: u32::try_from(payload_size).ok()?,
+        frames,
     })
+}
+
+fn parse_block_frames(
+    payload: &[u8],
+    payload_base_offset: usize,
+    data_offset: usize,
+    flags: u8,
+) -> Option<Vec<BlockFrame>> {
+    let lacing = (flags >> 1) & 0x03;
+    match lacing {
+        0 => {
+            let size = payload.len().checked_sub(data_offset)?;
+            Some(vec![BlockFrame {
+                payload_offset: (payload_base_offset + data_offset) as u64,
+                payload_size: u32::try_from(size).ok()?,
+            }])
+        }
+        1 => parse_xiph_laced_frames(payload, payload_base_offset, data_offset),
+        2 => parse_fixed_laced_frames(payload, payload_base_offset, data_offset),
+        3 => parse_ebml_laced_frames(payload, payload_base_offset, data_offset),
+        _ => None,
+    }
+}
+
+fn parse_xiph_laced_frames(
+    payload: &[u8],
+    payload_base_offset: usize,
+    data_offset: usize,
+) -> Option<Vec<BlockFrame>> {
+    let frame_count = usize::from(*payload.get(data_offset)?) + 1;
+    let mut cursor = data_offset + 1;
+    let mut sizes = Vec::with_capacity(frame_count);
+    let mut known_total = 0_usize;
+    for _ in 0..frame_count.saturating_sub(1) {
+        let mut size = 0_usize;
+        loop {
+            let b = usize::from(*payload.get(cursor)?);
+            cursor += 1;
+            size = size.checked_add(b)?;
+            if b != 255 {
+                break;
+            }
+        }
+        known_total = known_total.checked_add(size)?;
+        sizes.push(size);
+    }
+    let remaining = payload.len().checked_sub(cursor)?;
+    let last = remaining.checked_sub(known_total)?;
+    sizes.push(last);
+    frames_from_sizes(payload_base_offset, cursor, &sizes)
+}
+
+fn parse_fixed_laced_frames(
+    payload: &[u8],
+    payload_base_offset: usize,
+    data_offset: usize,
+) -> Option<Vec<BlockFrame>> {
+    let frame_count = usize::from(*payload.get(data_offset)?) + 1;
+    if frame_count == 0 {
+        return None;
+    }
+    let cursor = data_offset + 1;
+    let remaining = payload.len().checked_sub(cursor)?;
+    if remaining % frame_count != 0 {
+        return None;
+    }
+    let size = remaining / frame_count;
+    frames_from_sizes(payload_base_offset, cursor, &vec![size; frame_count])
+}
+
+fn parse_ebml_laced_frames(
+    payload: &[u8],
+    payload_base_offset: usize,
+    data_offset: usize,
+) -> Option<Vec<BlockFrame>> {
+    let frame_count = usize::from(*payload.get(data_offset)?) + 1;
+    let mut cursor = data_offset + 1;
+    let (first_size, first_len) = read_vint_size(payload.get(cursor..)?)?;
+    cursor += first_len;
+    let mut sizes = Vec::with_capacity(frame_count);
+    sizes.push(first_size);
+    let mut previous = isize::try_from(first_size).ok()?;
+    let mut known_total = first_size;
+    for _ in 1..frame_count.saturating_sub(1) {
+        let (delta, len) = read_signed_vint(payload.get(cursor..)?)?;
+        cursor += len;
+        previous = previous.checked_add(delta)?;
+        if previous < 0 {
+            return None;
+        }
+        let size = usize::try_from(previous).ok()?;
+        known_total = known_total.checked_add(size)?;
+        sizes.push(size);
+    }
+    let remaining = payload.len().checked_sub(cursor)?;
+    let last = remaining.checked_sub(known_total)?;
+    sizes.push(last);
+    frames_from_sizes(payload_base_offset, cursor, &sizes)
+}
+
+fn frames_from_sizes(
+    payload_base_offset: usize,
+    mut cursor: usize,
+    sizes: &[usize],
+) -> Option<Vec<BlockFrame>> {
+    let mut frames = Vec::with_capacity(sizes.len());
+    for size in sizes {
+        frames.push(BlockFrame {
+            payload_offset: (payload_base_offset + cursor) as u64,
+            payload_size: u32::try_from(*size).ok()?,
+        });
+        cursor = cursor.checked_add(*size)?;
+    }
+    Some(frames)
 }
 
 trait SaturatingAddSigned {
@@ -983,6 +1133,14 @@ fn read_vint_size(bytes: &[u8]) -> Option<(usize, usize)> {
         value = (value << 8) | usize::from(*b);
     }
     Some((value, len))
+}
+
+fn read_signed_vint(bytes: &[u8]) -> Option<(isize, usize)> {
+    let (value, len) = read_vint_size(bytes)?;
+    let bits = 7_usize.checked_mul(len)?;
+    let bias = (1_isize.checked_shl((bits - 1) as u32)?).checked_sub(1)?;
+    let signed = isize::try_from(value).ok()?.checked_sub(bias)?;
+    Some((signed, len))
 }
 
 fn vint_len(first: u8) -> Option<usize> {
