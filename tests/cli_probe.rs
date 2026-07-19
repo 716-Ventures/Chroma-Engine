@@ -95,7 +95,7 @@ fn plan_cli_reports_browser_decode_for_mkv_hevc_truehd() {
         .as_array()
         .unwrap()
         .iter()
-        .any(|transport| transport["kind"] == "hlsFmp4"));
+        .any(|transport| transport["kind"] == "chromaSegments"));
 }
 
 fn minimal_mp4() -> Vec<u8> {

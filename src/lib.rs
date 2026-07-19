@@ -1,6 +1,5 @@
 pub mod codec;
 pub mod container;
-pub mod hls;
 pub mod platform;
 pub mod probe;
 pub mod remux;

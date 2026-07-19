@@ -84,7 +84,6 @@ pub struct TransportPlan {
 pub enum TransportKind {
     ChromaFrames,
     ChromaSegments,
-    HlsFmp4,
 }
 
 impl Default for PlaybackConstraints {
@@ -135,6 +134,7 @@ pub fn plan_playback(probe: &MediaProbe, constraints: PlaybackConstraints) -> Pl
         .filter(|track| !track_can_copy_for_target(track, constraints.target))
         .map(|track| track.id.clone())
         .collect::<Vec<_>>();
+    let has_decode = !decode_tracks.is_empty();
     if !decode_tracks.is_empty() {
         stages.push(PipelineStage {
             id: "decode0".to_string(),
@@ -184,7 +184,7 @@ pub fn plan_playback(probe: &MediaProbe, constraints: PlaybackConstraints) -> Pl
         duration_ms: probe.duration_ms,
         selected_tracks: selected_ids,
         stages,
-        transports: transports_for_target(constraints.target),
+        transports: transports_for_plan(has_decode),
         constraints,
     }
 }
@@ -257,22 +257,19 @@ fn target_can_use_track(track: &MediaTrack, target: PlaybackTarget) -> bool {
     }
 }
 
-fn transports_for_target(target: PlaybackTarget) -> Vec<TransportPlan> {
+fn transports_for_plan(has_decode: bool) -> Vec<TransportPlan> {
     let mut out = vec![TransportPlan {
         id: "chroma-segments0".to_string(),
         kind: TransportKind::ChromaSegments,
         source_stage_id: "mux0".to_string(),
-        notes: vec!["primary native transport".to_string()],
+        notes: vec!["compressed timed chunks for copy-first playback".to_string()],
     }];
-    if matches!(
-        target,
-        PlaybackTarget::Browser | PlaybackTarget::AppleNative
-    ) {
+    if has_decode {
         out.push(TransportPlan {
-            id: "hls-fmp4-adapter0".to_string(),
-            kind: TransportKind::HlsFmp4,
-            source_stage_id: "mux0".to_string(),
-            notes: vec!["compatibility adapter generated from native segment model".to_string()],
+            id: "chroma-frames0".to_string(),
+            kind: TransportKind::ChromaFrames,
+            source_stage_id: "decode0".to_string(),
+            notes: vec!["available only when a plan contains decode stages".to_string()],
         });
     }
     out
@@ -392,7 +389,7 @@ mod tests {
         assert!(plan
             .transports
             .iter()
-            .any(|transport| transport.kind == TransportKind::HlsFmp4));
+            .any(|transport| transport.kind == TransportKind::ChromaSegments));
     }
 
     #[test]

@@ -4,7 +4,7 @@
 
 - [x] Create Rust repo and library/CLI skeleton.
 - [x] Define native `MediaProbe` JSON with typed tracks, source facts, and capability hints.
-- [x] Define command surface: `probe`, `hls`, `remux-mp4`, `encoder-probe`, `warmup`.
+- [x] Define command surface: `probe`, `plan`, `remux-mp4`, `encoder-probe`, `warmup`.
 - [x] Define native playback `plan` command with target-specific pipeline stages.
 - [ ] Add real-library probe fixtures from `/Volumes/Movies` and `/Volumes/TVShows`.
 - [ ] Add Chroma-native snapshot tests for representative MP4/MKV/HDR/audio/subtitle combinations.
@@ -36,20 +36,19 @@
 - [ ] Text subtitle to `mov_text`.
 - [ ] Metadata and chapter copy.
 
-## fMP4 HLS
+## Native Playback
 
 - [ ] Define Chroma-native playback session manifest.
 - [x] Add initial Chroma-native playback plan: selected tracks, shared demux, copy/decode/encode, mux, transport adapters.
 - [x] Default playback planning selects primary video/audio and excludes target-unusable bitmap subtitles for browser/Apple targets.
-- [ ] Emit HLS compatibility artifacts only as one transport adapter, not as the core engine model.
+- [x] Remove legacy transport assumptions from the public core command/module surface.
 - [ ] Emit stream chunks through reusable packet/decode/encode stages.
-- [ ] H.264/AAC stream-copy HLS.
-- [ ] HEVC stream-copy HLS.
-- [ ] AC-3/E-AC-3/MP3/FLAC/ALAC copy paths.
+- [ ] H.264/AAC native stream-copy chunks.
+- [ ] HEVC native stream-copy chunks.
+- [ ] AC-3/E-AC-3/MP3/FLAC/ALAC native copy paths.
 - [ ] Keyframe-aligned segmentation.
 - [ ] Input-side seek anchoring and copy-path coarse seek behavior.
-- [ ] Optional program date time tags.
-- [x] WebVTT sidecar parsing/rendering and media playlist generation foundation.
+- [x] WebVTT parsing/rendering foundation.
 - [ ] Single-process WebVTT sidecar generation for all selected text subtitles.
 - [ ] Multi-audio output without duplicating video encode.
 
@@ -67,9 +66,9 @@
 
 ## Integration
 
-- [ ] Replace GenusServer playback/probe contracts with Chroma Engine contracts.
+- [ ] Replace host-server playback/probe contracts with Chroma Engine contracts.
 - [ ] Run Chroma Engine behind an env flag.
 - [ ] Add side-by-side diagnostics for Chroma Engine vs legacy media path during migration.
-- [ ] Switch HLS sessions to Rust engine.
+- [ ] Switch playback sessions to Chroma Engine.
 - [ ] Switch offline MKV remux to Rust engine.
-- [ ] Remove vendored `jellyfin-ffmpeg` once parity passes.
+- [ ] Remove vendored legacy media binaries once Chroma Engine covers the required native paths.

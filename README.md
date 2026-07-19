@@ -2,10 +2,10 @@
 
 Rust media engine for Chroma playback, probing, remuxing, segmentation, and transcoding.
 
-The target is a native media architecture, not an FFmpeg-compatible facade. Chroma Engine owns its API shape, track model, session model, and output strategy; GenusServer and clients should adapt to the engine when that gives us better speed, stability, or flexibility.
+The target is a native media architecture, not an FFmpeg-compatible facade. Chroma Engine owns its API shape, track model, session model, and output strategy; host servers and clients should adapt to the engine when that gives us better speed, stability, or flexibility.
 
 - `probe`: emit a Chroma-native `MediaProbe` manifest with typed tracks, source facts, and capability hints.
-- `hls`: produce Chroma playback sessions optimized around reusable packet/decode/encode stages.
+- `plan`: produce Chroma playback sessions optimized around reusable packet/decode/encode stages.
 - `remux-mp4`: remux supported sources into an efficient ISO-BMFF output path.
 - `encoder-probe`: report platform encoder capabilities.
 - `warmup`: initialize selected hardware/software backends before the first playback session.

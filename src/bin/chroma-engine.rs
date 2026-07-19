@@ -7,7 +7,7 @@ use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
 #[command(name = "chroma-engine")]
-#[command(about = "Narrow Rust media engine for ChromaServer")]
+#[command(about = "Native Rust media engine for Chroma playback")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -33,15 +33,6 @@ enum Command {
     Warmup,
     /// Remux a source into faststart MP4.
     RemuxMp4 { input: PathBuf, output: PathBuf },
-    /// Run a live fMP4 HLS session.
-    Hls {
-        input: PathBuf,
-        work_dir: PathBuf,
-        #[arg(long, default_value_t = 0.0)]
-        anchor_seconds: f64,
-        #[arg(long, default_value_t = 6.0)]
-        segment_seconds: f64,
-    },
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -95,20 +86,6 @@ fn main() -> Result<()> {
         }
         Command::RemuxMp4 { input, output } => {
             chroma_engine::remux::remux_mp4(&input, &output)?;
-            println!("{}", serde_json::json!({ "ok": true }));
-        }
-        Command::Hls {
-            input,
-            work_dir,
-            anchor_seconds,
-            segment_seconds,
-        } => {
-            chroma_engine::hls::run_hls_session(
-                &input,
-                &work_dir,
-                anchor_seconds,
-                segment_seconds,
-            )?;
             println!("{}", serde_json::json!({ "ok": true }));
         }
     }
