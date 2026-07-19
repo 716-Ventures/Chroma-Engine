@@ -74,7 +74,10 @@ pub fn extract_window(
     let meta = parse_basic_metadata(bytes);
     let selected = select_chunk_track(&meta.tracks, requested_track_id)
         .ok_or(MatroskaChunkExtractError::NoTrack)?;
-    let segment = find_first_child(bytes, 0x1853_8067).ok_or(MatroskaChunkExtractError::NoTrack)?;
+    let segment_element =
+        find_first_child_element(bytes, 0x1853_8067).ok_or(MatroskaChunkExtractError::NoTrack)?;
+    let segment = segment_element.payload;
+    let segment_base_offset = segment_element.payload_offset;
     let timecode_scale = parse_segment_timecode_scale(segment);
     let end_chunk = start_chunk.saturating_add(chunk_count);
     let mut out = Vec::new();
@@ -88,7 +91,10 @@ pub fn extract_window(
 
     for cluster in ElementIter::new(segment).filter(|element| element.id == 0x1f43_b675) {
         let cluster_timecode = parse_cluster_timecode(cluster.payload).unwrap_or(0);
-        for block in ClusterBlockIter::new_with_base(cluster.payload, cluster.payload_offset) {
+        for block in ClusterBlockIter::new_with_base(
+            cluster.payload,
+            segment_base_offset + cluster.payload_offset,
+        ) {
             if block.track_number != selected.number {
                 continue;
             }
@@ -206,9 +212,15 @@ pub fn parse_packet_track(
 ) -> Option<MatroskaPacketTrack> {
     let meta = parse_basic_metadata(bytes);
     let selected = select_chunk_track(&meta.tracks, requested_track_id)?;
-    let segment = find_first_child(bytes, 0x1853_8067)?;
+    let segment_element = find_first_child_element(bytes, 0x1853_8067)?;
+    let segment = segment_element.payload;
     let timecode_scale = parse_segment_timecode_scale(segment);
-    let packets = parse_track_packets(segment, selected.number, timecode_scale)?;
+    let packets = parse_track_packets(
+        segment,
+        segment_element.payload_offset,
+        selected.number,
+        timecode_scale,
+    )?;
     Some(MatroskaPacketTrack {
         id: selected.id,
         packets,
@@ -773,6 +785,7 @@ impl Iterator for ClusterBlockIter<'_> {
 
 fn parse_track_packets(
     segment: &[u8],
+    segment_base_offset: usize,
     track_number: u64,
     timecode_scale: u64,
 ) -> Option<Vec<PacketRef>> {
@@ -781,7 +794,10 @@ fn parse_track_packets(
 
     for cluster in ElementIter::new(segment).filter(|element| element.id == 0x1f43_b675) {
         let cluster_timecode = parse_cluster_timecode(cluster.payload).unwrap_or(0);
-        for block in ClusterBlockIter::new_with_base(cluster.payload, cluster.payload_offset) {
+        for block in ClusterBlockIter::new_with_base(
+            cluster.payload,
+            segment_base_offset + cluster.payload_offset,
+        ) {
             if block.track_number != track_number {
                 continue;
             }
@@ -1026,6 +1042,10 @@ fn find_first_child(bytes: &[u8], id: u32) -> Option<&[u8]> {
         .map(|element| element.payload)
 }
 
+fn find_first_child_element(bytes: &[u8], id: u32) -> Option<Element<'_>> {
+    ElementIter::new(bytes).find(|element| element.id == id)
+}
+
 fn count_children(bytes: &[u8], id: u32) -> u32 {
     ElementIter::new(bytes)
         .filter(|element| element.id == id)
@@ -1245,6 +1265,30 @@ mod tests {
     }
 
     #[test]
+    fn extracts_matroska_payloads_with_file_absolute_offsets() {
+        let info = elem(
+            0x1549_a966,
+            &[elem(0x002a_d7b1, &1_000_000_u64.to_be_bytes()[5..])].concat(),
+        );
+        let video = track_entry(1, 1, "V_MPEG4/ISO/AVC", &[]);
+        let tracks = elem(0x1654_ae6b, &video);
+        let cluster0 = cluster(
+            0,
+            &[
+                simple_block_with_payload(1, 0, true, b"frame-one"),
+                simple_block_with_payload(1, 1000, false, b"frame-two"),
+            ],
+        );
+        let segment = elem(0x1853_8067, &[info, tracks, cluster0].concat());
+        let mut bytes = elem(0x1a45_dfa3, &[]);
+        bytes.extend_from_slice(&segment);
+
+        let (chunk, payload) = extract_chunk(&bytes, Some("v0"), 4_000, 0).unwrap();
+        assert_eq!(chunk.packet_count, 2);
+        assert_eq!(payload, b"frame-oneframe-two");
+    }
+
+    #[test]
     fn plans_chunks_from_matroska_cues_before_scanning_clusters() {
         let info = elem(
             0x1549_a966,
@@ -1336,11 +1380,20 @@ mod tests {
     }
 
     fn simple_block(track_number: u8, relative_timecode: i16, keyframe: bool) -> Vec<u8> {
+        simple_block_with_payload(track_number, relative_timecode, keyframe, &[0xde, 0xad])
+    }
+
+    fn simple_block_with_payload(
+        track_number: u8,
+        relative_timecode: i16,
+        keyframe: bool,
+        block_payload: &[u8],
+    ) -> Vec<u8> {
         let mut payload = Vec::new();
         payload.push(0x80 | track_number);
         payload.extend_from_slice(&relative_timecode.to_be_bytes());
         payload.push(if keyframe { 0x80 } else { 0x00 });
-        payload.extend_from_slice(&[0xde, 0xad]);
+        payload.extend_from_slice(block_payload);
         elem(0xa3, &payload)
     }
 
