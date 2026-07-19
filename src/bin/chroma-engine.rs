@@ -10,7 +10,7 @@ use chroma_engine::container::{
         parse_chunk_plan as parse_mp4_chunk_plan, parse_codec_config as parse_mp4_codec_config,
     },
 };
-use chroma_engine::hls::{write_hls_vod, HlsOptions};
+use chroma_engine::hls::{write_hls_vod, HlsOptions, HlsSegmentInfo, HlsVodPlan};
 use chroma_engine::playback_manifest::{
     build_matroska_playback_manifest, build_mp4_playback_manifest, MatroskaManifestOptions,
     Mp4ManifestOptions,
@@ -129,6 +129,21 @@ enum Command {
     Hls {
         input: PathBuf,
         output_dir: PathBuf,
+        #[arg(long, default_value_t = 4_000)]
+        segment_ms: u64,
+    },
+    /// Emit native HLS VOD playlists and segment plan without writing segments.
+    HlsPlan {
+        input: PathBuf,
+        #[arg(long, default_value_t = 4_000)]
+        segment_ms: u64,
+    },
+    /// Write one native HLS VOD segment by index.
+    HlsSegment {
+        input: PathBuf,
+        output: PathBuf,
+        #[arg(long)]
+        index: usize,
         #[arg(long, default_value_t = 4_000)]
         segment_ms: u64,
     },
@@ -437,6 +452,39 @@ fn main() -> Result<()> {
             )?;
             println!("{}", serde_json::to_string_pretty(&output)?);
         }
+        Command::HlsPlan { input, segment_ms } => {
+            let plan = HlsVodPlan::open(
+                &input,
+                HlsOptions {
+                    segment_target_ms: segment_ms,
+                },
+            )?;
+            let output = HlsPlanOutput {
+                segment_count: plan.segment_count(),
+                target_duration_seconds: plan.target_duration_seconds(),
+                video_codec: plan.video_codec().to_string(),
+                audio_codec: plan.audio_codec().to_string(),
+                master_playlist: plan.master_playlist(),
+                media_playlist: plan.media_playlist(),
+                segments: plan.segments(),
+            };
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        }
+        Command::HlsSegment {
+            input,
+            output,
+            index,
+            segment_ms,
+        } => {
+            let plan = HlsVodPlan::open(
+                &input,
+                HlsOptions {
+                    segment_target_ms: segment_ms,
+                },
+            )?;
+            let segment = plan.write_segment(index, &output)?;
+            println!("{}", serde_json::to_string_pretty(&segment)?);
+        }
         Command::RemuxMp4 { input, output } => {
             chroma_engine::remux::remux_mp4(&input, &output)?;
             println!("{}", serde_json::json!({ "ok": true }));
@@ -444,6 +492,18 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HlsPlanOutput {
+    segment_count: usize,
+    target_duration_seconds: u64,
+    video_codec: String,
+    audio_codec: String,
+    master_playlist: String,
+    media_playlist: String,
+    segments: Vec<HlsSegmentInfo>,
 }
 
 #[derive(Debug, Serialize)]

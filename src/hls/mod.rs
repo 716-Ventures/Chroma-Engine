@@ -53,6 +53,139 @@ pub struct HlsOutput {
     pub audio_codec: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HlsSegmentInfo {
+    pub index: usize,
+    pub start_ms: u64,
+    pub duration_ms: u64,
+    pub uri: String,
+}
+
+pub struct HlsVodPlan {
+    source: Mmap,
+    tracks: HlsTrackSet,
+    windows: Vec<SegmentWindow>,
+    target_duration_seconds: u64,
+}
+
+impl HlsVodPlan {
+    pub fn open(input: &Path, options: HlsOptions) -> Result<Self> {
+        let file = File::open(input).with_context(|| format!("open {}", input.display()))?;
+        let source =
+            unsafe { Mmap::map(&file) }.with_context(|| format!("map {}", input.display()))?;
+        let bytes = source.as_ref();
+        let tracks = if mp4::looks_like_mp4(bytes) {
+            hls_tracks_from_mp4(bytes)?
+        } else if matroska::looks_like_ebml(bytes) {
+            hls_tracks_from_matroska(bytes)?
+        } else {
+            bail!("native HLS currently supports MP4/MOV and Matroska/WebM sources");
+        };
+
+        if tracks.video.packets.is_empty() || tracks.audio.packets.is_empty() {
+            bail!(
+                "native HLS requires one packet-indexed video track and one packet-indexed audio track"
+            );
+        }
+
+        let segment_target_ms = options.segment_target_ms.max(500);
+        let windows = segment_windows(&tracks.video.packets, segment_target_ms);
+        if windows.is_empty() {
+            bail!("native HLS could not build keyframe-aligned segment windows");
+        }
+        let target_duration_seconds = windows
+            .iter()
+            .map(|window| {
+                window
+                    .end_ms
+                    .saturating_sub(window.start_ms)
+                    .max(1)
+                    .saturating_add(999)
+                    / 1000
+            })
+            .max()
+            .unwrap_or(1)
+            .max(1);
+
+        Ok(Self {
+            source,
+            tracks,
+            windows,
+            target_duration_seconds,
+        })
+    }
+
+    pub fn segment_count(&self) -> usize {
+        self.windows.len()
+    }
+
+    pub fn target_duration_seconds(&self) -> u64 {
+        self.target_duration_seconds
+    }
+
+    pub fn video_codec(&self) -> &str {
+        &self.tracks.video.codec_string
+    }
+
+    pub fn audio_codec(&self) -> &str {
+        &self.tracks.audio.codec_string
+    }
+
+    pub fn segments(&self) -> Vec<HlsSegmentInfo> {
+        self.windows
+            .iter()
+            .map(|window| HlsSegmentInfo {
+                index: window.index,
+                start_ms: window.start_ms,
+                duration_ms: window.end_ms.saturating_sub(window.start_ms).max(1),
+                uri: segment_name(window.index),
+            })
+            .collect()
+    }
+
+    pub fn master_playlist(&self) -> String {
+        master_playlist_body(self.video_codec(), self.audio_codec())
+    }
+
+    pub fn media_playlist(&self) -> String {
+        let durations: Vec<u64> = self
+            .windows
+            .iter()
+            .map(|window| window.end_ms.saturating_sub(window.start_ms).max(1))
+            .collect();
+        media_playlist_body(self.target_duration_seconds, &durations)
+    }
+
+    pub fn mux_segment(&self, index: usize) -> Result<Vec<u8>> {
+        let window = self
+            .windows
+            .get(index)
+            .copied()
+            .ok_or_else(|| anyhow!("HLS segment index {index} is out of range"))?;
+        mux_segment(self.source.as_ref(), &self.tracks, window)
+    }
+
+    pub fn write_segment(&self, index: usize, output: &Path) -> Result<HlsSegmentInfo> {
+        let window = self
+            .windows
+            .get(index)
+            .copied()
+            .ok_or_else(|| anyhow!("HLS segment index {index} is out of range"))?;
+        let segment = mux_segment(self.source.as_ref(), &self.tracks, window)?;
+        if let Some(parent) = output.parent() {
+            create_dir_all(parent)?;
+        }
+        write(output, segment)?;
+        Ok(HlsSegmentInfo {
+            index: window.index,
+            start_ms: window.start_ms,
+            duration_ms: window.end_ms.saturating_sub(window.start_ms).max(1),
+            uri: segment_name(window.index),
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 struct HlsTrackSet {
     video: HlsTrack,
@@ -98,65 +231,29 @@ struct TimedPayload {
 }
 
 pub fn write_hls_vod(input: &Path, output_dir: &Path, options: HlsOptions) -> Result<HlsOutput> {
-    let file = File::open(input).with_context(|| format!("open {}", input.display()))?;
-    let bytes = unsafe { Mmap::map(&file) }.with_context(|| format!("map {}", input.display()))?;
-    let bytes = bytes.as_ref();
-    let tracks = if mp4::looks_like_mp4(&bytes) {
-        hls_tracks_from_mp4(&bytes)?
-    } else if matroska::looks_like_ebml(&bytes) {
-        hls_tracks_from_matroska(&bytes)?
-    } else {
-        bail!("native HLS currently supports MP4/MOV and Matroska/WebM sources");
-    };
-
-    if tracks.video.packets.is_empty() || tracks.audio.packets.is_empty() {
-        bail!(
-            "native HLS requires one packet-indexed video track and one packet-indexed audio track"
-        );
-    }
-
-    let segment_target_ms = options.segment_target_ms.max(500);
-    let windows = segment_windows(&tracks.video.packets, segment_target_ms);
-    if windows.is_empty() {
-        bail!("native HLS could not build keyframe-aligned segment windows");
-    }
+    let plan = HlsVodPlan::open(input, options)?;
 
     create_dir_all(output_dir)?;
     let variant_dir = output_dir.join("0");
     create_dir_all(&variant_dir)?;
 
-    let mut durations = Vec::with_capacity(windows.len());
-    for window in &windows {
-        let segment = mux_segment(&bytes, &tracks, *window)?;
-        let duration_ms = window.end_ms.saturating_sub(window.start_ms).max(1);
-        durations.push(duration_ms);
-        write(variant_dir.join(segment_name(window.index)), segment)?;
+    for segment in plan.segments() {
+        let output = variant_dir.join(&segment.uri);
+        plan.write_segment(segment.index, &output)?;
     }
 
-    let target_duration_seconds = durations
-        .iter()
-        .map(|duration| duration.saturating_add(999) / 1000)
-        .max()
-        .unwrap_or(1)
-        .max(1);
     let media_playlist = variant_dir.join("playlist.m3u8");
-    write(
-        &media_playlist,
-        media_playlist_body(target_duration_seconds, &durations),
-    )?;
+    write(&media_playlist, plan.media_playlist())?;
     let master_playlist = output_dir.join("master.m3u8");
-    write(
-        &master_playlist,
-        master_playlist_body(&tracks.video.codec_string, &tracks.audio.codec_string),
-    )?;
+    write(&master_playlist, plan.master_playlist())?;
 
     Ok(HlsOutput {
         master_playlist,
         media_playlist,
-        segment_count: windows.len(),
-        target_duration_seconds,
-        video_codec: tracks.video.codec_string,
-        audio_codec: tracks.audio.codec_string,
+        segment_count: plan.segment_count(),
+        target_duration_seconds: plan.target_duration_seconds(),
+        video_codec: plan.video_codec().to_string(),
+        audio_codec: plan.audio_codec().to_string(),
     })
 }
 
