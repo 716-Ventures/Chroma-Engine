@@ -1,5 +1,6 @@
 pub mod codec;
 pub mod container;
+pub mod hls;
 pub mod packet;
 pub mod platform;
 pub mod playback_manifest;

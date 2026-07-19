@@ -10,6 +10,7 @@ use chroma_engine::container::{
         parse_chunk_plan as parse_mp4_chunk_plan, parse_codec_config as parse_mp4_codec_config,
     },
 };
+use chroma_engine::hls::{write_hls_vod, HlsOptions};
 use chroma_engine::playback_manifest::{
     build_matroska_playback_manifest, build_mp4_playback_manifest, MatroskaManifestOptions,
     Mp4ManifestOptions,
@@ -124,6 +125,13 @@ enum Command {
     EncoderProbe,
     /// Warm the selected encoder backend.
     Warmup,
+    /// Package a source into native HLS VOD output.
+    Hls {
+        input: PathBuf,
+        output_dir: PathBuf,
+        #[arg(long, default_value_t = 4_000)]
+        segment_ms: u64,
+    },
     /// Remux a source into faststart MP4.
     RemuxMp4 { input: PathBuf, output: PathBuf },
 }
@@ -414,6 +422,20 @@ fn main() -> Result<()> {
         Command::Warmup => {
             chroma_engine::platform::warmup()?;
             println!("{}", serde_json::json!({ "ok": true }));
+        }
+        Command::Hls {
+            input,
+            output_dir,
+            segment_ms,
+        } => {
+            let output = write_hls_vod(
+                &input,
+                &output_dir,
+                HlsOptions {
+                    segment_target_ms: segment_ms,
+                },
+            )?;
+            println!("{}", serde_json::to_string_pretty(&output)?);
         }
         Command::RemuxMp4 { input, output } => {
             chroma_engine::remux::remux_mp4(&input, &output)?;
