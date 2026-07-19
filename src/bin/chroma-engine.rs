@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
 use chroma_engine::codec::aac::{aac_chunk_to_adts, parse_audio_specific_config};
@@ -72,6 +72,19 @@ enum Command {
         #[arg(long, default_value_t = 4_000)]
         target_ms: u64,
     },
+    /// Write a contiguous window of native compressed MP4/MOV chunks into a cache directory.
+    ExtractWindow {
+        input: PathBuf,
+        output_dir: PathBuf,
+        #[arg(long)]
+        track: Option<String>,
+        #[arg(long, default_value_t = 0)]
+        start_chunk: u32,
+        #[arg(long, default_value_t = 8)]
+        chunk_count: u32,
+        #[arg(long, default_value_t = 4_000)]
+        target_ms: u64,
+    },
     /// Emit AVC/H.264 NAL-unit layout for a native MP4/MOV chunk.
     H264Nalus {
         input: PathBuf,
@@ -117,6 +130,23 @@ enum TargetArg {
     NativeChroma,
     Browser,
     AppleNative,
+}
+
+#[derive(Debug, Serialize)]
+struct ExtractedWindowChunk {
+    track_id: String,
+    chunk_index: u32,
+    metadata_path: PathBuf,
+    payload_path: PathBuf,
+    byte_count: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct ExtractedWindow {
+    track_id: Option<String>,
+    start_chunk: u32,
+    requested_chunk_count: u32,
+    chunks: Vec<ExtractedWindowChunk>,
 }
 
 fn main() -> Result<()> {
@@ -217,6 +247,29 @@ fn main() -> Result<()> {
                 extract_mp4_chunk(&bytes, track.as_deref(), target_ms, chunk_index)?;
             std::fs::write(output, payload)?;
             println!("{}", serde_json::to_string_pretty(&manifest)?);
+        }
+        Command::ExtractWindow {
+            input,
+            output_dir,
+            track,
+            start_chunk,
+            chunk_count,
+            target_ms,
+        } => {
+            let source = std::fs::File::open(&input)?;
+            let bytes = unsafe { Mmap::map(&source)? };
+            if !looks_like_mp4(&bytes) {
+                bail!("native chunk window extraction currently supports MP4/MOV packet tables");
+            }
+            let written = extract_mp4_window(
+                &bytes,
+                &output_dir,
+                track.as_deref(),
+                start_chunk,
+                chunk_count,
+                target_ms,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&written)?);
         }
         Command::H264Nalus {
             input,
@@ -391,6 +444,69 @@ fn hex_nibble(byte: u8) -> Result<u8> {
         b'A'..=b'F' => Ok(byte - b'A' + 10),
         _ => bail!("invalid hex byte"),
     }
+}
+
+fn extract_mp4_window(
+    bytes: &[u8],
+    output_dir: &Path,
+    requested_track_id: Option<&str>,
+    start_chunk: u32,
+    chunk_count: u32,
+    target_ms: u64,
+) -> Result<ExtractedWindow> {
+    std::fs::create_dir_all(output_dir)?;
+    let mut chunks = Vec::new();
+    let end_chunk = start_chunk.saturating_add(chunk_count);
+    for chunk_index in start_chunk..end_chunk {
+        let (manifest, payload) =
+            match extract_mp4_chunk(bytes, requested_track_id, target_ms, chunk_index) {
+                Ok(chunk) => chunk,
+                Err(_) => break,
+            };
+        let safe_track = safe_cache_component(&manifest.track_id);
+        let payload_path = output_dir.join(format!("{safe_track}-{chunk_index}.bin"));
+        let metadata_path = output_dir.join(format!("{safe_track}-{chunk_index}.json"));
+        write_atomic(&payload_path, &payload)?;
+        write_atomic(&metadata_path, serde_json::to_string(&manifest)?.as_bytes())?;
+        chunks.push(ExtractedWindowChunk {
+            track_id: manifest.track_id,
+            chunk_index,
+            metadata_path,
+            payload_path,
+            byte_count: payload.len() as u64,
+        });
+    }
+    Ok(ExtractedWindow {
+        track_id: requested_track_id.map(str::to_string),
+        start_chunk,
+        requested_chunk_count: chunk_count,
+        chunks,
+    })
+}
+
+fn safe_cache_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    let tmp = path.with_extension(format!(
+        "{}.tmp",
+        path.extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or("chroma")
+    ));
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(tmp, path)?;
+    Ok(())
 }
 
 impl From<TargetArg> for PlaybackTarget {
