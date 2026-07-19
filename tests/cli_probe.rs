@@ -19,14 +19,19 @@ fn probe_cli_reports_mp4_streams() {
         .clone();
     let json: Value = serde_json::from_slice(&output).unwrap();
 
-    assert_eq!(json["container"], "mp4");
-    assert_eq!(json["containerDirectPlay"], true);
+    assert_eq!(json["schemaVersion"], 1);
+    assert_eq!(json["source"]["container"]["family"], "isoBmff");
+    assert_eq!(json["source"]["container"]["brand"], "mp4");
     assert_eq!(json["durationMs"], 12_345);
-    assert_eq!(json["videoStreams"][0]["codec"], "h264");
-    assert_eq!(json["videoStreams"][0]["width"], 1920);
-    assert_eq!(json["videoStreams"][0]["height"], 1080);
-    assert_eq!(json["audioStreams"][0]["codec"], "aac");
-    assert_eq!(json["audioStreams"][0]["channels"], 2);
+    assert_eq!(json["tracks"][0]["id"], "v0");
+    assert_eq!(json["tracks"][0]["kind"], "video");
+    assert_eq!(json["tracks"][0]["codec"]["family"], "h264");
+    assert_eq!(json["tracks"][0]["video"]["width"], 1920);
+    assert_eq!(json["tracks"][0]["video"]["height"], 1080);
+    assert_eq!(json["tracks"][1]["id"], "a0");
+    assert_eq!(json["tracks"][1]["codec"]["family"], "aac");
+    assert_eq!(json["tracks"][1]["audio"]["channels"], 2);
+    assert_eq!(json["capabilities"]["canRemuxWithoutDecode"], true);
 }
 
 #[test]
@@ -46,14 +51,17 @@ fn probe_cli_reports_mkv_streams() {
         .clone();
     let json: Value = serde_json::from_slice(&output).unwrap();
 
-    assert_eq!(json["container"], "mkv");
-    assert_eq!(json["containerDirectPlay"], false);
+    assert_eq!(json["source"]["container"]["family"], "matroska");
+    assert_eq!(json["source"]["container"]["brand"], "matroska");
     assert_eq!(json["durationMs"], 12_500);
-    assert_eq!(json["videoStreams"][0]["codec"], "h264");
-    assert_eq!(json["videoStreams"][0]["width"], 1920);
-    assert_eq!(json["audioStreams"][0]["codec"], "aac");
-    assert_eq!(json["subtitleStreams"][0]["codec"], "subrip");
-    assert_eq!(json["subtitleStreams"][0]["kind"], "text");
+    assert_eq!(json["tracks"][0]["id"], "v0");
+    assert_eq!(json["tracks"][0]["codec"]["family"], "h264");
+    assert_eq!(json["tracks"][0]["video"]["width"], 1920);
+    assert_eq!(json["tracks"][1]["id"], "a0");
+    assert_eq!(json["tracks"][1]["codec"]["family"], "aac");
+    assert_eq!(json["tracks"][2]["id"], "s0");
+    assert_eq!(json["tracks"][2]["codec"]["family"], "textSubtitle");
+    assert_eq!(json["tracks"][2]["subtitle"]["format"], "text");
 }
 
 fn minimal_mp4() -> Vec<u8> {

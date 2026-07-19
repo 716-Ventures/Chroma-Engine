@@ -1,20 +1,20 @@
 # Chroma Engine
 
-Rust media engine for replacing the narrow FFmpeg surface used by GenusServer.
+Rust media engine for Chroma playback, probing, remuxing, segmentation, and transcoding.
 
-The first target is behavioral parity with the current `jellyfin-ffmpeg` process usage:
+The target is a native media architecture, not an FFmpeg-compatible facade. Chroma Engine owns its API shape, track model, session model, and output strategy; GenusServer and clients should adapt to the engine when that gives us better speed, stability, or flexibility.
 
-- `probe`: emit the metadata shape currently supplied by `ffprobe`.
-- `hls`: emit fMP4 HLS session output (`master.m3u8`, variant playlists, init segments, media segments).
-- `remux-mp4`: remux MKV/MP4-family sources into faststart MP4.
+- `probe`: emit a Chroma-native `MediaProbe` manifest with typed tracks, source facts, and capability hints.
+- `hls`: produce Chroma playback sessions optimized around reusable packet/decode/encode stages.
+- `remux-mp4`: remux supported sources into an efficient ISO-BMFF output path.
 - `encoder-probe`: report platform encoder capabilities.
-- `warmup`: initialize the chosen encoder path before the first playback session.
+- `warmup`: initialize selected hardware/software backends before the first playback session.
 
-This crate is intentionally not a general FFmpeg clone. It only implements the container, codec, muxing, and encoding behavior needed by ChromaServer playback and conversion.
+This crate is intentionally not a general FFmpeg clone. It implements the container, codec, muxing, scheduling, and encoding behavior Chroma actually needs, with room to expose new capabilities instead of inheriting old command-line constraints.
 
 ## Current Status
 
-Initial scaffold. The CLI/API contract is in place, probe path has MP4/Matroska container sniffing, and the detailed implementation checklist lives in [docs/implementation-checklist.md](docs/implementation-checklist.md).
+The native probe path parses MP4/MOV and Matroska/WebM structure, emits typed tracks, and has integration tests against generated fixtures. The detailed implementation checklist lives in [docs/implementation-checklist.md](docs/implementation-checklist.md).
 
 Rust is required to build:
 

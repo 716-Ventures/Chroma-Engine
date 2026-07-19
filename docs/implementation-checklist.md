@@ -3,10 +3,10 @@
 ## Contract
 
 - [x] Create Rust repo and library/CLI skeleton.
-- [x] Define JSON response types matching GenusServer `SourceProbe`.
+- [x] Define native `MediaProbe` JSON with typed tracks, source facts, and capability hints.
 - [x] Define command surface: `probe`, `hls`, `remux-mp4`, `encoder-probe`, `warmup`.
-- [ ] Add golden fixtures from representative GenusServer media files.
-- [ ] Add parity snapshots against current `ffprobe` and `ffmpeg` outputs.
+- [ ] Add real-library probe fixtures from `/Volumes/Movies` and `/Volumes/TVShows`.
+- [ ] Add Chroma-native snapshot tests for representative MP4/MKV/HDR/audio/subtitle combinations.
 
 ## Probe
 
@@ -21,7 +21,8 @@
 - [x] Extract subtitles: text vs bitmap classification, language/title, default/forced disposition.
 - [ ] Extract chapters.
 - [x] Extract duration.
-- [ ] Match GenusServer error envelopes.
+- [x] Use memory-mapped probing instead of whole-file reads.
+- [ ] Define Chroma-native error taxonomy.
 
 ## Remux MP4
 
@@ -36,8 +37,9 @@
 
 ## fMP4 HLS
 
-- [ ] Emit `master.m3u8` immediately from plan metadata.
-- [ ] Emit variant playlists, `init_*.mp4`, and `seg-%05d.m4s`.
+- [ ] Define Chroma-native playback session manifest.
+- [ ] Emit HLS compatibility artifacts only as one transport adapter, not as the core engine model.
+- [ ] Emit stream chunks through reusable packet/decode/encode stages.
 - [ ] H.264/AAC stream-copy HLS.
 - [ ] HEVC stream-copy HLS.
 - [ ] AC-3/E-AC-3/MP3/FLAC/ALAC copy paths.
@@ -62,9 +64,9 @@
 
 ## Integration
 
-- [ ] Add GenusServer `MediaTool` abstraction.
+- [ ] Replace GenusServer playback/probe contracts with Chroma Engine contracts.
 - [ ] Run Chroma Engine behind an env flag.
-- [ ] Dual-run probe parity in diagnostics.
+- [ ] Add side-by-side diagnostics for Chroma Engine vs legacy media path during migration.
 - [ ] Switch HLS sessions to Rust engine.
 - [ ] Switch offline MKV remux to Rust engine.
 - [ ] Remove vendored `jellyfin-ffmpeg` once parity passes.

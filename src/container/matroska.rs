@@ -49,6 +49,9 @@ pub fn parse_basic_metadata(bytes: &[u8]) -> MatroskaBasicMetadata {
             0x1549_a966 => parse_info(child.payload, &mut meta),
             0x1654_ae6b => parse_tracks(child.payload, &mut meta),
             0x1941_a469 => meta.attachment_count = count_children(child.payload, 0x61a7),
+            // Cluster is the media-data boundary for normal Matroska files. Probing should not
+            // scan packet payloads once metadata sections have been collected.
+            0x1f43_b675 if meta.duration_ms.is_some() && !meta.tracks.is_empty() => break,
             _ => {}
         }
     }

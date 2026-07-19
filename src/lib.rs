@@ -7,4 +7,4 @@ pub mod remux;
 pub mod session;
 pub mod transcode;
 
-pub use probe::{probe_media_source, ProbeError, SourceProbe};
+pub use probe::{probe_media_source, MediaProbe, ProbeError};
