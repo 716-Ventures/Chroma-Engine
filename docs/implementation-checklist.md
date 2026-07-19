@@ -4,7 +4,7 @@
 
 - [x] Create Rust repo and library/CLI skeleton.
 - [x] Define native `MediaProbe` JSON with typed tracks, source facts, and capability hints.
-- [x] Define command surface: `probe`, `plan`, `manifest`, `chunks`, `codec-config`, `h264-nalus`, `h264-annex-b`, `extract-chunk`, `remux-mp4`, `encoder-probe`, `warmup`.
+- [x] Define command surface: `probe`, `plan`, `manifest`, `chunks`, `codec-config`, `h264-nalus`, `h264-annex-b`, `aac-adts`, `extract-chunk`, `remux-mp4`, `encoder-probe`, `warmup`.
 - [x] Define native playback `plan` command with target-specific pipeline stages.
 - [ ] Add real-library probe fixtures from `/Volumes/Movies` and `/Volumes/TVShows`.
 - [ ] Add Chroma-native snapshot tests for representative MP4/MKV/HDR/audio/subtitle combinations.
@@ -51,8 +51,9 @@
 - [x] Emit sample-level timing and payload layout for native MP4/MOV chunks.
 - [x] Parse AVC/H.264 NAL-unit layout from native MP4/MOV chunks.
 - [x] Convert native MP4/MOV AVC chunks to Annex-B H.264 without decode.
+- [x] Wrap native MP4/MOV AAC chunks as ADTS without decode.
 - [ ] Emit stream chunks through reusable packet/decode/encode stages.
-- [ ] H.264/AAC native stream-copy chunks.
+- [x] H.264/AAC native stream-copy chunks.
 - [ ] HEVC native stream-copy chunks.
 - [ ] AC-3/E-AC-3/MP3/FLAC/ALAC native copy paths.
 - [x] Keyframe-aligned chunk planning.

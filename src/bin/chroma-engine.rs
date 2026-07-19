@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::{bail, Result};
+use chroma_engine::codec::aac::{aac_chunk_to_adts, parse_audio_specific_config};
 use chroma_engine::codec::h264::{avc_chunk_to_annex_b, parse_avc_chunk_nalus};
 use chroma_engine::container::{
     matroska::{looks_like_ebml, parse_chunk_plan as parse_matroska_chunk_plan},
@@ -83,6 +84,17 @@ enum Command {
     },
     /// Write an Annex-B H.264 payload for a native MP4/MOV chunk.
     H264AnnexB {
+        input: PathBuf,
+        output: PathBuf,
+        #[arg(long)]
+        track: Option<String>,
+        #[arg(long, default_value_t = 0)]
+        chunk_index: u32,
+        #[arg(long, default_value_t = 4_000)]
+        target_ms: u64,
+    },
+    /// Write an ADTS-framed AAC payload for a native MP4/MOV chunk.
+    AacAdts {
         input: PathBuf,
         output: PathBuf,
         #[arg(long)]
@@ -273,6 +285,45 @@ fn main() -> Result<()> {
                 })?
             );
         }
+        Command::AacAdts {
+            input,
+            output,
+            track,
+            chunk_index,
+            target_ms,
+        } => {
+            let source = std::fs::File::open(&input)?;
+            let bytes = unsafe { Mmap::map(&source)? };
+            if !looks_like_mp4(&bytes) {
+                bail!("aac-adts currently supports MP4/MOV packet tables");
+            }
+            let config = parse_mp4_codec_config(&bytes, track.as_deref())
+                .ok_or_else(|| anyhow::anyhow!("no matching MP4 codec config found"))?;
+            if config.codec != "aac" {
+                bail!("selected track is {}, not aac", config.codec);
+            }
+            let asc_hex = config
+                .description_hex
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("missing AAC AudioSpecificConfig"))?;
+            let asc = hex_to_bytes(asc_hex)?;
+            let aac_config = parse_audio_specific_config(&asc)?;
+            let (manifest, payload) =
+                extract_mp4_chunk(&bytes, Some(&config.track_id), target_ms, chunk_index)?;
+            let adts = aac_chunk_to_adts(&payload, &manifest.samples, aac_config)?;
+            let byte_count = adts.len() as u64;
+            std::fs::write(output, adts)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&AacAdtsOutput {
+                    track_id: config.track_id,
+                    chunk_index,
+                    sample_rate: aac_config.sample_rate,
+                    channel_config: aac_config.channel_config,
+                    byte_count,
+                })?
+            );
+        }
         Command::EncoderProbe => {
             let probe = chroma_engine::platform::encoder_probe();
             println!("{}", serde_json::to_string_pretty(&probe)?);
@@ -306,6 +357,40 @@ struct H264AnnexBOutput {
     chunk_index: u32,
     nalu_length_size: u8,
     byte_count: u64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AacAdtsOutput {
+    track_id: String,
+    chunk_index: u32,
+    sample_rate: u32,
+    channel_config: u8,
+    byte_count: u64,
+}
+
+fn hex_to_bytes(hex: &str) -> Result<Vec<u8>> {
+    let clean = hex.trim();
+    if clean.len() % 2 != 0 {
+        bail!("hex string has odd length");
+    }
+    let mut out = Vec::with_capacity(clean.len() / 2);
+    let bytes = clean.as_bytes();
+    for idx in (0..bytes.len()).step_by(2) {
+        let hi = hex_nibble(bytes[idx])?;
+        let lo = hex_nibble(bytes[idx + 1])?;
+        out.push((hi << 4) | lo);
+    }
+    Ok(out)
+}
+
+fn hex_nibble(byte: u8) -> Result<u8> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => bail!("invalid hex byte"),
+    }
 }
 
 impl From<TargetArg> for PlaybackTarget {
