@@ -1,3 +1,5 @@
+use crate::packet::{ChunkPlan, NativeChunk, PacketRange, TimeDelta, TimePoint};
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct MatroskaBasicMetadata {
     pub duration_ms: Option<u64>,
@@ -59,6 +61,222 @@ pub fn parse_basic_metadata(bytes: &[u8]) -> MatroskaBasicMetadata {
     meta
 }
 
+pub fn parse_chunk_plan(
+    bytes: &[u8],
+    requested_track_id: Option<&str>,
+    target_ms: u64,
+) -> Option<ChunkPlan> {
+    if target_ms == 0 {
+        return Some(ChunkPlan {
+            track_ids: Vec::new(),
+            chunks: Vec::new(),
+        });
+    }
+
+    let meta = parse_basic_metadata(bytes);
+    let selected = select_chunk_track(&meta.tracks, requested_track_id)?;
+    let segment = find_first_child(bytes, 0x1853_8067)?;
+    let timecode_scale = parse_segment_timecode_scale(segment);
+    if let Some(plan) = parse_cue_chunk_plan(segment, &selected, timecode_scale, target_ms) {
+        return Some(plan);
+    }
+    if segment.len() > 512 * 1024 * 1024 {
+        return None;
+    }
+
+    let mut chunks = Vec::new();
+    let mut block_index = 0_u32;
+    let mut chunk_start_block = 0_u32;
+    let mut chunk_start_ms = 0_u64;
+    let mut last_seen_ms = 0_u64;
+    let mut key_aligned = true;
+    let mut saw_block = false;
+
+    for cluster in ElementIter::new(segment).filter(|element| element.id == 0x1f43_b675) {
+        let cluster_timecode = parse_cluster_timecode(cluster.payload).unwrap_or(0);
+        for block in ClusterBlockIter::new(cluster.payload) {
+            if block.track_number != selected.number {
+                continue;
+            }
+
+            let timestamp_ms = matroska_timecode_to_ms(
+                cluster_timecode.saturating_add_signed(i64::from(block.relative_timecode)),
+                timecode_scale,
+            );
+            if !saw_block {
+                chunk_start_ms = timestamp_ms;
+                last_seen_ms = timestamp_ms;
+                key_aligned = block.keyframe;
+                saw_block = true;
+            }
+
+            let should_cut = block_index > chunk_start_block
+                && block.keyframe
+                && timestamp_ms.saturating_sub(chunk_start_ms) >= target_ms;
+            if should_cut {
+                chunks.push(NativeChunk {
+                    index: chunks.len() as u32,
+                    start: TimePoint::millis(chunk_start_ms),
+                    duration: TimeDelta::millis(last_seen_ms.saturating_sub(chunk_start_ms)),
+                    packet_range: PacketRange {
+                        start: chunk_start_block,
+                        end: block_index,
+                    },
+                    key_aligned,
+                });
+                chunk_start_block = block_index;
+                chunk_start_ms = timestamp_ms;
+                key_aligned = block.keyframe;
+            }
+
+            last_seen_ms = timestamp_ms;
+            block_index += 1;
+        }
+    }
+
+    if saw_block {
+        chunks.push(NativeChunk {
+            index: chunks.len() as u32,
+            start: TimePoint::millis(chunk_start_ms),
+            duration: TimeDelta::millis(last_seen_ms.saturating_sub(chunk_start_ms)),
+            packet_range: PacketRange {
+                start: chunk_start_block,
+                end: block_index,
+            },
+            key_aligned,
+        });
+    }
+
+    Some(ChunkPlan {
+        track_ids: vec![selected.id],
+        chunks,
+    })
+}
+
+fn parse_cue_chunk_plan(
+    segment: &[u8],
+    selected: &SelectedChunkTrack,
+    timecode_scale: u64,
+    target_ms: u64,
+) -> Option<ChunkPlan> {
+    let cues = find_cues_payload(segment)?;
+    let mut cue_times = ElementIter::new(cues)
+        .filter(|element| element.id == 0xbb)
+        .filter_map(|cue| parse_cue_point(cue.payload, selected.number, timecode_scale))
+        .collect::<Vec<_>>();
+    cue_times.sort_unstable();
+    cue_times.dedup();
+    if cue_times.is_empty() {
+        return None;
+    }
+
+    let mut chunks = Vec::new();
+    let mut chunk_start_cue = 0_u32;
+    let mut chunk_start_ms = cue_times[0];
+    let mut last_start_ms = chunk_start_ms;
+
+    for (idx, cue_ms) in cue_times.iter().copied().enumerate().skip(1) {
+        if cue_ms.saturating_sub(chunk_start_ms) >= target_ms {
+            chunks.push(NativeChunk {
+                index: chunks.len() as u32,
+                start: TimePoint::millis(chunk_start_ms),
+                duration: TimeDelta::millis(last_start_ms.saturating_sub(chunk_start_ms)),
+                packet_range: PacketRange {
+                    start: chunk_start_cue,
+                    end: idx as u32,
+                },
+                key_aligned: true,
+            });
+            chunk_start_cue = idx as u32;
+            chunk_start_ms = cue_ms;
+        }
+        last_start_ms = cue_ms;
+    }
+
+    chunks.push(NativeChunk {
+        index: chunks.len() as u32,
+        start: TimePoint::millis(chunk_start_ms),
+        duration: TimeDelta::millis(last_start_ms.saturating_sub(chunk_start_ms)),
+        packet_range: PacketRange {
+            start: chunk_start_cue,
+            end: cue_times.len() as u32,
+        },
+        key_aligned: true,
+    });
+
+    Some(ChunkPlan {
+        track_ids: vec![selected.id.clone()],
+        chunks,
+    })
+}
+
+fn find_cues_payload(segment: &[u8]) -> Option<&[u8]> {
+    if let Some(cue_position) = find_cue_position_from_seek_head(segment) {
+        if let Some(cues) = ElementIter::new(segment.get(cue_position..)?)
+            .next()
+            .filter(|element| element.id == 0x1c53_bb6b)
+        {
+            return Some(cues.payload);
+        }
+    }
+
+    if segment.len() <= 512 * 1024 * 1024 {
+        return ElementIter::new(segment)
+            .find(|element| element.id == 0x1c53_bb6b)
+            .map(|element| element.payload);
+    }
+
+    None
+}
+
+fn find_cue_position_from_seek_head(segment: &[u8]) -> Option<usize> {
+    let seek_head = ElementIter::new(segment).find(|element| element.id == 0x114d_9b74)?;
+    for seek in ElementIter::new(seek_head.payload).filter(|element| element.id == 0x4d_bb) {
+        let mut seek_id = None;
+        let mut position = None;
+        for child in ElementIter::new(seek.payload) {
+            match child.id {
+                0x53ab => seek_id = read_uint(child.payload),
+                0x53ac => {
+                    position =
+                        read_uint(child.payload).and_then(|value| usize::try_from(value).ok())
+                }
+                _ => {}
+            }
+        }
+        if seek_id == Some(0x1c53_bb6b) {
+            return position;
+        }
+    }
+    None
+}
+
+fn parse_cue_point(payload: &[u8], selected_track_number: u64, timecode_scale: u64) -> Option<u64> {
+    let mut cue_time = None;
+    let mut has_selected_track = false;
+
+    for element in ElementIter::new(payload) {
+        match element.id {
+            0xb3 => cue_time = read_uint(element.payload),
+            0xb7 => {
+                has_selected_track |= cue_positions_track(element.payload)
+                    .map(|track| track == selected_track_number)
+                    .unwrap_or(false);
+            }
+            _ => {}
+        }
+    }
+
+    has_selected_track
+        .then(|| matroska_timecode_to_ms(cue_time.unwrap_or(0) as i64, timecode_scale))
+}
+
+fn cue_positions_track(payload: &[u8]) -> Option<u64> {
+    ElementIter::new(payload)
+        .find(|element| element.id == 0xf7)
+        .and_then(|element| read_uint(element.payload))
+}
+
 fn parse_info(payload: &[u8], meta: &mut MatroskaBasicMetadata) {
     let mut timecode_scale = 1_000_000_u64;
     let mut duration = None;
@@ -79,6 +297,24 @@ fn parse_info(payload: &[u8], meta: &mut MatroskaBasicMetadata) {
             meta.duration_ms = Some((ns / 1_000_000.0).round() as u64);
         }
     }
+}
+
+fn parse_segment_timecode_scale(segment: &[u8]) -> u64 {
+    ElementIter::new(segment)
+        .find(|element| element.id == 0x1549_a966)
+        .and_then(|info| {
+            ElementIter::new(info.payload)
+                .find(|element| element.id == 0x002a_d7b1)
+                .and_then(|element| read_uint(element.payload))
+        })
+        .unwrap_or(1_000_000)
+}
+
+fn parse_cluster_timecode(cluster: &[u8]) -> Option<i64> {
+    ElementIter::new(cluster)
+        .find(|element| element.id == 0xe7)
+        .and_then(|element| read_uint(element.payload))
+        .and_then(|value| i64::try_from(value).ok())
 }
 
 fn parse_tracks(payload: &[u8], meta: &mut MatroskaBasicMetadata) {
@@ -209,6 +445,146 @@ fn normalize_codec_id(id: &str) -> String {
         _ => id.trim(),
     }
     .to_string()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SelectedChunkTrack {
+    id: String,
+    number: u64,
+}
+
+fn select_chunk_track(
+    tracks: &[MatroskaTrack],
+    requested_track_id: Option<&str>,
+) -> Option<SelectedChunkTrack> {
+    let mut video_index = 0_u32;
+    let mut audio_index = 0_u32;
+    let mut subtitle_index = 0_u32;
+    let mut unknown_index = 0_u32;
+
+    for track in tracks {
+        let id = match track.kind {
+            MatroskaTrackKind::Video => next_track_id("v", &mut video_index),
+            MatroskaTrackKind::Audio => next_track_id("a", &mut audio_index),
+            MatroskaTrackKind::Subtitle => next_track_id("s", &mut subtitle_index),
+            MatroskaTrackKind::Unknown => next_track_id("x", &mut unknown_index),
+        };
+        let selected = requested_track_id
+            .map(|requested| requested == id)
+            .unwrap_or(track.kind == MatroskaTrackKind::Video);
+        if selected {
+            return Some(SelectedChunkTrack {
+                id,
+                number: track.number,
+            });
+        }
+    }
+
+    None
+}
+
+fn next_track_id(prefix: &str, counter: &mut u32) -> String {
+    let id = format!("{prefix}{counter}");
+    *counter += 1;
+    id
+}
+
+fn matroska_timecode_to_ms(timecode: i64, scale_ns: u64) -> u64 {
+    if timecode <= 0 {
+        return 0;
+    }
+    (timecode as u64).saturating_mul(scale_ns) / 1_000_000
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ClusterBlock {
+    track_number: u64,
+    relative_timecode: i16,
+    keyframe: bool,
+}
+
+struct ClusterBlockIter<'a> {
+    inner: ElementIter<'a>,
+}
+
+impl<'a> ClusterBlockIter<'a> {
+    fn new(cluster: &'a [u8]) -> Self {
+        Self {
+            inner: ElementIter::new(cluster),
+        }
+    }
+}
+
+impl Iterator for ClusterBlockIter<'_> {
+    type Item = ClusterBlock;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        for element in self.inner.by_ref() {
+            match element.id {
+                0xa3 => {
+                    if let Some(block) = parse_block(element.payload, None) {
+                        return Some(block);
+                    }
+                }
+                0xa0 => {
+                    if let Some(block) = parse_block_group(element.payload) {
+                        return Some(block);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+}
+
+fn parse_block_group(payload: &[u8]) -> Option<ClusterBlock> {
+    let mut block = None;
+    let mut has_reference = false;
+    for element in ElementIter::new(payload) {
+        match element.id {
+            0xa1 => block = parse_block(element.payload, Some(false)),
+            0xfb => has_reference = true,
+            _ => {}
+        }
+    }
+    block.map(|mut block| {
+        block.keyframe = !has_reference;
+        block
+    })
+}
+
+fn parse_block(payload: &[u8], forced_keyframe: Option<bool>) -> Option<ClusterBlock> {
+    let (track_number, track_len) = read_vint_size(payload)?;
+    if payload.len() < track_len + 3 {
+        return None;
+    }
+    let timecode_offset = track_len;
+    let relative_timecode = i16::from_be_bytes(
+        payload[timecode_offset..timecode_offset + 2]
+            .try_into()
+            .ok()?,
+    );
+    let flags = payload[timecode_offset + 2];
+    Some(ClusterBlock {
+        track_number: track_number as u64,
+        relative_timecode,
+        keyframe: forced_keyframe.unwrap_or(flags & 0x80 != 0),
+    })
+}
+
+trait SaturatingAddSigned {
+    fn saturating_add_signed(self, rhs: i64) -> i64;
+}
+
+impl SaturatingAddSigned for i64 {
+    fn saturating_add_signed(self, rhs: i64) -> i64 {
+        if rhs >= 0 {
+            self.saturating_add(rhs)
+        } else {
+            self.saturating_sub(rhs.saturating_abs())
+        }
+    }
 }
 
 fn find_first_child(bytes: &[u8], id: u32) -> Option<&[u8]> {
@@ -384,6 +760,111 @@ mod tests {
         assert_eq!(meta.tracks[1].sample_rate, Some(48000));
     }
 
+    #[test]
+    fn plans_chunks_from_matroska_clusters() {
+        let info = elem(
+            0x1549_a966,
+            &[elem(0x002a_d7b1, &1_000_000_u64.to_be_bytes()[5..])].concat(),
+        );
+        let video = track_entry(1, 1, "V_MPEG4/ISO/AVC", &[]);
+        let tracks = elem(0x1654_ae6b, &video);
+        let cluster0 = cluster(
+            0,
+            &[
+                simple_block(1, 0, true),
+                simple_block(1, 1000, false),
+                simple_block(1, 2000, true),
+            ],
+        );
+        let cluster1 = cluster(
+            3000,
+            &[simple_block(1, 0, false), simple_block(1, 1000, true)],
+        );
+        let segment = elem(0x1853_8067, &[info, tracks, cluster0, cluster1].concat());
+        let mut bytes = elem(0x1a45_dfa3, &[]);
+        bytes.extend_from_slice(&segment);
+
+        let plan = parse_chunk_plan(&bytes, None, 2_000).unwrap();
+        assert_eq!(plan.track_ids, vec!["v0"]);
+        assert_eq!(plan.chunks.len(), 3);
+        assert_eq!(
+            plan.chunks[0].packet_range,
+            PacketRange { start: 0, end: 2 }
+        );
+        assert_eq!(
+            plan.chunks[1].packet_range,
+            PacketRange { start: 2, end: 4 }
+        );
+        assert_eq!(
+            plan.chunks[2].packet_range,
+            PacketRange { start: 4, end: 5 }
+        );
+    }
+
+    #[test]
+    fn plans_chunks_from_matroska_cues_before_scanning_clusters() {
+        let info = elem(
+            0x1549_a966,
+            &[elem(0x002a_d7b1, &1_000_000_u64.to_be_bytes()[5..])].concat(),
+        );
+        let video = track_entry(1, 1, "V_MPEG4/ISO/AVC", &[]);
+        let tracks = elem(0x1654_ae6b, &video);
+        let cues = elem(
+            0x1c53_bb6b,
+            &[
+                cue_point(0, 1),
+                cue_point(1000, 1),
+                cue_point(2200, 1),
+                cue_point(3100, 1),
+                cue_point(4300, 1),
+            ]
+            .concat(),
+        );
+        let segment = elem(0x1853_8067, &[info, tracks, cues].concat());
+        let mut bytes = elem(0x1a45_dfa3, &[]);
+        bytes.extend_from_slice(&segment);
+
+        let plan = parse_chunk_plan(&bytes, None, 2_000).unwrap();
+        assert_eq!(plan.track_ids, vec!["v0"]);
+        assert_eq!(plan.chunks.len(), 3);
+        assert_eq!(
+            plan.chunks[0].packet_range,
+            PacketRange { start: 0, end: 2 }
+        );
+        assert_eq!(
+            plan.chunks[1].packet_range,
+            PacketRange { start: 2, end: 4 }
+        );
+        assert_eq!(
+            plan.chunks[2].packet_range,
+            PacketRange { start: 4, end: 5 }
+        );
+    }
+
+    #[test]
+    fn finds_matroska_cues_through_seek_head() {
+        let info = elem(
+            0x1549_a966,
+            &[elem(0x002a_d7b1, &1_000_000_u64.to_be_bytes()[5..])].concat(),
+        );
+        let video = track_entry(1, 1, "V_MPEG4/ISO/AVC", &[]);
+        let tracks = elem(0x1654_ae6b, &video);
+        let cues = elem(
+            0x1c53_bb6b,
+            &[cue_point(0, 1), cue_point(2200, 1), cue_point(4300, 1)].concat(),
+        );
+        let mut seek_head = seek_head_for_cues(0);
+        let cue_position = seek_head.len() + info.len() + tracks.len();
+        seek_head = seek_head_for_cues(cue_position as u8);
+        let segment = elem(0x1853_8067, &[seek_head, info, tracks, cues].concat());
+        let mut bytes = elem(0x1a45_dfa3, &[]);
+        bytes.extend_from_slice(&segment);
+
+        let plan = parse_chunk_plan(&bytes, None, 2_000).unwrap();
+        assert_eq!(plan.track_ids, vec!["v0"]);
+        assert_eq!(plan.chunks.len(), 3);
+    }
+
     fn track_entry(number: u8, kind: u8, codec: &str, extra: &[Vec<u8>]) -> Vec<u8> {
         let mut payload = Vec::new();
         payload.extend_from_slice(&elem(0xd7, &[number]));
@@ -401,6 +882,48 @@ mod tests {
         write_size(payload.len(), &mut out);
         out.extend_from_slice(payload);
         out
+    }
+
+    fn cluster(timecode: u64, blocks: &[Vec<u8>]) -> Vec<u8> {
+        let mut payload = elem(0xe7, &timecode.to_be_bytes()[6..]);
+        for block in blocks {
+            payload.extend_from_slice(block);
+        }
+        elem(0x1f43_b675, &payload)
+    }
+
+    fn simple_block(track_number: u8, relative_timecode: i16, keyframe: bool) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.push(0x80 | track_number);
+        payload.extend_from_slice(&relative_timecode.to_be_bytes());
+        payload.push(if keyframe { 0x80 } else { 0x00 });
+        payload.extend_from_slice(&[0xde, 0xad]);
+        elem(0xa3, &payload)
+    }
+
+    fn cue_point(timecode: u64, track_number: u8) -> Vec<u8> {
+        elem(
+            0xbb,
+            &[
+                elem(0xb3, &timecode.to_be_bytes()[6..]),
+                elem(0xb7, &elem(0xf7, &[track_number])),
+            ]
+            .concat(),
+        )
+    }
+
+    fn seek_head_for_cues(cue_position: u8) -> Vec<u8> {
+        elem(
+            0x114d_9b74,
+            &elem(
+                0x4d_bb,
+                &[
+                    elem(0x53ab, &0x1c53_bb6b_u32.to_be_bytes()),
+                    elem(0x53ac, &[cue_position]),
+                ]
+                .concat(),
+            ),
+        )
     }
 
     fn write_id(id: u32, out: &mut Vec<u8>) {

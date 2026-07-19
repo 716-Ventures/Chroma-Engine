@@ -1,7 +1,10 @@
 use std::path::PathBuf;
 
 use anyhow::{bail, Result};
-use chroma_engine::container::mp4::{looks_like_mp4, parse_chunk_plan};
+use chroma_engine::container::{
+    matroska::{looks_like_ebml, parse_chunk_plan as parse_matroska_chunk_plan},
+    mp4::{looks_like_mp4, parse_chunk_plan as parse_mp4_chunk_plan},
+};
 use chroma_engine::probe::probe_media_source;
 use chroma_engine::session::{plan_playback, AudioSelection, PlaybackConstraints, PlaybackTarget};
 use clap::{Parser, Subcommand};
@@ -93,11 +96,14 @@ fn main() -> Result<()> {
         } => {
             let source = std::fs::File::open(&file)?;
             let bytes = unsafe { Mmap::map(&source)? };
-            if !looks_like_mp4(&bytes) {
-                bail!("native packet chunking currently supports MP4/MOV sample tables");
+            let plan = if looks_like_mp4(&bytes) {
+                parse_mp4_chunk_plan(&bytes, track.as_deref(), target_ms)
+            } else if looks_like_ebml(&bytes) {
+                parse_matroska_chunk_plan(&bytes, track.as_deref(), target_ms)
+            } else {
+                bail!("native packet chunking currently supports MP4/MOV and Matroska/WebM");
             }
-            let plan = parse_chunk_plan(&bytes, track.as_deref(), target_ms)
-                .ok_or_else(|| anyhow::anyhow!("no matching packet-indexed MP4 track found"))?;
+            .ok_or_else(|| anyhow::anyhow!("no matching packet-indexed track found"))?;
             println!("{}", serde_json::to_string_pretty(&plan)?);
         }
         Command::EncoderProbe => {

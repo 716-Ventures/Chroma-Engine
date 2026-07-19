@@ -43,6 +43,8 @@
 - [x] Default playback planning selects primary video/audio and excludes target-unusable bitmap subtitles for browser/Apple targets.
 - [x] Remove legacy transport assumptions from the public core command/module surface.
 - [x] Define native compressed packet references and keyframe-aligned chunk planning.
+- [x] Add MP4/MOV sample-table chunk planning without per-packet materialization.
+- [x] Add Matroska/WebM Cues-based chunk planning with bounded cluster fallback.
 - [ ] Emit stream chunks through reusable packet/decode/encode stages.
 - [ ] H.264/AAC native stream-copy chunks.
 - [ ] HEVC native stream-copy chunks.

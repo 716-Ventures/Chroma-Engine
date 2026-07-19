@@ -5,6 +5,7 @@ Chroma Engine is not a command-compatible FFmpeg replacement. It is a media engi
 - **Probe emits facts, not legacy process output.** `MediaProbe` is the source of truth: source identity, container family, typed tracks, codec families, flags, attachments, and engine capability hints.
 - **Playback is session-first.** The core engine models packet sources, decode stages, encode stages, muxers, and native Chroma transports. Legacy transports must not shape the core.
 - **Metadata probing must be bounded.** Probing maps the file and reads container metadata sections. It must not scan packet clusters or decode frames unless a caller explicitly asks for deep analysis.
+- **Matroska startup uses SeekHead and Cues.** Large Matroska files must not be planned by walking every cluster; Cues provide the bounded keyframe map for native chunk startup.
 - **Track IDs are stable semantic handles.** Video, audio, and subtitle tracks get IDs such as `v0`, `a0`, and `s0`; server/client APIs should use those IDs rather than container stream indexes.
 - **Playback planning is selective by default.** A session plan selects the primary video and primary audio track unless the caller explicitly asks for broader work, such as all audio tracks. This keeps startup fast and avoids waste.
 - **Copy paths stay separate from decode paths.** Remuxing and segmenting copy-compatible streams should avoid decoders, frame allocation, and encoder scheduling entirely.
