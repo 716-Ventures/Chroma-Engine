@@ -4,7 +4,7 @@
 
 - [x] Create Rust repo and library/CLI skeleton.
 - [x] Define native `MediaProbe` JSON with typed tracks, source facts, and capability hints.
-- [x] Define command surface: `probe`, `plan`, `chunks`, `extract-chunk`, `remux-mp4`, `encoder-probe`, `warmup`.
+- [x] Define command surface: `probe`, `plan`, `chunks`, `codec-config`, `extract-chunk`, `remux-mp4`, `encoder-probe`, `warmup`.
 - [x] Define native playback `plan` command with target-specific pipeline stages.
 - [ ] Add real-library probe fixtures from `/Volumes/Movies` and `/Volumes/TVShows`.
 - [ ] Add Chroma-native snapshot tests for representative MP4/MKV/HDR/audio/subtitle combinations.
@@ -32,6 +32,7 @@
 - [ ] MP4 writer with faststart `moov` before media data.
 - [ ] H.264 AVC configuration conversion.
 - [ ] HEVC configuration conversion.
+- [x] Extract MP4/MOV H.264, HEVC, and AAC codec configuration records.
 - [ ] AAC/AC-3/E-AC-3/MP3/FLAC/ALAC sample entries.
 - [ ] Text subtitle to `mov_text`.
 - [ ] Metadata and chapter copy.
@@ -46,6 +47,7 @@
 - [x] Add MP4/MOV sample-table chunk planning without per-packet materialization.
 - [x] Add Matroska/WebM Cues-based chunk planning with bounded cluster fallback.
 - [x] Emit native MP4/MOV compressed chunk payloads from packet byte ranges.
+- [x] Extract MP4/MOV decoder initialization facts for compressed tracks.
 - [ ] Emit stream chunks through reusable packet/decode/encode stages.
 - [ ] H.264/AAC native stream-copy chunks.
 - [ ] HEVC native stream-copy chunks.

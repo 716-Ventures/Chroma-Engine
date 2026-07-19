@@ -5,6 +5,7 @@ use crate::{
         PacketExtractError, PacketRange, PacketRef, TimeDelta, TimePoint, TimeScale,
     },
 };
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mp4BasicMetadata {
@@ -38,6 +39,18 @@ pub struct Mp4TrackPacketIndex {
     pub kind: Mp4TrackKind,
     pub timescale: TimeScale,
     pub packets: Vec<PacketRef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Mp4CodecConfig {
+    pub track_id: String,
+    pub track_kind: String,
+    pub codec: String,
+    pub sample_entry: String,
+    pub config_box: Option<String>,
+    pub codec_string: Option<String>,
+    pub description_hex: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -221,6 +234,40 @@ pub fn extract_chunk(
     Ok((manifest, payload))
 }
 
+pub fn parse_codec_config(
+    bytes: &[u8],
+    requested_track_id: Option<&str>,
+) -> Option<Mp4CodecConfig> {
+    let mut video_index = 0_u32;
+    let mut audio_index = 0_u32;
+    let mut subtitle_index = 0_u32;
+    let mut unknown_index = 0_u32;
+
+    for atom in AtomIter::new(bytes) {
+        if atom.kind != *b"moov" {
+            continue;
+        }
+
+        for trak in AtomIter::new(atom.payload).filter(|atom| atom.kind == *b"trak") {
+            let kind = parse_trak_kind(trak.payload)?;
+            let track_id = match kind {
+                Mp4TrackKind::Video => next_track_id("v", &mut video_index),
+                Mp4TrackKind::Audio => next_track_id("a", &mut audio_index),
+                Mp4TrackKind::Subtitle => next_track_id("s", &mut subtitle_index),
+                Mp4TrackKind::Unknown => next_track_id("x", &mut unknown_index),
+            };
+            let should_parse = requested_track_id
+                .map(|requested| requested == track_id)
+                .unwrap_or(kind == Mp4TrackKind::Video);
+            if should_parse {
+                return parse_trak_codec_config(trak.payload, kind, track_id);
+            }
+        }
+    }
+
+    None
+}
+
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum Mp4ChunkExtractError {
     #[error("no matching MP4 packet-indexed track found")]
@@ -386,6 +433,39 @@ fn parse_trak_sample_table(payload: &[u8]) -> Option<(TimeScale, SampleTable)> {
         },
         table,
     ))
+}
+
+fn parse_trak_codec_config(
+    payload: &[u8],
+    kind: Mp4TrackKind,
+    track_id: String,
+) -> Option<Mp4CodecConfig> {
+    let mdia = find_atom(payload, b"mdia")?;
+    let stbl = find_atom(find_atom(mdia, b"minf")?, b"stbl")?;
+    let entry = parse_stsd_entry(find_atom(stbl, b"stsd")?)?;
+    let sample_entry = fourcc_to_string(&entry.codec_fourcc)?;
+    let codec = sample_entry_codec(&entry.codec_fourcc, kind);
+    let config = codec_config_from_sample_entry(kind, &entry);
+
+    Some(Mp4CodecConfig {
+        track_id,
+        track_kind: mp4_track_kind_name(kind).to_string(),
+        codec,
+        sample_entry,
+        config_box: config
+            .as_ref()
+            .and_then(|config| fourcc_to_string(&config.box_type)),
+        codec_string: config
+            .as_ref()
+            .and_then(|config| config.codec_string.clone()),
+        description_hex: config.map(|config| hex_string(config.description)),
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SampleEntry<'a> {
+    codec_fourcc: [u8; 4],
+    payload: &'a [u8],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -716,6 +796,11 @@ fn parse_co64(payload: &[u8]) -> Option<Vec<u64>> {
 }
 
 fn parse_stsd(payload: &[u8]) -> Option<SampleEntryInfo> {
+    let entry = parse_stsd_entry(payload)?;
+    Some(parse_sample_entry(entry.codec_fourcc, entry.payload))
+}
+
+fn parse_stsd_entry(payload: &[u8]) -> Option<SampleEntry<'_>> {
     if payload.len() < 16 {
         return None;
     }
@@ -729,7 +814,165 @@ fn parse_stsd(payload: &[u8]) -> Option<SampleEntryInfo> {
     }
     let codec_fourcc: [u8; 4] = payload[12..16].try_into().ok()?;
     let entry_payload = &payload[16..8 + entry_size];
-    Some(parse_sample_entry(codec_fourcc, entry_payload))
+    Some(SampleEntry {
+        codec_fourcc,
+        payload: entry_payload,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SampleEntryCodecConfig {
+    box_type: [u8; 4],
+    codec_string: Option<String>,
+    description: Vec<u8>,
+}
+
+fn codec_config_from_sample_entry(
+    kind: Mp4TrackKind,
+    entry: &SampleEntry<'_>,
+) -> Option<SampleEntryCodecConfig> {
+    let child_boxes = sample_entry_child_boxes(kind, entry.codec_fourcc, entry.payload)?;
+    for atom in AtomIter::new(child_boxes) {
+        match atom.kind {
+            kind if kind == *b"avcC" => {
+                return Some(SampleEntryCodecConfig {
+                    box_type: atom.kind,
+                    codec_string: avc_codec_string(atom.payload),
+                    description: atom.payload.to_vec(),
+                });
+            }
+            kind if kind == *b"hvcC" => {
+                return Some(SampleEntryCodecConfig {
+                    box_type: atom.kind,
+                    codec_string: hevc_codec_string(atom.payload, &entry.codec_fourcc),
+                    description: atom.payload.to_vec(),
+                });
+            }
+            kind if kind == *b"esds" => {
+                let asc = audio_specific_config_from_esds(atom.payload);
+                return Some(SampleEntryCodecConfig {
+                    box_type: atom.kind,
+                    codec_string: asc
+                        .as_ref()
+                        .map(|config| format!("mp4a.40.{}", config.audio_object_type)),
+                    description: asc.map_or_else(|| atom.payload.to_vec(), |config| config.bytes),
+                });
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn sample_entry_child_boxes(
+    kind: Mp4TrackKind,
+    codec_fourcc: [u8; 4],
+    payload: &[u8],
+) -> Option<&[u8]> {
+    let offset = if is_video_sample_entry(&codec_fourcc) {
+        78
+    } else if is_audio_sample_entry(&codec_fourcc) {
+        28
+    } else if kind == Mp4TrackKind::Subtitle {
+        8
+    } else {
+        return None;
+    };
+    payload.get(offset..)
+}
+
+fn avc_codec_string(payload: &[u8]) -> Option<String> {
+    if payload.len() < 4 {
+        return None;
+    }
+    Some(format!(
+        "avc1.{:02X}{:02X}{:02X}",
+        payload[1], payload[2], payload[3]
+    ))
+}
+
+fn hevc_codec_string(payload: &[u8], sample_entry: &[u8; 4]) -> Option<String> {
+    if payload.len() < 13 {
+        return None;
+    }
+    let prefix = if sample_entry == b"hev1" {
+        "hev1"
+    } else {
+        "hvc1"
+    };
+    let profile_space = payload[1] >> 6;
+    let profile_idc = payload[1] & 0x1f;
+    let compatibility = read_u32(&payload[2..6])?;
+    let tier = if payload[12] & 0x80 != 0 { "H" } else { "L" };
+    let level = payload[12] & 0x7f;
+    let space = match profile_space {
+        1 => "A",
+        2 => "B",
+        3 => "C",
+        _ => "",
+    };
+    Some(format!(
+        "{prefix}.{space}{profile_idc}.{:X}.{tier}{level}",
+        compatibility.reverse_bits()
+    ))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AudioSpecificConfig {
+    audio_object_type: u8,
+    bytes: Vec<u8>,
+}
+
+fn audio_specific_config_from_esds(payload: &[u8]) -> Option<AudioSpecificConfig> {
+    let descriptors = payload.get(4..).unwrap_or(payload);
+    let config = find_descriptor_payload(descriptors, 0x05)?;
+    let first = *config.first()?;
+    let second = *config.get(1)?;
+    let audio_object_type = first >> 3;
+    let _frequency_index = ((first & 0x07) << 1) | (second >> 7);
+    Some(AudioSpecificConfig {
+        audio_object_type,
+        bytes: config.to_vec(),
+    })
+}
+
+fn find_descriptor_payload(payload: &[u8], tag: u8) -> Option<&[u8]> {
+    let mut offset = 0;
+    while offset + 2 <= payload.len() {
+        let descriptor_tag = payload[offset];
+        offset += 1;
+        let (size, size_len) = read_descriptor_size(&payload[offset..])?;
+        offset += size_len;
+        let end = offset.checked_add(size)?;
+        if end > payload.len() {
+            return None;
+        }
+        let body = &payload[offset..end];
+        if descriptor_tag == tag {
+            return Some(body);
+        }
+        let nested_body = match descriptor_tag {
+            0x03 => body.get(3..).unwrap_or_default(),
+            0x04 => body.get(13..).unwrap_or_default(),
+            _ => body,
+        };
+        if let Some(nested) = find_descriptor_payload(nested_body, tag) {
+            return Some(nested);
+        }
+        offset = end;
+    }
+    None
+}
+
+fn read_descriptor_size(payload: &[u8]) -> Option<(usize, usize)> {
+    let mut size = 0_usize;
+    for (idx, byte) in payload.iter().take(4).enumerate() {
+        size = (size << 7) | usize::from(byte & 0x7f);
+        if byte & 0x80 == 0 {
+            return Some((size, idx + 1));
+        }
+    }
+    None
 }
 
 fn parse_sample_entry(codec_fourcc: [u8; 4], payload: &[u8]) -> SampleEntryInfo {
@@ -807,6 +1050,15 @@ fn handler_to_track_kind(handler: Option<&str>) -> Mp4TrackKind {
     }
 }
 
+fn mp4_track_kind_name(kind: Mp4TrackKind) -> &'static str {
+    match kind {
+        Mp4TrackKind::Video => "video",
+        Mp4TrackKind::Audio => "audio",
+        Mp4TrackKind::Subtitle => "subtitle",
+        Mp4TrackKind::Unknown => "unknown",
+    }
+}
+
 fn sample_entry_codec(fourcc: &[u8; 4], kind: Mp4TrackKind) -> String {
     match fourcc {
         b"avc1" | b"avc3" => "h264".to_string(),
@@ -871,6 +1123,16 @@ fn fourcc_to_string(bytes: &[u8]) -> Option<String> {
         return None;
     }
     Some(String::from_utf8_lossy(bytes).trim().to_string())
+}
+
+fn hex_string(bytes: Vec<u8>) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
 }
 
 fn read_u32(bytes: &[u8]) -> Option<u32> {
@@ -1101,6 +1363,65 @@ mod tests {
         assert_eq!(payload, b"aaaabbb");
     }
 
+    #[test]
+    fn extracts_h264_codec_config_from_avcc() {
+        let mut data = ftyp();
+        let avcc = atom(b"avcC", &[1, 0x64, 0x00, 0x1f, 0xff, 0xe1, 0, 0]);
+        data.extend_from_slice(&atom(
+            b"moov",
+            &trak_with_sample_entry_payload(
+                b"vide",
+                b"avc1",
+                video_sample_entry_payload(Some((1920, 1080)), &avcc),
+                3000,
+                1000,
+            ),
+        ));
+
+        let config = parse_codec_config(&data, None).unwrap();
+        assert_eq!(config.track_id, "v0");
+        assert_eq!(config.track_kind, "video");
+        assert_eq!(config.codec, "h264");
+        assert_eq!(config.sample_entry, "avc1");
+        assert_eq!(config.config_box.as_deref(), Some("avcC"));
+        assert_eq!(config.codec_string.as_deref(), Some("avc1.64001F"));
+        assert_eq!(config.description_hex.as_deref(), Some("0164001fffe10000"));
+    }
+
+    #[test]
+    fn extracts_aac_codec_config_from_esds() {
+        let mut data = ftyp();
+        let esds = atom(
+            b"esds",
+            &[
+                [0, 0, 0, 0].as_slice(),
+                &es_descriptor(&decoder_config_descriptor(&decoder_specific_descriptor(&[
+                    0x12, 0x10,
+                ]))),
+            ]
+            .concat(),
+        );
+        data.extend_from_slice(&atom(
+            b"moov",
+            &trak_with_sample_entry_payload(
+                b"soun",
+                b"mp4a",
+                audio_sample_entry_payload(2, 48000, &esds),
+                3000,
+                1000,
+            ),
+        ));
+
+        let config = parse_codec_config(&data, Some("a0")).unwrap();
+        assert_eq!(config.track_id, "a0");
+        assert_eq!(config.track_kind, "audio");
+        assert_eq!(config.codec, "aac");
+        assert_eq!(config.sample_entry, "mp4a");
+        assert_eq!(config.config_box.as_deref(), Some("esds"));
+        assert_eq!(config.codec_string.as_deref(), Some("mp4a.40.2"));
+        assert_eq!(config.description_hex.as_deref(), Some("1210"));
+    }
+
     fn ftyp() -> Vec<u8> {
         atom(
             b"ftyp",
@@ -1201,6 +1522,37 @@ mod tests {
         )
     }
 
+    fn trak_with_sample_entry_payload(
+        handler: &[u8; 4],
+        sample_entry: &[u8; 4],
+        sample_entry_payload: Vec<u8>,
+        duration: u32,
+        timescale: u32,
+    ) -> Vec<u8> {
+        atom(
+            b"trak",
+            &[
+                tkhd(Some((1920, 1080))),
+                atom(
+                    b"mdia",
+                    &[
+                        mdhd(timescale, duration),
+                        hdlr(handler),
+                        atom(
+                            b"minf",
+                            &atom(
+                                b"stbl",
+                                &stsd_with_entry_payload(sample_entry, &sample_entry_payload),
+                            ),
+                        ),
+                    ]
+                    .concat(),
+                ),
+            ]
+            .concat(),
+        )
+    }
+
     fn mdhd(timescale: u32, duration: u32) -> Vec<u8> {
         let mut payload = vec![0_u8; 20];
         payload[12..16].copy_from_slice(&timescale.to_be_bytes());
@@ -1220,6 +1572,15 @@ mod tests {
         audio: Option<(u16, u32)>,
     ) -> Vec<u8> {
         let entry = sample_entry_atom(sample_entry, size, audio);
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&[0, 0, 0, 0]);
+        payload.extend_from_slice(&1_u32.to_be_bytes());
+        payload.extend_from_slice(&entry);
+        atom(b"stsd", &payload)
+    }
+
+    fn stsd_with_entry_payload(sample_entry: &[u8; 4], entry_payload: &[u8]) -> Vec<u8> {
+        let entry = atom(sample_entry, entry_payload);
         let mut payload = Vec::new();
         payload.extend_from_slice(&[0, 0, 0, 0]);
         payload.extend_from_slice(&1_u32.to_be_bytes());
@@ -1296,6 +1657,55 @@ mod tests {
             payload[24..28].copy_from_slice(&(sample_rate << 16).to_be_bytes());
         }
         atom(fourcc, &payload)
+    }
+
+    fn video_sample_entry_payload(size: Option<(u32, u32)>, child_boxes: &[u8]) -> Vec<u8> {
+        let mut payload = vec![0_u8; 78];
+        if let Some((w, h)) = size {
+            payload[24..26].copy_from_slice(&(w as u16).to_be_bytes());
+            payload[26..28].copy_from_slice(&(h as u16).to_be_bytes());
+        }
+        payload.extend_from_slice(child_boxes);
+        payload
+    }
+
+    fn audio_sample_entry_payload(channels: u16, sample_rate: u32, child_boxes: &[u8]) -> Vec<u8> {
+        let mut payload = vec![0_u8; 28];
+        payload[16..18].copy_from_slice(&channels.to_be_bytes());
+        payload[24..28].copy_from_slice(&(sample_rate << 16).to_be_bytes());
+        payload.extend_from_slice(child_boxes);
+        payload
+    }
+
+    fn es_descriptor(nested: &[u8]) -> Vec<u8> {
+        descriptor(0x03, &[[0, 1, 0].as_slice(), nested].concat())
+    }
+
+    fn decoder_config_descriptor(nested: &[u8]) -> Vec<u8> {
+        descriptor(
+            0x04,
+            &[
+                [0x40, 0x15].as_slice(),
+                &[0, 0, 0],
+                &128_000_u32.to_be_bytes(),
+                &128_000_u32.to_be_bytes(),
+                nested,
+            ]
+            .concat(),
+        )
+    }
+
+    fn decoder_specific_descriptor(config: &[u8]) -> Vec<u8> {
+        descriptor(0x05, config)
+    }
+
+    fn descriptor(tag: u8, payload: &[u8]) -> Vec<u8> {
+        assert!(payload.len() < 0x80);
+        let mut out = Vec::with_capacity(payload.len() + 2);
+        out.push(tag);
+        out.push(payload.len() as u8);
+        out.extend_from_slice(payload);
+        out
     }
 
     fn atom(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {

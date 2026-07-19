@@ -5,7 +5,7 @@ use chroma_engine::container::{
     matroska::{looks_like_ebml, parse_chunk_plan as parse_matroska_chunk_plan},
     mp4::{
         extract_chunk as extract_mp4_chunk, looks_like_mp4,
-        parse_chunk_plan as parse_mp4_chunk_plan,
+        parse_chunk_plan as parse_mp4_chunk_plan, parse_codec_config as parse_mp4_codec_config,
     },
 };
 use chroma_engine::probe::probe_media_source;
@@ -42,6 +42,12 @@ enum Command {
         track: Option<String>,
         #[arg(long, default_value_t = 4_000)]
         target_ms: u64,
+    },
+    /// Emit decoder initialization facts for a compressed MP4/MOV track.
+    CodecConfig {
+        file: PathBuf,
+        #[arg(long)]
+        track: Option<String>,
     },
     /// Write a native compressed chunk payload and emit its manifest.
     ExtractChunk {
@@ -119,6 +125,16 @@ fn main() -> Result<()> {
             }
             .ok_or_else(|| anyhow::anyhow!("no matching packet-indexed track found"))?;
             println!("{}", serde_json::to_string_pretty(&plan)?);
+        }
+        Command::CodecConfig { file, track } => {
+            let source = std::fs::File::open(&file)?;
+            let bytes = unsafe { Mmap::map(&source)? };
+            if !looks_like_mp4(&bytes) {
+                bail!("codec-config currently supports MP4/MOV sample descriptions");
+            }
+            let config = parse_mp4_codec_config(&bytes, track.as_deref())
+                .ok_or_else(|| anyhow::anyhow!("no matching MP4 codec config found"))?;
+            println!("{}", serde_json::to_string_pretty(&config)?);
         }
         Command::ExtractChunk {
             input,
