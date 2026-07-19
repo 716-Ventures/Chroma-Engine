@@ -10,6 +10,7 @@ The target is a native media architecture, not an FFmpeg-compatible facade. Chro
 - `chunks`: produce keyframe-aligned native chunk windows from compressed packet indexes.
 - `codec-config`: emit decoder initialization facts for a compressed MP4/MOV track.
 - `h264-nalus`: emit AVC/H.264 NAL-unit layout for a native chunk.
+- `h264-annex-b`: write a start-code framed H.264 payload for a native chunk.
 - `extract-chunk`: write a native compressed chunk payload and emit its manifest.
 - `remux-mp4`: remux supported sources into an efficient ISO-BMFF output path.
 - `encoder-probe`: report platform encoder capabilities.
@@ -30,5 +31,6 @@ cargo run -- manifest /path/to/media.mp4 --target-ms 4000
 cargo run -- chunks /path/to/media.mp4 --target-ms 4000
 cargo run -- codec-config /path/to/media.mp4 --track a0
 cargo run -- h264-nalus /path/to/media.mp4 --chunk-index 0
+cargo run -- h264-annex-b /path/to/media.mp4 /tmp/chunk0.h264 --chunk-index 0
 cargo run -- extract-chunk /path/to/media.mp4 /tmp/chunk0.bin --chunk-index 0
 ```

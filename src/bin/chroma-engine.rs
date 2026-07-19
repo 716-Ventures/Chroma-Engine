@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::{bail, Result};
-use chroma_engine::codec::h264::parse_avc_chunk_nalus;
+use chroma_engine::codec::h264::{avc_chunk_to_annex_b, parse_avc_chunk_nalus};
 use chroma_engine::container::{
     matroska::{looks_like_ebml, parse_chunk_plan as parse_matroska_chunk_plan},
     mp4::{
@@ -74,6 +74,17 @@ enum Command {
     /// Emit AVC/H.264 NAL-unit layout for a native MP4/MOV chunk.
     H264Nalus {
         input: PathBuf,
+        #[arg(long)]
+        track: Option<String>,
+        #[arg(long, default_value_t = 0)]
+        chunk_index: u32,
+        #[arg(long, default_value_t = 4_000)]
+        target_ms: u64,
+    },
+    /// Write an Annex-B H.264 payload for a native MP4/MOV chunk.
+    H264AnnexB {
+        input: PathBuf,
+        output: PathBuf,
         #[arg(long)]
         track: Option<String>,
         #[arg(long, default_value_t = 0)]
@@ -227,6 +238,41 @@ fn main() -> Result<()> {
                 })?
             );
         }
+        Command::H264AnnexB {
+            input,
+            output,
+            track,
+            chunk_index,
+            target_ms,
+        } => {
+            let source = std::fs::File::open(&input)?;
+            let bytes = unsafe { Mmap::map(&source)? };
+            if !looks_like_mp4(&bytes) {
+                bail!("h264-annex-b currently supports MP4/MOV packet tables");
+            }
+            let config = parse_mp4_codec_config(&bytes, track.as_deref())
+                .ok_or_else(|| anyhow::anyhow!("no matching MP4 codec config found"))?;
+            if config.codec != "h264" {
+                bail!("selected track is {}, not h264", config.codec);
+            }
+            let nalu_length_size = config
+                .nalu_length_size
+                .ok_or_else(|| anyhow::anyhow!("missing AVC NAL length size"))?;
+            let (manifest, payload) =
+                extract_mp4_chunk(&bytes, Some(&config.track_id), target_ms, chunk_index)?;
+            let annex_b = avc_chunk_to_annex_b(&payload, &manifest.samples, nalu_length_size)?;
+            let byte_count = annex_b.len() as u64;
+            std::fs::write(output, annex_b)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&H264AnnexBOutput {
+                    track_id: config.track_id,
+                    chunk_index,
+                    nalu_length_size,
+                    byte_count,
+                })?
+            );
+        }
         Command::EncoderProbe => {
             let probe = chroma_engine::platform::encoder_probe();
             println!("{}", serde_json::to_string_pretty(&probe)?);
@@ -251,6 +297,15 @@ struct H264NalusOutput {
     chunk_index: u32,
     nalu_length_size: u8,
     nalus: Vec<chroma_engine::codec::h264::AvcNalUnit>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct H264AnnexBOutput {
+    track_id: String,
+    chunk_index: u32,
+    nalu_length_size: u8,
+    byte_count: u64,
 }
 
 impl From<TargetArg> for PlaybackTarget {
