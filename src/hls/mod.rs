@@ -1,15 +1,17 @@
 use std::{
-    fs::{create_dir_all, write},
+    fs::{create_dir_all, write, File},
     path::{Path, PathBuf},
 };
 
 use anyhow::{anyhow, bail, Context, Result};
+use memmap2::Mmap;
 use serde::{Deserialize, Serialize};
 
 use crate::{
     codec::{
         aac::{adts_header, parse_audio_specific_config, AacAudioSpecificConfig},
         h264::{avc_sample_to_annex_b, parse_avc_decoder_config, AvcParameterSets},
+        hevc::{hevc_sample_to_annex_b, parse_hevc_decoder_config, HevcDecoderConfig},
     },
     container::{
         matroska::{self, MatroskaTrackKind},
@@ -23,6 +25,7 @@ const AUDIO_PID: u16 = 0x0101;
 const PMT_PID: u16 = 0x1000;
 const VIDEO_STREAM_ID: u8 = 0xe0;
 const AUDIO_STREAM_ID: u8 = 0xc0;
+const PRIVATE_STREAM_ID: u8 = 0xbd;
 const TS_CLOCK: u64 = 90_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,9 +71,15 @@ enum PayloadKind {
         nalu_length_size: u8,
         parameter_sets: AvcParameterSets,
     },
+    Hevc {
+        nalu_length_size: u8,
+        parameter_sets: HevcDecoderConfig,
+    },
     Aac {
         config: AacAudioSpecificConfig,
     },
+    Ac3,
+    Eac3,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,7 +97,9 @@ struct TimedPayload {
 }
 
 pub fn write_hls_vod(input: &Path, output_dir: &Path, options: HlsOptions) -> Result<HlsOutput> {
-    let bytes = std::fs::read(input).with_context(|| format!("read {}", input.display()))?;
+    let file = File::open(input).with_context(|| format!("open {}", input.display()))?;
+    let bytes = unsafe { Mmap::map(&file) }.with_context(|| format!("map {}", input.display()))?;
+    let bytes = bytes.as_ref();
     let tracks = if mp4::looks_like_mp4(&bytes) {
         hls_tracks_from_mp4(&bytes)?
     } else if matroska::looks_like_ebml(&bytes) {
@@ -150,30 +161,27 @@ pub fn write_hls_vod(input: &Path, output_dir: &Path, options: HlsOptions) -> Re
 
 fn hls_tracks_from_mp4(bytes: &[u8]) -> Result<HlsTrackSet> {
     let meta = mp4::parse_basic_metadata(bytes);
-    meta.tracks
+    let video_meta = meta
+        .tracks
         .iter()
-        .find(|track| track.kind == Mp4TrackKind::Video && track.codec == "h264")
-        .ok_or_else(|| anyhow!("native HLS MP4 path currently requires H.264 video"))?;
-    meta.tracks
+        .find(|track| {
+            track.kind == Mp4TrackKind::Video && matches!(track.codec.as_str(), "h264" | "hevc")
+        })
+        .ok_or_else(|| anyhow!("native HLS MP4 path currently requires H.264 or HEVC video"))?;
+    let audio_meta = meta
+        .tracks
         .iter()
-        .find(|track| track.kind == Mp4TrackKind::Audio && track.codec == "aac")
-        .ok_or_else(|| anyhow!("native HLS MP4 path currently requires AAC audio"))?;
+        .find(|track| {
+            track.kind == Mp4TrackKind::Audio
+                && matches!(track.codec.as_str(), "aac" | "ac3" | "eac3")
+        })
+        .ok_or_else(|| {
+            anyhow!("native HLS MP4 path currently requires AAC, AC-3, or E-AC-3 audio")
+        })?;
     let video_config = mp4::parse_codec_config(bytes, Some("v0"))
-        .ok_or_else(|| anyhow!("missing MP4 H.264 decoder config"))?;
+        .ok_or_else(|| anyhow!("missing MP4 video decoder config"))?;
     let audio_config = mp4::parse_codec_config(bytes, Some("a0"))
-        .ok_or_else(|| anyhow!("missing MP4 AAC decoder config"))?;
-    let avc = hex_to_bytes(
-        video_config
-            .description_hex
-            .as_deref()
-            .ok_or_else(|| anyhow!("missing avcC"))?,
-    )?;
-    let asc = hex_to_bytes(
-        audio_config
-            .description_hex
-            .as_deref()
-            .ok_or_else(|| anyhow!("missing AudioSpecificConfig"))?,
-    )?;
+        .ok_or_else(|| anyhow!("missing MP4 audio decoder config"))?;
     let video_packets = mp4::parse_packet_track(bytes, Some("v0"))
         .ok_or_else(|| anyhow!("missing MP4 video packet index"))?
         .packets;
@@ -181,25 +189,67 @@ fn hls_tracks_from_mp4(bytes: &[u8]) -> Result<HlsTrackSet> {
         .ok_or_else(|| anyhow!("missing MP4 audio packet index"))?
         .packets;
 
+    let video_payload = match video_meta.codec.as_str() {
+        "h264" => {
+            let avc = hex_to_bytes(
+                video_config
+                    .description_hex
+                    .as_deref()
+                    .ok_or_else(|| anyhow!("missing avcC"))?,
+            )?;
+            PayloadKind::Avc {
+                nalu_length_size: video_config.nalu_length_size.unwrap_or(4),
+                parameter_sets: parse_avc_decoder_config(&avc)?,
+            }
+        }
+        "hevc" => {
+            let hvc = hex_to_bytes(
+                video_config
+                    .description_hex
+                    .as_deref()
+                    .ok_or_else(|| anyhow!("missing hvcC"))?,
+            )?;
+            let parameter_sets = parse_hevc_decoder_config(&hvc)?;
+            PayloadKind::Hevc {
+                nalu_length_size: video_config
+                    .nalu_length_size
+                    .unwrap_or(parameter_sets.nalu_length_size),
+                parameter_sets,
+            }
+        }
+        other => bail!("native HLS MP4 video codec {other} is not supported"),
+    };
+    let audio_payload = match audio_meta.codec.as_str() {
+        "aac" => {
+            let asc = hex_to_bytes(
+                audio_config
+                    .description_hex
+                    .as_deref()
+                    .ok_or_else(|| anyhow!("missing AudioSpecificConfig"))?,
+            )?;
+            PayloadKind::Aac {
+                config: parse_audio_specific_config(&asc)?,
+            }
+        }
+        "ac3" => PayloadKind::Ac3,
+        "eac3" => PayloadKind::Eac3,
+        other => bail!("native HLS MP4 audio codec {other} is not supported"),
+    };
+
     Ok(HlsTrackSet {
         video: HlsTrack {
             codec_string: video_config
                 .codec_string
-                .unwrap_or_else(|| "avc1.640028".to_string()),
+                .unwrap_or_else(|| fallback_video_codec_string(video_meta.codec.as_str())),
             packets: video_packets,
-            payload: PayloadKind::Avc {
-                nalu_length_size: video_config.nalu_length_size.unwrap_or(4),
-                parameter_sets: parse_avc_decoder_config(&avc)?,
-            },
+            payload: video_payload,
         },
         audio: HlsTrack {
             codec_string: audio_config
                 .codec_string
-                .unwrap_or_else(|| "mp4a.40.2".to_string()),
+                .unwrap_or_else(|| fallback_audio_codec_string(audio_meta.codec.as_str())),
             packets: audio_packets,
-            payload: PayloadKind::Aac {
-                config: parse_audio_specific_config(&asc)?,
-            },
+            payload: audio_payload,
         },
     })
 }
@@ -210,44 +260,73 @@ fn hls_tracks_from_matroska(bytes: &[u8]) -> Result<HlsTrackSet> {
         .tracks
         .iter()
         .filter(|track| track.kind == MatroskaTrackKind::Video)
-        .find(|track| track.codec == "h264")
-        .ok_or_else(|| anyhow!("native HLS Matroska path currently requires H.264 video"))?;
+        .find(|track| matches!(track.codec.as_str(), "h264" | "hevc"))
+        .ok_or_else(|| {
+            anyhow!("native HLS Matroska path currently requires H.264 or HEVC video")
+        })?;
     let audio = meta
         .tracks
         .iter()
         .filter(|track| track.kind == MatroskaTrackKind::Audio)
-        .find(|track| track.codec == "aac")
-        .ok_or_else(|| anyhow!("native HLS Matroska path currently requires AAC audio"))?;
-    let avc = video
-        .codec_private
-        .as_deref()
-        .ok_or_else(|| anyhow!("missing Matroska avcC private data"))?;
-    let asc = audio
-        .codec_private
-        .as_deref()
-        .ok_or_else(|| anyhow!("missing Matroska AAC private data"))?;
+        .find(|track| matches!(track.codec.as_str(), "aac" | "ac3" | "eac3"))
+        .ok_or_else(|| {
+            anyhow!("native HLS Matroska path currently requires AAC, AC-3, or E-AC-3 audio")
+        })?;
     let video_packets = matroska::parse_packet_track(bytes, Some("v0"))
         .ok_or_else(|| anyhow!("missing Matroska video packet index"))?
         .packets;
     let audio_packets = matroska::parse_packet_track(bytes, Some("a0"))
         .ok_or_else(|| anyhow!("missing Matroska audio packet index"))?
         .packets;
-    let avc_config = parse_avc_decoder_config(avc)?;
-    let aac_config = parse_audio_specific_config(asc)?;
+    let video_payload = match video.codec.as_str() {
+        "h264" => {
+            let avc = video
+                .codec_private
+                .as_deref()
+                .ok_or_else(|| anyhow!("missing Matroska avcC private data"))?;
+            PayloadKind::Avc {
+                nalu_length_size: parse_avc_decoder_config(avc)?.nalu_length_size,
+                parameter_sets: parse_avc_decoder_config(avc)?,
+            }
+        }
+        "hevc" => {
+            let hvc = video
+                .codec_private
+                .as_deref()
+                .ok_or_else(|| anyhow!("missing Matroska hvcC private data"))?;
+            let parameter_sets = parse_hevc_decoder_config(hvc)?;
+            PayloadKind::Hevc {
+                nalu_length_size: parameter_sets.nalu_length_size,
+                parameter_sets,
+            }
+        }
+        other => bail!("native HLS Matroska video codec {other} is not supported"),
+    };
+    let audio_payload = match audio.codec.as_str() {
+        "aac" => {
+            let asc = audio
+                .codec_private
+                .as_deref()
+                .ok_or_else(|| anyhow!("missing Matroska AAC private data"))?;
+            PayloadKind::Aac {
+                config: parse_audio_specific_config(asc)?,
+            }
+        }
+        "ac3" => PayloadKind::Ac3,
+        "eac3" => PayloadKind::Eac3,
+        other => bail!("native HLS Matroska audio codec {other} is not supported"),
+    };
 
     Ok(HlsTrackSet {
         video: HlsTrack {
-            codec_string: format!("avc1.{:02X}{:02X}{:02X}", avc[1], avc[2], avc[3]),
+            codec_string: matroska_video_codec_string(video),
             packets: video_packets,
-            payload: PayloadKind::Avc {
-                nalu_length_size: avc_config.nalu_length_size,
-                parameter_sets: avc_config,
-            },
+            payload: video_payload,
         },
         audio: HlsTrack {
-            codec_string: format!("mp4a.40.{}", aac_config.object_type),
+            codec_string: matroska_audio_codec_string(audio),
             packets: audio_packets,
-            payload: PayloadKind::Aac { config: aac_config },
+            payload: audio_payload,
         },
     })
 }
@@ -287,7 +366,10 @@ fn packet_end_ms(packet: &PacketRef) -> u64 {
 }
 
 fn mux_segment(bytes: &[u8], tracks: &HlsTrackSet, window: SegmentWindow) -> Result<Vec<u8>> {
-    let mut mux = TsMuxer::new();
+    let mut mux = TsMuxer::new(
+        ts_stream_type(&tracks.video.payload),
+        ts_stream_type(&tracks.audio.payload),
+    );
     mux.write_pat_pmt();
 
     let mut samples = Vec::new();
@@ -328,7 +410,12 @@ fn mux_segment(bytes: &[u8], tracks: &HlsTrackSet, window: SegmentWindow) -> Res
         if is_video {
             mux.write_pes(VIDEO_PID, VIDEO_STREAM_ID, &timed, true);
         } else {
-            mux.write_pes(AUDIO_PID, AUDIO_STREAM_ID, &timed, false);
+            mux.write_pes(
+                AUDIO_PID,
+                audio_stream_id(&tracks.audio.payload),
+                &timed,
+                false,
+            );
         }
     }
 
@@ -371,6 +458,29 @@ fn packet_to_payload(bytes: &[u8], packet: &PacketRef, kind: &PayloadKind) -> Re
             out.extend_from_slice(&bytes[start..end]);
             Ok(out)
         }
+        PayloadKind::Hevc {
+            nalu_length_size,
+            parameter_sets,
+        } => {
+            let mut out = Vec::new();
+            if packet.keyframe {
+                for array in &parameter_sets.arrays {
+                    if !matches!(array.nal_unit_type, 32 | 33 | 34) {
+                        continue;
+                    }
+                    for unit in &array.units {
+                        out.extend_from_slice(&[0, 0, 0, 1]);
+                        out.extend_from_slice(unit);
+                    }
+                }
+            }
+            out.extend_from_slice(&hevc_sample_to_annex_b(
+                &bytes[start..end],
+                *nalu_length_size,
+            )?);
+            Ok(out)
+        }
+        PayloadKind::Ac3 | PayloadKind::Eac3 => Ok(bytes[start..end].to_vec()),
     }
 }
 
@@ -388,13 +498,17 @@ fn looks_like_annex_b(sample: &[u8]) -> bool {
 struct TsMuxer {
     out: Vec<u8>,
     continuity: [u8; 8192],
+    video_stream_type: u8,
+    audio_stream_type: u8,
 }
 
 impl TsMuxer {
-    fn new() -> Self {
+    fn new(video_stream_type: u8, audio_stream_type: u8) -> Self {
         Self {
             out: Vec::new(),
             continuity: [0; 8192],
+            video_stream_type,
+            audio_stream_type,
         }
     }
 
@@ -404,7 +518,10 @@ impl TsMuxer {
 
     fn write_pat_pmt(&mut self) {
         self.write_psi(0, &pat_section());
-        self.write_psi(PMT_PID, &pmt_section());
+        self.write_psi(
+            PMT_PID,
+            &pmt_section(self.video_stream_type, self.audio_stream_type),
+        );
     }
 
     fn write_psi(&mut self, pid: u16, section: &[u8]) {
@@ -486,7 +603,7 @@ fn pat_section() -> Vec<u8> {
     section
 }
 
-fn pmt_section() -> Vec<u8> {
+fn pmt_section(video_stream_type: u8, audio_stream_type: u8) -> Vec<u8> {
     let mut section = vec![
         0x02,
         0xb0,
@@ -500,12 +617,12 @@ fn pmt_section() -> Vec<u8> {
         VIDEO_PID as u8,
         0xf0,
         0x00,
-        0x1b,
+        video_stream_type,
         0xe0 | ((VIDEO_PID >> 8) as u8 & 0x1f),
         VIDEO_PID as u8,
         0xf0,
         0x00,
-        0x0f,
+        audio_stream_type,
         0xe0 | ((AUDIO_PID >> 8) as u8 & 0x1f),
         AUDIO_PID as u8,
         0xf0,
@@ -513,6 +630,23 @@ fn pmt_section() -> Vec<u8> {
     ];
     append_crc32(&mut section);
     section
+}
+
+fn ts_stream_type(payload: &PayloadKind) -> u8 {
+    match payload {
+        PayloadKind::Avc { .. } => 0x1b,
+        PayloadKind::Hevc { .. } => 0x24,
+        PayloadKind::Aac { .. } => 0x0f,
+        PayloadKind::Ac3 => 0x81,
+        PayloadKind::Eac3 => 0x87,
+    }
+}
+
+fn audio_stream_id(payload: &PayloadKind) -> u8 {
+    match payload {
+        PayloadKind::Ac3 | PayloadKind::Eac3 => PRIVATE_STREAM_ID,
+        _ => AUDIO_STREAM_ID,
+    }
 }
 
 fn pes_packet(stream_id: u8, pts90: u64, dts90: u64, payload: &[u8]) -> Vec<u8> {
@@ -596,6 +730,62 @@ fn master_playlist_body(video_codec: &str, audio_codec: &str) -> String {
     )
 }
 
+fn fallback_video_codec_string(codec: &str) -> String {
+    match codec {
+        "hevc" => "hvc1.1.6.L120".to_string(),
+        _ => "avc1.640028".to_string(),
+    }
+}
+
+fn fallback_audio_codec_string(codec: &str) -> String {
+    match codec {
+        "ac3" => "ac-3".to_string(),
+        "eac3" => "ec-3".to_string(),
+        _ => "mp4a.40.2".to_string(),
+    }
+}
+
+fn matroska_video_codec_string(track: &matroska::MatroskaTrack) -> String {
+    match (track.codec.as_str(), track.codec_private.as_deref()) {
+        ("h264", Some(config)) if config.len() >= 4 => {
+            format!("avc1.{:02X}{:02X}{:02X}", config[1], config[2], config[3])
+        }
+        ("hevc", Some(config)) => matroska_hevc_codec_string(config)
+            .unwrap_or_else(|| fallback_video_codec_string(track.codec.as_str())),
+        _ => fallback_video_codec_string(track.codec.as_str()),
+    }
+}
+
+fn matroska_audio_codec_string(track: &matroska::MatroskaTrack) -> String {
+    match (track.codec.as_str(), track.codec_private.as_deref()) {
+        ("aac", Some(config)) => parse_audio_specific_config(config)
+            .ok()
+            .map(|config| format!("mp4a.40.{}", config.object_type))
+            .unwrap_or_else(|| fallback_audio_codec_string(track.codec.as_str())),
+        _ => fallback_audio_codec_string(track.codec.as_str()),
+    }
+}
+
+fn matroska_hevc_codec_string(config: &[u8]) -> Option<String> {
+    if config.len() < 13 {
+        return None;
+    }
+    let profile_space = match (config[1] >> 6) & 0x03 {
+        0 => "",
+        1 => "A",
+        2 => "B",
+        3 => "C",
+        _ => "",
+    };
+    let tier = if config[1] & 0x20 != 0 { "H" } else { "L" };
+    let profile_idc = config[1] & 0x1f;
+    let compatibility = u32::from_be_bytes(config[2..6].try_into().ok()?);
+    let level_idc = config[12];
+    Some(format!(
+        "hvc1.{profile_space}{profile_idc}.{compatibility:X}.{tier}{level_idc}"
+    ))
+}
+
 fn media_playlist_body(target_duration_seconds: u64, durations_ms: &[u64]) -> String {
     let mut out = format!(
         "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:{target_duration_seconds}\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n"
@@ -645,7 +835,7 @@ mod tests {
 
     #[test]
     fn writes_pat_and_pmt_packets() {
-        let mut mux = TsMuxer::new();
+        let mut mux = TsMuxer::new(0x1b, 0x0f);
         mux.write_pat_pmt();
         let out = mux.into_bytes();
         assert_eq!(out.len(), 376);

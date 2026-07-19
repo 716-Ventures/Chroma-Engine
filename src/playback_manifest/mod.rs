@@ -157,12 +157,22 @@ fn manifest_track(bytes: &[u8], track_id: &str, target_ms: u64) -> Option<Manife
     Some(ManifestTrack {
         id: config.track_id,
         kind: config.track_kind,
+        codec_string: config
+            .codec_string
+            .or_else(|| fallback_codec_string(config.codec.as_str())),
         codec: config.codec,
-        codec_string: config.codec_string,
         config_box: config.config_box,
         decoder_config_hex: config.description_hex,
         chunks: plan.chunks,
     })
+}
+
+fn fallback_codec_string(codec: &str) -> Option<String> {
+    match codec {
+        "ac3" => Some("ac-3".to_string()),
+        "eac3" => Some("ec-3".to_string()),
+        _ => None,
+    }
 }
 
 fn matroska_manifest_track(
