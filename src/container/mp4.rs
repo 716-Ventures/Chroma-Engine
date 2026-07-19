@@ -1,4 +1,7 @@
-use crate::container::ContainerKind;
+use crate::{
+    container::ContainerKind,
+    packet::{ChunkPlan, NativeChunk, PacketRange, PacketRef, TimeDelta, TimePoint, TimeScale},
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mp4BasicMetadata {
@@ -18,6 +21,20 @@ pub struct Mp4Track {
     pub height: Option<u32>,
     pub channels: Option<u32>,
     pub sample_rate: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mp4PacketIndex {
+    pub tracks: Vec<Mp4TrackPacketIndex>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mp4TrackPacketIndex {
+    pub track_id: String,
+    pub track_index: u32,
+    pub kind: Mp4TrackKind,
+    pub timescale: TimeScale,
+    pub packets: Vec<PacketRef>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,6 +78,116 @@ pub fn parse_basic_metadata(bytes: &[u8]) -> Mp4BasicMetadata {
     }
 
     meta
+}
+
+pub fn parse_packet_index(bytes: &[u8]) -> Mp4PacketIndex {
+    let mut tracks = Vec::new();
+    let mut video_index = 0_u32;
+    let mut audio_index = 0_u32;
+    let mut subtitle_index = 0_u32;
+    let mut unknown_index = 0_u32;
+
+    for atom in AtomIter::new(bytes) {
+        if atom.kind != *b"moov" {
+            continue;
+        }
+
+        for trak in AtomIter::new(atom.payload).filter(|atom| atom.kind == *b"trak") {
+            let track_index = tracks.len() as u32;
+            let Some(kind) = parse_trak_kind(trak.payload) else {
+                continue;
+            };
+            let track_id = match kind {
+                Mp4TrackKind::Video => next_track_id("v", &mut video_index),
+                Mp4TrackKind::Audio => next_track_id("a", &mut audio_index),
+                Mp4TrackKind::Subtitle => next_track_id("s", &mut subtitle_index),
+                Mp4TrackKind::Unknown => next_track_id("x", &mut unknown_index),
+            };
+            if let Some(track) = parse_trak_packet_index(trak.payload, track_index, kind, track_id)
+            {
+                tracks.push(track);
+            }
+        }
+    }
+
+    Mp4PacketIndex { tracks }
+}
+
+pub fn parse_packet_track(
+    bytes: &[u8],
+    requested_track_id: Option<&str>,
+) -> Option<Mp4TrackPacketIndex> {
+    let mut video_index = 0_u32;
+    let mut audio_index = 0_u32;
+    let mut subtitle_index = 0_u32;
+    let mut unknown_index = 0_u32;
+    let mut absolute_track_index = 0_u32;
+
+    for atom in AtomIter::new(bytes) {
+        if atom.kind != *b"moov" {
+            continue;
+        }
+
+        for trak in AtomIter::new(atom.payload).filter(|atom| atom.kind == *b"trak") {
+            let Some(kind) = parse_trak_kind(trak.payload) else {
+                absolute_track_index += 1;
+                continue;
+            };
+            let track_id = match kind {
+                Mp4TrackKind::Video => next_track_id("v", &mut video_index),
+                Mp4TrackKind::Audio => next_track_id("a", &mut audio_index),
+                Mp4TrackKind::Subtitle => next_track_id("s", &mut subtitle_index),
+                Mp4TrackKind::Unknown => next_track_id("x", &mut unknown_index),
+            };
+            let should_parse = requested_track_id
+                .map(|requested| requested == track_id)
+                .unwrap_or(kind == Mp4TrackKind::Video);
+            if should_parse {
+                return parse_trak_packet_index(trak.payload, absolute_track_index, kind, track_id);
+            }
+            absolute_track_index += 1;
+        }
+    }
+
+    None
+}
+
+pub fn parse_chunk_plan(
+    bytes: &[u8],
+    requested_track_id: Option<&str>,
+    target_ms: u64,
+) -> Option<ChunkPlan> {
+    let mut video_index = 0_u32;
+    let mut audio_index = 0_u32;
+    let mut subtitle_index = 0_u32;
+    let mut unknown_index = 0_u32;
+
+    for atom in AtomIter::new(bytes) {
+        if atom.kind != *b"moov" {
+            continue;
+        }
+
+        for trak in AtomIter::new(atom.payload).filter(|atom| atom.kind == *b"trak") {
+            let Some(kind) = parse_trak_kind(trak.payload) else {
+                continue;
+            };
+            let track_id = match kind {
+                Mp4TrackKind::Video => next_track_id("v", &mut video_index),
+                Mp4TrackKind::Audio => next_track_id("a", &mut audio_index),
+                Mp4TrackKind::Subtitle => next_track_id("s", &mut subtitle_index),
+                Mp4TrackKind::Unknown => next_track_id("x", &mut unknown_index),
+            };
+            let should_parse = requested_track_id
+                .map(|requested| requested == track_id)
+                .unwrap_or(kind == Mp4TrackKind::Video);
+            if should_parse {
+                let (scale, table) = parse_trak_sample_table(trak.payload)?;
+                return Some(table.into_chunk_plan(&track_id, scale, target_ms));
+            }
+        }
+    }
+
+    None
 }
 
 fn parse_ftyp(payload: &[u8], meta: &mut Mp4BasicMetadata) {
@@ -180,6 +307,371 @@ fn parse_stbl(payload: &[u8]) -> Option<SampleEntryInfo> {
         }
     }
     None
+}
+
+fn parse_trak_kind(payload: &[u8]) -> Option<Mp4TrackKind> {
+    let mdia = find_atom(payload, b"mdia")?;
+    Some(handler_to_track_kind(
+        parse_hdlr(find_atom(mdia, b"hdlr")?).as_deref(),
+    ))
+}
+
+fn parse_trak_packet_index(
+    payload: &[u8],
+    track_index: u32,
+    kind: Mp4TrackKind,
+    track_id: String,
+) -> Option<Mp4TrackPacketIndex> {
+    let (scale, table) = parse_trak_sample_table(payload)?;
+    let packets = table.into_packets(scale);
+
+    Some(Mp4TrackPacketIndex {
+        track_id,
+        track_index,
+        kind,
+        timescale: scale,
+        packets,
+    })
+}
+
+fn parse_trak_sample_table(payload: &[u8]) -> Option<(TimeScale, SampleTable)> {
+    let mdia = find_atom(payload, b"mdia")?;
+    let timescale = parse_mdhd_timescale(find_atom(mdia, b"mdhd")?)?;
+    let stbl = find_atom(find_atom(mdia, b"minf")?, b"stbl")?;
+    let table = parse_sample_table(stbl)?;
+    Some((
+        TimeScale {
+            units_per_second: timescale,
+        },
+        table,
+    ))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SampleTable {
+    sample_sizes: Vec<u32>,
+    sample_durations: Vec<u64>,
+    keyframes: Vec<bool>,
+    chunk_offsets: Vec<u64>,
+    sample_to_chunk: Vec<SampleToChunk>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SampleToChunk {
+    first_chunk: u32,
+    samples_per_chunk: u32,
+}
+
+impl SampleTable {
+    fn into_packets(self, scale: TimeScale) -> Vec<PacketRef> {
+        let mut packets = Vec::with_capacity(self.sample_sizes.len());
+        let mut sample_index = 0_usize;
+        let mut pts = 0_u64;
+        let mut sample_to_chunk_index = 0_usize;
+
+        for (chunk_idx, chunk_offset) in self.chunk_offsets.iter().copied().enumerate() {
+            let chunk_number = (chunk_idx + 1) as u32;
+            sample_to_chunk_index =
+                self.advance_sample_to_chunk(sample_to_chunk_index, chunk_number);
+            let samples_per_chunk =
+                self.sample_to_chunk[sample_to_chunk_index].samples_per_chunk as usize;
+            let mut offset_in_chunk = 0_u64;
+
+            for _ in 0..samples_per_chunk {
+                let Some(size) = self.sample_sizes.get(sample_index).copied() else {
+                    break;
+                };
+                let duration = self
+                    .sample_durations
+                    .get(sample_index)
+                    .copied()
+                    .unwrap_or(0);
+                packets.push(PacketRef {
+                    source_offset: chunk_offset.saturating_add(offset_in_chunk),
+                    size,
+                    pts: TimePoint { units: pts, scale },
+                    dts: TimePoint { units: pts, scale },
+                    duration: TimeDelta {
+                        units: duration,
+                        scale,
+                    },
+                    keyframe: self.keyframes.get(sample_index).copied().unwrap_or(true),
+                });
+                sample_index += 1;
+                pts = pts.saturating_add(duration);
+                offset_in_chunk = offset_in_chunk.saturating_add(u64::from(size));
+            }
+
+            if sample_index >= self.sample_sizes.len() {
+                break;
+            }
+        }
+
+        packets
+    }
+
+    fn advance_sample_to_chunk(&self, mut index: usize, chunk_number: u32) -> usize {
+        while self
+            .sample_to_chunk
+            .get(index + 1)
+            .is_some_and(|entry| chunk_number >= entry.first_chunk)
+        {
+            index += 1;
+        }
+        index
+    }
+
+    fn into_chunk_plan(self, track_id: &str, scale: TimeScale, target_ms: u64) -> ChunkPlan {
+        if self.sample_sizes.is_empty() || target_ms == 0 {
+            return ChunkPlan {
+                track_ids: Vec::new(),
+                chunks: Vec::new(),
+            };
+        }
+
+        let mut chunks = Vec::new();
+        let mut sample_index = 0_usize;
+        let mut pts = 0_u64;
+        let mut chunk_start_sample = 0_u32;
+        let mut chunk_start_ms = 0_u64;
+        let mut last_end_ms = 0_u64;
+        let mut key_aligned = self.keyframes.first().copied().unwrap_or(true);
+        let mut sample_to_chunk_index = 0_usize;
+
+        'chunks: for (chunk_idx, _) in self.chunk_offsets.iter().enumerate() {
+            let chunk_number = (chunk_idx + 1) as u32;
+            sample_to_chunk_index =
+                self.advance_sample_to_chunk(sample_to_chunk_index, chunk_number);
+            let samples_per_chunk =
+                self.sample_to_chunk[sample_to_chunk_index].samples_per_chunk as usize;
+
+            for _ in 0..samples_per_chunk {
+                if sample_index >= self.sample_sizes.len() {
+                    break 'chunks;
+                }
+
+                let packet_start_ms = scale.to_millis(pts);
+                let duration = self
+                    .sample_durations
+                    .get(sample_index)
+                    .copied()
+                    .unwrap_or(0);
+                let packet_end_ms = scale.to_millis(pts.saturating_add(duration));
+                let packet_is_keyframe = self.keyframes.get(sample_index).copied().unwrap_or(true);
+                let should_cut = sample_index as u32 > chunk_start_sample
+                    && packet_is_keyframe
+                    && packet_start_ms.saturating_sub(chunk_start_ms) >= target_ms;
+                if should_cut {
+                    chunks.push(NativeChunk {
+                        index: chunks.len() as u32,
+                        start: TimePoint::millis(chunk_start_ms),
+                        duration: TimeDelta::millis(last_end_ms.saturating_sub(chunk_start_ms)),
+                        packet_range: PacketRange {
+                            start: chunk_start_sample,
+                            end: sample_index as u32,
+                        },
+                        key_aligned,
+                    });
+                    chunk_start_sample = sample_index as u32;
+                    chunk_start_ms = packet_start_ms;
+                    key_aligned = packet_is_keyframe;
+                }
+
+                pts = pts.saturating_add(duration);
+                last_end_ms = packet_end_ms;
+                sample_index += 1;
+            }
+        }
+
+        chunks.push(NativeChunk {
+            index: chunks.len() as u32,
+            start: TimePoint::millis(chunk_start_ms),
+            duration: TimeDelta::millis(last_end_ms.saturating_sub(chunk_start_ms)),
+            packet_range: PacketRange {
+                start: chunk_start_sample,
+                end: sample_index as u32,
+            },
+            key_aligned,
+        });
+
+        ChunkPlan {
+            track_ids: vec![track_id.to_string()],
+            chunks,
+        }
+    }
+}
+
+fn parse_sample_table(stbl: &[u8]) -> Option<SampleTable> {
+    let sample_sizes = find_atom(stbl, b"stsz").and_then(parse_stsz)?;
+    let sample_count = sample_sizes.len();
+    let sample_durations = find_atom(stbl, b"stts")
+        .and_then(|payload| parse_stts(payload, sample_count))
+        .unwrap_or_else(|| vec![0; sample_count]);
+    let keyframes = find_atom(stbl, b"stss")
+        .and_then(|payload| parse_stss(payload, sample_count))
+        .unwrap_or_else(|| vec![true; sample_count]);
+    let chunk_offsets = find_atom(stbl, b"stco")
+        .and_then(parse_stco)
+        .or_else(|| find_atom(stbl, b"co64").and_then(parse_co64))?;
+    let sample_to_chunk = find_atom(stbl, b"stsc").and_then(parse_stsc)?;
+
+    Some(SampleTable {
+        sample_sizes,
+        sample_durations,
+        keyframes,
+        chunk_offsets,
+        sample_to_chunk,
+    })
+}
+
+fn next_track_id(prefix: &str, counter: &mut u32) -> String {
+    let id = format!("{prefix}{counter}");
+    *counter += 1;
+    id
+}
+
+fn find_atom<'a>(payload: &'a [u8], kind: &[u8; 4]) -> Option<&'a [u8]> {
+    AtomIter::new(payload)
+        .find(|atom| atom.kind == *kind)
+        .map(|atom| atom.payload)
+}
+
+fn parse_mdhd_timescale(payload: &[u8]) -> Option<u32> {
+    let version = *payload.first()?;
+    if version == 1 {
+        if payload.len() < 24 {
+            return None;
+        }
+        read_u32(&payload[20..24])
+    } else {
+        if payload.len() < 16 {
+            return None;
+        }
+        read_u32(&payload[12..16])
+    }
+}
+
+fn parse_stts(payload: &[u8], sample_count: usize) -> Option<Vec<u64>> {
+    if payload.len() < 8 {
+        return None;
+    }
+    let entry_count = read_u32(&payload[4..8])? as usize;
+    let mut offset = 8;
+    let mut durations = Vec::with_capacity(sample_count);
+    for _ in 0..entry_count {
+        if offset + 8 > payload.len() {
+            return None;
+        }
+        let count = read_u32(&payload[offset..offset + 4])? as usize;
+        let delta = u64::from(read_u32(&payload[offset + 4..offset + 8])?);
+        durations.extend(std::iter::repeat(delta).take(count));
+        offset += 8;
+    }
+    durations.truncate(sample_count);
+    if durations.len() == sample_count {
+        Some(durations)
+    } else {
+        None
+    }
+}
+
+fn parse_stss(payload: &[u8], sample_count: usize) -> Option<Vec<bool>> {
+    if payload.len() < 8 {
+        return None;
+    }
+    let entry_count = read_u32(&payload[4..8])? as usize;
+    let mut out = vec![false; sample_count];
+    let mut offset = 8;
+    for _ in 0..entry_count {
+        if offset + 4 > payload.len() {
+            return None;
+        }
+        let sample_number = read_u32(&payload[offset..offset + 4])? as usize;
+        if (1..=sample_count).contains(&sample_number) {
+            out[sample_number - 1] = true;
+        }
+        offset += 4;
+    }
+    Some(out)
+}
+
+fn parse_stsc(payload: &[u8]) -> Option<Vec<SampleToChunk>> {
+    if payload.len() < 8 {
+        return None;
+    }
+    let entry_count = read_u32(&payload[4..8])? as usize;
+    let mut offset = 8;
+    let mut out = Vec::with_capacity(entry_count);
+    for _ in 0..entry_count {
+        if offset + 12 > payload.len() {
+            return None;
+        }
+        out.push(SampleToChunk {
+            first_chunk: read_u32(&payload[offset..offset + 4])?,
+            samples_per_chunk: read_u32(&payload[offset + 4..offset + 8])?,
+        });
+        offset += 12;
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+fn parse_stsz(payload: &[u8]) -> Option<Vec<u32>> {
+    if payload.len() < 12 {
+        return None;
+    }
+    let fixed_size = read_u32(&payload[4..8])?;
+    let sample_count = read_u32(&payload[8..12])? as usize;
+    if fixed_size != 0 {
+        return Some(vec![fixed_size; sample_count]);
+    }
+    let mut offset = 12;
+    let mut out = Vec::with_capacity(sample_count);
+    for _ in 0..sample_count {
+        if offset + 4 > payload.len() {
+            return None;
+        }
+        out.push(read_u32(&payload[offset..offset + 4])?);
+        offset += 4;
+    }
+    Some(out)
+}
+
+fn parse_stco(payload: &[u8]) -> Option<Vec<u64>> {
+    if payload.len() < 8 {
+        return None;
+    }
+    let entry_count = read_u32(&payload[4..8])? as usize;
+    let mut offset = 8;
+    let mut out = Vec::with_capacity(entry_count);
+    for _ in 0..entry_count {
+        if offset + 4 > payload.len() {
+            return None;
+        }
+        out.push(u64::from(read_u32(&payload[offset..offset + 4])?));
+        offset += 4;
+    }
+    Some(out)
+}
+
+fn parse_co64(payload: &[u8]) -> Option<Vec<u64>> {
+    if payload.len() < 8 {
+        return None;
+    }
+    let entry_count = read_u32(&payload[4..8])? as usize;
+    let mut offset = 8;
+    let mut out = Vec::with_capacity(entry_count);
+    for _ in 0..entry_count {
+        if offset + 8 > payload.len() {
+            return None;
+        }
+        out.push(read_u64(&payload[offset..offset + 8])?);
+        offset += 8;
+    }
+    Some(out)
 }
 
 fn parse_stsd(payload: &[u8]) -> Option<SampleEntryInfo> {
@@ -473,6 +965,74 @@ mod tests {
         assert_eq!(meta.tracks[1].sample_rate, Some(48000));
     }
 
+    #[test]
+    fn parses_mp4_packet_index_from_sample_tables() {
+        let mut data = ftyp();
+        data.extend_from_slice(&atom(b"free", &[0_u8; 128]));
+        data.extend_from_slice(&atom(
+            b"moov",
+            &trak_with_samples(
+                b"vide",
+                b"avc1",
+                &[100, 110, 120, 130, 140],
+                &[40, 40, 40, 40, 40],
+                &[1, 3, 5],
+                &[200, 520],
+                &[(1, 2), (2, 3)],
+            ),
+        ));
+
+        let index = parse_packet_index(&data);
+        assert_eq!(index.tracks.len(), 1);
+        let track = &index.tracks[0];
+        assert_eq!(track.track_id, "v0");
+        assert_eq!(track.kind, Mp4TrackKind::Video);
+        assert_eq!(track.packets.len(), 5);
+        assert_eq!(track.packets[0].source_offset, 200);
+        assert_eq!(track.packets[1].source_offset, 300);
+        assert_eq!(track.packets[2].source_offset, 520);
+        assert_eq!(track.packets[3].source_offset, 640);
+        assert_eq!(track.packets[4].source_offset, 770);
+        assert_eq!(track.packets[0].pts.units, 0);
+        assert_eq!(track.packets[2].pts.units, 80);
+        assert!(track.packets[0].keyframe);
+        assert!(!track.packets[1].keyframe);
+        assert!(track.packets[2].keyframe);
+    }
+
+    #[test]
+    fn plans_mp4_chunks_directly_from_sample_tables() {
+        let mut data = ftyp();
+        data.extend_from_slice(&atom(
+            b"moov",
+            &trak_with_samples(
+                b"vide",
+                b"avc1",
+                &[100, 110, 120, 130, 140],
+                &[1000, 1000, 1000, 1000, 1000],
+                &[1, 3, 5],
+                &[200, 520],
+                &[(1, 2), (2, 3)],
+            ),
+        ));
+
+        let plan = parse_chunk_plan(&data, None, 2_000).unwrap();
+        assert_eq!(plan.track_ids, vec!["v0"]);
+        assert_eq!(plan.chunks.len(), 3);
+        assert_eq!(
+            plan.chunks[0].packet_range,
+            PacketRange { start: 0, end: 2 }
+        );
+        assert_eq!(
+            plan.chunks[1].packet_range,
+            PacketRange { start: 2, end: 4 }
+        );
+        assert_eq!(
+            plan.chunks[2].packet_range,
+            PacketRange { start: 4, end: 5 }
+        );
+    }
+
     fn ftyp() -> Vec<u8> {
         atom(
             b"ftyp",
@@ -532,6 +1092,47 @@ mod tests {
         )
     }
 
+    fn trak_with_samples(
+        handler: &[u8; 4],
+        sample_entry: &[u8; 4],
+        sample_sizes: &[u32],
+        sample_durations: &[u32],
+        sync_samples: &[u32],
+        chunk_offsets: &[u32],
+        sample_to_chunk: &[(u32, u32)],
+    ) -> Vec<u8> {
+        atom(
+            b"trak",
+            &[
+                tkhd(Some((1920, 1080))),
+                atom(
+                    b"mdia",
+                    &[
+                        mdhd(1000, sample_durations.iter().sum()),
+                        hdlr(handler),
+                        atom(
+                            b"minf",
+                            &atom(
+                                b"stbl",
+                                &[
+                                    stsd(sample_entry, Some((1920, 1080)), None),
+                                    stts(sample_durations),
+                                    stss(sync_samples),
+                                    stsc(sample_to_chunk),
+                                    stsz(sample_sizes),
+                                    stco(chunk_offsets),
+                                ]
+                                .concat(),
+                            ),
+                        ),
+                    ]
+                    .concat(),
+                ),
+            ]
+            .concat(),
+        )
+    }
+
     fn mdhd(timescale: u32, duration: u32) -> Vec<u8> {
         let mut payload = vec![0_u8; 20];
         payload[12..16].copy_from_slice(&timescale.to_be_bytes());
@@ -556,6 +1157,60 @@ mod tests {
         payload.extend_from_slice(&1_u32.to_be_bytes());
         payload.extend_from_slice(&entry);
         atom(b"stsd", &payload)
+    }
+
+    fn stts(sample_durations: &[u32]) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&[0, 0, 0, 0]);
+        payload.extend_from_slice(&(sample_durations.len() as u32).to_be_bytes());
+        for duration in sample_durations {
+            payload.extend_from_slice(&1_u32.to_be_bytes());
+            payload.extend_from_slice(&duration.to_be_bytes());
+        }
+        atom(b"stts", &payload)
+    }
+
+    fn stss(sync_samples: &[u32]) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&[0, 0, 0, 0]);
+        payload.extend_from_slice(&(sync_samples.len() as u32).to_be_bytes());
+        for sample in sync_samples {
+            payload.extend_from_slice(&sample.to_be_bytes());
+        }
+        atom(b"stss", &payload)
+    }
+
+    fn stsc(entries: &[(u32, u32)]) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&[0, 0, 0, 0]);
+        payload.extend_from_slice(&(entries.len() as u32).to_be_bytes());
+        for (first_chunk, samples_per_chunk) in entries {
+            payload.extend_from_slice(&first_chunk.to_be_bytes());
+            payload.extend_from_slice(&samples_per_chunk.to_be_bytes());
+            payload.extend_from_slice(&1_u32.to_be_bytes());
+        }
+        atom(b"stsc", &payload)
+    }
+
+    fn stsz(sample_sizes: &[u32]) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&[0, 0, 0, 0]);
+        payload.extend_from_slice(&0_u32.to_be_bytes());
+        payload.extend_from_slice(&(sample_sizes.len() as u32).to_be_bytes());
+        for size in sample_sizes {
+            payload.extend_from_slice(&size.to_be_bytes());
+        }
+        atom(b"stsz", &payload)
+    }
+
+    fn stco(chunk_offsets: &[u32]) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&[0, 0, 0, 0]);
+        payload.extend_from_slice(&(chunk_offsets.len() as u32).to_be_bytes());
+        for offset in chunk_offsets {
+            payload.extend_from_slice(&offset.to_be_bytes());
+        }
+        atom(b"stco", &payload)
     }
 
     fn sample_entry_atom(

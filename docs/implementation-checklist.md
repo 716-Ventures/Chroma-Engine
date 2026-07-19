@@ -4,7 +4,7 @@
 
 - [x] Create Rust repo and library/CLI skeleton.
 - [x] Define native `MediaProbe` JSON with typed tracks, source facts, and capability hints.
-- [x] Define command surface: `probe`, `plan`, `remux-mp4`, `encoder-probe`, `warmup`.
+- [x] Define command surface: `probe`, `plan`, `chunks`, `remux-mp4`, `encoder-probe`, `warmup`.
 - [x] Define native playback `plan` command with target-specific pipeline stages.
 - [ ] Add real-library probe fixtures from `/Volumes/Movies` and `/Volumes/TVShows`.
 - [ ] Add Chroma-native snapshot tests for representative MP4/MKV/HDR/audio/subtitle combinations.
@@ -42,11 +42,13 @@
 - [x] Add initial Chroma-native playback plan: selected tracks, shared demux, copy/decode/encode, mux, transport adapters.
 - [x] Default playback planning selects primary video/audio and excludes target-unusable bitmap subtitles for browser/Apple targets.
 - [x] Remove legacy transport assumptions from the public core command/module surface.
+- [x] Define native compressed packet references and keyframe-aligned chunk planning.
 - [ ] Emit stream chunks through reusable packet/decode/encode stages.
 - [ ] H.264/AAC native stream-copy chunks.
 - [ ] HEVC native stream-copy chunks.
 - [ ] AC-3/E-AC-3/MP3/FLAC/ALAC native copy paths.
-- [ ] Keyframe-aligned segmentation.
+- [x] Keyframe-aligned chunk planning.
+- [ ] Keyframe-aligned chunk emission.
 - [ ] Input-side seek anchoring and copy-path coarse seek behavior.
 - [x] WebVTT parsing/rendering foundation.
 - [ ] Single-process WebVTT sidecar generation for all selected text subtitles.

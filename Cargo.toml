@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.76"
 license = "Proprietary"
-description = "Small media engine for ChromaServer playback, probing, remuxing, and HLS output."
+description = "Native Rust media engine for Chroma playback, probing, packet planning, remuxing, and transcoding."
 
 [lib]
 name = "chroma_engine"

@@ -6,6 +6,7 @@ The target is a native media architecture, not an FFmpeg-compatible facade. Chro
 
 - `probe`: emit a Chroma-native `MediaProbe` manifest with typed tracks, source facts, and capability hints.
 - `plan`: produce Chroma playback sessions optimized around reusable packet/decode/encode stages.
+- `chunks`: produce keyframe-aligned native chunk windows from compressed packet indexes.
 - `remux-mp4`: remux supported sources into an efficient ISO-BMFF output path.
 - `encoder-probe`: report platform encoder capabilities.
 - `warmup`: initialize selected hardware/software backends before the first playback session.
@@ -21,4 +22,5 @@ Rust is required to build:
 ```sh
 cargo test
 cargo run -- probe /path/to/media.mkv
+cargo run -- chunks /path/to/media.mp4 --target-ms 4000
 ```

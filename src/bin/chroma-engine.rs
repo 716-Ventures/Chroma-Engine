@@ -1,9 +1,11 @@
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
+use chroma_engine::container::mp4::{looks_like_mp4, parse_chunk_plan};
 use chroma_engine::probe::probe_media_source;
 use chroma_engine::session::{plan_playback, AudioSelection, PlaybackConstraints, PlaybackTarget};
 use clap::{Parser, Subcommand};
+use memmap2::Mmap;
 
 #[derive(Debug, Parser)]
 #[command(name = "chroma-engine")]
@@ -26,6 +28,14 @@ enum Command {
         all_audio: bool,
         #[arg(long, default_value_t = true)]
         include_subtitles: bool,
+    },
+    /// Emit keyframe-aligned native chunk windows for a compressed packet track.
+    Chunks {
+        file: PathBuf,
+        #[arg(long)]
+        track: Option<String>,
+        #[arg(long, default_value_t = 4_000)]
+        target_ms: u64,
     },
     /// Emit platform encoder capabilities.
     EncoderProbe,
@@ -74,6 +84,20 @@ fn main() -> Result<()> {
                     ..PlaybackConstraints::default()
                 },
             );
+            println!("{}", serde_json::to_string_pretty(&plan)?);
+        }
+        Command::Chunks {
+            file,
+            track,
+            target_ms,
+        } => {
+            let source = std::fs::File::open(&file)?;
+            let bytes = unsafe { Mmap::map(&source)? };
+            if !looks_like_mp4(&bytes) {
+                bail!("native packet chunking currently supports MP4/MOV sample tables");
+            }
+            let plan = parse_chunk_plan(&bytes, track.as_deref(), target_ms)
+                .ok_or_else(|| anyhow::anyhow!("no matching packet-indexed MP4 track found"))?;
             println!("{}", serde_json::to_string_pretty(&plan)?);
         }
         Command::EncoderProbe => {
