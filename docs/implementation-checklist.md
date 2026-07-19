@@ -71,6 +71,11 @@
 
 ## Integration
 
+- [ ] **Milestone: ready to update GenusServer and test in the web player.** Check this on every build-out pass; do not declare it ready until Chroma Engine can produce a browser-playable or WebCodecs-ready native stream for at least one real MP4 from `/Volumes/Movies` or `/Volumes/TVShows` without FFmpeg.
+- [ ] Define minimum web-player test contract: Chroma-native manifest, selected tracks, codec config, chunk URLs, timestamp model, and error shape.
+- [ ] Emit browser-playable or WebCodecs-ready H.264/AAC output for one real MP4.
+- [ ] Add a GenusServer env-flagged route that serves the Chroma-native manifest and chunks.
+- [ ] Run one end-to-end web player test using Chroma Engine output.
 - [ ] Replace host-server playback/probe contracts with Chroma Engine contracts.
 - [ ] Run Chroma Engine behind an env flag.
 - [ ] Add side-by-side diagnostics for Chroma Engine vs legacy media path during migration.

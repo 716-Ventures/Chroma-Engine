@@ -22,3 +22,7 @@ Near-term implementation order:
 4. Build ISO-BMFF/fMP4 writers as reusable muxers.
 5. Add platform encode/decode backends only where stream copy cannot satisfy the requested session.
 6. Add any legacy transport adapters only after the native Chroma transport is stable.
+
+## Web Player Test Milestone
+
+Every build-out pass should check whether Chroma Engine has reached the point where GenusServer can be updated for a real web-player test. Do not move this milestone forward just to force an early integration. It is ready only when Chroma Engine can produce a browser-playable or WebCodecs-ready native stream for at least one real MP4 from `/Volumes/Movies` or `/Volumes/TVShows` without FFmpeg, including manifest shape, codec configuration, chunk URLs, timing, and clear errors.
