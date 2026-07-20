@@ -81,6 +81,17 @@ pub struct ChunkSample {
     pub keyframe: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Borrowed packet payload bytes inside the original source.
+pub struct PacketPayloadSpan<'a> {
+    /// Source packet index.
+    pub packet_index: u32,
+    /// Byte offset where the packet payload starts in the source.
+    pub source_offset: u64,
+    /// Borrowed packet payload bytes.
+    pub bytes: &'a [u8],
+}
+
 #[derive(Debug, Error, PartialEq, Eq)]
 /// Error returned when extracting packet payload bytes.
 pub enum PacketExtractError {
@@ -253,6 +264,27 @@ pub fn extract_packet_payload(
     packets: &[PacketRef],
     range: PacketRange,
 ) -> Result<Vec<u8>, PacketExtractError> {
+    let spans = packet_payload_spans(source, packets, range)?;
+    let byte_count = spans
+        .iter()
+        .map(|span| span.bytes.len())
+        .sum::<usize>()
+        .min(source.len());
+    let mut out = Vec::with_capacity(byte_count);
+
+    for span in spans {
+        out.extend_from_slice(span.bytes);
+    }
+
+    Ok(out)
+}
+
+/// Returns borrowed packet payload spans for a range without copying media bytes.
+pub fn packet_payload_spans<'a>(
+    source: &'a [u8],
+    packets: &[PacketRef],
+    range: PacketRange,
+) -> Result<Vec<PacketPayloadSpan<'a>>, PacketExtractError> {
     if range.start > range.end {
         return Err(PacketExtractError::InvalidRange);
     }
@@ -262,14 +294,9 @@ pub fn extract_packet_payload(
         return Err(PacketExtractError::RangeOutOfBounds);
     }
 
-    let byte_count = packets[start..end]
-        .iter()
-        .map(|packet| u64::from(packet.size))
-        .sum::<u64>();
-    let capacity = usize::try_from(byte_count).unwrap_or(usize::MAX);
-    let mut out = Vec::with_capacity(capacity.min(source.len()));
+    let mut spans = Vec::with_capacity(end.saturating_sub(start));
 
-    for packet in &packets[start..end] {
+    for (relative_idx, packet) in packets[start..end].iter().enumerate() {
         let packet_start = packet.source_offset as usize;
         let packet_size = packet.size as usize;
         let packet_end = packet_start
@@ -278,10 +305,14 @@ pub fn extract_packet_payload(
         if packet_end > source.len() {
             return Err(PacketExtractError::SourceOutOfBounds);
         }
-        out.extend_from_slice(&source[packet_start..packet_end]);
+        spans.push(PacketPayloadSpan {
+            packet_index: range.start + relative_idx as u32,
+            source_offset: packet.source_offset,
+            bytes: &source[packet_start..packet_end],
+        });
     }
 
-    Ok(out)
+    Ok(spans)
 }
 
 /// Builds sample metadata for packets in a range.
@@ -352,6 +383,22 @@ mod tests {
         let payload =
             extract_packet_payload(source, &packets, PacketRange { start: 0, end: 2 }).unwrap();
         assert_eq!(payload, b"112255");
+    }
+
+    #[test]
+    fn borrows_packet_payload_spans_without_copying() {
+        let source = b"00112233445566778899";
+        let packets = vec![packet_at(2, 4), packet_at(10, 2), packet_at(16, 4)];
+        let spans =
+            packet_payload_spans(source, &packets, PacketRange { start: 1, end: 3 }).unwrap();
+
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].packet_index, 1);
+        assert_eq!(spans[0].source_offset, 10);
+        assert_eq!(spans[0].bytes, b"55");
+        assert_eq!(spans[1].packet_index, 2);
+        assert_eq!(spans[1].source_offset, 16);
+        assert_eq!(spans[1].bytes, b"8899");
     }
 
     #[test]

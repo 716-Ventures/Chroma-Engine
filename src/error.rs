@@ -18,6 +18,8 @@ pub enum EngineErrorCode {
     UnsupportedContainer,
     /// A requested operation is intentionally not implemented yet.
     OperationNotImplemented,
+    /// No matching track exists for the requested operation.
+    NoMatchingTrack,
     /// Native HLS cannot support the requested source or option.
     HlsUnsupported,
     /// Native HLS failed inside a lower-level parser or muxer.

@@ -34,8 +34,8 @@ pub use hls::{
     write_hls_segment, write_hls_segments, write_hls_vod,
 };
 pub use packet::{
-    ChunkPlan, ChunkSample, ExtractedChunk, NativeChunk, PacketRange, PacketRef, TimeDelta,
-    TimePoint, TimeScale, plan_fixed_chunks,
+    ChunkPlan, ChunkSample, ExtractedChunk, NativeChunk, PacketPayloadSpan, PacketRange, PacketRef,
+    TimeDelta, TimePoint, TimeScale, packet_payload_spans, plan_fixed_chunks,
 };
 pub use platform::{
     EncoderFailureNote, EncoderProbe, EncoderProfile, EncoderWarmupError, HardwareKind,
@@ -46,7 +46,7 @@ pub use playback_manifest::{
     build_matroska_playback_manifest, build_mp4_playback_manifest,
 };
 pub use probe::{Chapter, MediaProbe, ProbeError, probe_media_source};
-pub use remux::{RemuxError, remux_mp4};
+pub use remux::{RemuxError, RemuxPacketSpans, remux_mp4, stream_copy_packet_spans};
 pub use session::{
     AudioSelection, PipelineStage, PlaybackConstraints, PlaybackPlan, PlaybackTarget, StageKind,
     StageMode, TransportKind, TransportPlan, plan_playback,
