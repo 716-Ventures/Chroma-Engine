@@ -40,6 +40,7 @@
 ## Native Playback
 
 - [x] Define initial Chroma-native MP4/MOV playback manifest with selected tracks, decoder config, and chunk windows.
+- [x] Emit all indexed audio tracks in Chroma-native playback manifests when audio is included.
 - [x] Add initial Chroma-native playback plan: selected tracks, shared demux, copy/decode/encode, mux, transport adapters.
 - [x] Default playback planning selects primary video/audio and excludes target-unusable bitmap subtitles for browser/Apple targets.
 - [x] Remove legacy transport assumptions from the public core command/module surface.

@@ -268,7 +268,7 @@ fn main() -> Result<()> {
                     &file,
                     Mp4ManifestOptions {
                         chunk_target_ms: target_ms,
-                        include_primary_audio: include_audio,
+                        include_audio,
                     },
                 )
             } else if looks_like_ebml(&bytes) {
@@ -277,7 +277,7 @@ fn main() -> Result<()> {
                     &file,
                     MatroskaManifestOptions {
                         chunk_target_ms: target_ms,
-                        include_primary_audio: include_audio,
+                        include_audio,
                     },
                 )
             } else {

@@ -37,20 +37,20 @@ pub struct ManifestTrack {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Mp4ManifestOptions {
     pub chunk_target_ms: u64,
-    pub include_primary_audio: bool,
+    pub include_audio: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MatroskaManifestOptions {
     pub chunk_target_ms: u64,
-    pub include_primary_audio: bool,
+    pub include_audio: bool,
 }
 
 impl Default for MatroskaManifestOptions {
     fn default() -> Self {
         Self {
             chunk_target_ms: 4_000,
-            include_primary_audio: true,
+            include_audio: true,
         }
     }
 }
@@ -59,7 +59,7 @@ impl Default for Mp4ManifestOptions {
     fn default() -> Self {
         Self {
             chunk_target_ms: 4_000,
-            include_primary_audio: true,
+            include_audio: true,
         }
     }
 }
@@ -80,14 +80,11 @@ pub fn build_mp4_playback_manifest(
         tracks.push(manifest_track(bytes, "v0", options.chunk_target_ms)?);
     }
 
-    if options.include_primary_audio
-        && metadata
-            .tracks
-            .iter()
-            .any(|track| track.kind == Mp4TrackKind::Audio)
-    {
-        if let Some(track) = manifest_track(bytes, "a0", options.chunk_target_ms) {
-            tracks.push(track);
+    if options.include_audio {
+        for track_id in mp4_audio_track_ids(&metadata.tracks) {
+            if let Some(track) = manifest_track(bytes, &track_id, options.chunk_target_ms) {
+                tracks.push(track);
+            }
         }
     }
 
@@ -123,17 +120,12 @@ pub fn build_matroska_playback_manifest(
         )?);
     }
 
-    if options.include_primary_audio {
-        if let Some(audio) = metadata
-            .tracks
-            .iter()
-            .filter(|track| track.kind == MatroskaTrackKind::Audio)
-            .next()
-        {
+    if options.include_audio {
+        for (track_id, audio) in matroska_audio_tracks(&metadata.tracks) {
             if let Some(track) = matroska_manifest_track(
                 bytes,
                 audio,
-                "a0",
+                &track_id,
                 options.chunk_target_ms,
                 metadata.duration_ms,
             ) {
@@ -149,6 +141,52 @@ pub fn build_matroska_playback_manifest(
         chunk_target_ms: options.chunk_target_ms,
         tracks,
     })
+}
+
+fn mp4_audio_track_ids(tracks: &[crate::container::mp4::Mp4Track]) -> Vec<String> {
+    let mut video_index = 0_u32;
+    let mut audio_index = 0_u32;
+    let mut subtitle_index = 0_u32;
+    let mut unknown_index = 0_u32;
+    let mut out = Vec::new();
+    for track in tracks {
+        let track_id = match track.kind {
+            Mp4TrackKind::Video => next_semantic_track_id("v", &mut video_index),
+            Mp4TrackKind::Audio => next_semantic_track_id("a", &mut audio_index),
+            Mp4TrackKind::Subtitle => next_semantic_track_id("s", &mut subtitle_index),
+            Mp4TrackKind::Unknown => next_semantic_track_id("x", &mut unknown_index),
+        };
+        if track.kind == Mp4TrackKind::Audio {
+            out.push(track_id);
+        }
+    }
+    out
+}
+
+fn matroska_audio_tracks(tracks: &[MatroskaTrack]) -> Vec<(String, &MatroskaTrack)> {
+    let mut video_index = 0_u32;
+    let mut audio_index = 0_u32;
+    let mut subtitle_index = 0_u32;
+    let mut unknown_index = 0_u32;
+    let mut out = Vec::new();
+    for track in tracks {
+        let track_id = match track.kind {
+            MatroskaTrackKind::Video => next_semantic_track_id("v", &mut video_index),
+            MatroskaTrackKind::Audio => next_semantic_track_id("a", &mut audio_index),
+            MatroskaTrackKind::Subtitle => next_semantic_track_id("s", &mut subtitle_index),
+            MatroskaTrackKind::Unknown => next_semantic_track_id("x", &mut unknown_index),
+        };
+        if track.kind == MatroskaTrackKind::Audio {
+            out.push((track_id, track));
+        }
+    }
+    out
+}
+
+fn next_semantic_track_id(prefix: &str, counter: &mut u32) -> String {
+    let id = format!("{prefix}{counter}");
+    *counter = counter.saturating_add(1);
+    id
 }
 
 fn manifest_track(bytes: &[u8], track_id: &str, target_ms: u64) -> Option<ManifestTrack> {
@@ -293,14 +331,14 @@ mod tests {
             &PathBuf::from("/tmp/sample.mp4"),
             Mp4ManifestOptions {
                 chunk_target_ms: 2_000,
-                include_primary_audio: true,
+                include_audio: true,
             },
         )
         .unwrap();
 
         assert_eq!(manifest.schema_version, 1);
         assert_eq!(manifest.duration_ms, Some(3_000));
-        assert_eq!(manifest.tracks.len(), 2);
+        assert_eq!(manifest.tracks.len(), 3);
         assert_eq!(manifest.tracks[0].id, "v0");
         assert_eq!(
             manifest.tracks[0].codec_string.as_deref(),
@@ -310,6 +348,11 @@ mod tests {
         assert_eq!(manifest.tracks[1].id, "a0");
         assert_eq!(
             manifest.tracks[1].codec_string.as_deref(),
+            Some("mp4a.40.2")
+        );
+        assert_eq!(manifest.tracks[2].id, "a1");
+        assert_eq!(
+            manifest.tracks[2].codec_string.as_deref(),
             Some("mp4a.40.2")
         );
     }
@@ -351,6 +394,29 @@ mod tests {
             &[1000, 1100, 1200],
             &[(1, 1)],
         );
+        let audio_secondary = trak(
+            b"soun",
+            b"mp4a",
+            audio_sample_entry_payload(
+                2,
+                48_000,
+                &atom(
+                    b"esds",
+                    &[
+                        [0, 0, 0, 0].as_slice(),
+                        &es_descriptor(&decoder_config_descriptor(&decoder_specific_descriptor(
+                            &[0x12, 0x10],
+                        ))),
+                    ]
+                    .concat(),
+                ),
+            ),
+            &[12, 12, 12],
+            &[1000, 1000, 1000],
+            &[1, 2, 3],
+            &[1300, 1400, 1500],
+            &[(1, 1)],
+        );
 
         let mut data = atom(
             b"ftyp",
@@ -362,7 +428,10 @@ mod tests {
             ]
             .concat(),
         );
-        data.extend_from_slice(&atom(b"moov", &[mvhd(1000, 3000), video, audio].concat()));
+        data.extend_from_slice(&atom(
+            b"moov",
+            &[mvhd(1000, 3000), video, audio, audio_secondary].concat(),
+        ));
         data
     }
 
