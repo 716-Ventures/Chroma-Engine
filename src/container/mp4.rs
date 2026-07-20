@@ -18,6 +18,7 @@ pub struct Mp4BasicMetadata {
     pub compatible_brands: Vec<String>,
     pub duration_ms: Option<u64>,
     pub tracks: Vec<Mp4Track>,
+    pub chapters: Vec<Mp4Chapter>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -44,6 +45,15 @@ pub enum Mp4DynamicRange {
     Hlg,
     DolbyVision,
     Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mp4Chapter {
+    pub id: String,
+    pub start_ms: u64,
+    pub end_ms: Option<u64>,
+    pub title: Option<String>,
+    pub language: Option<String>,
 }
 
 #[cfg(test)]
@@ -104,6 +114,7 @@ pub fn parse_basic_metadata(bytes: &[u8]) -> Mp4BasicMetadata {
         compatible_brands: Vec::new(),
         duration_ms: None,
         tracks: Vec::new(),
+        chapters: Vec::new(),
     };
 
     for atom in AtomIter::new(bytes) {
@@ -325,6 +336,8 @@ fn parse_moov(payload: &[u8], meta: &mut Mp4BasicMetadata) {
             if let Some(track) = parse_trak(atom.payload, index) {
                 meta.tracks.push(track);
             }
+        } else if atom.kind == *b"chpl" {
+            meta.chapters = parse_chpl(atom.payload);
         }
     }
 }
@@ -1280,6 +1293,55 @@ fn parse_hdlr(payload: &[u8]) -> Option<String> {
     fourcc_to_string(&payload[8..12])
 }
 
+fn parse_chpl(payload: &[u8]) -> Vec<Mp4Chapter> {
+    if payload.len() < 5 {
+        return Vec::new();
+    }
+    let version = payload[0];
+    let mut offset = 4_usize;
+    if version != 0 {
+        offset = offset.saturating_add(4);
+    }
+    let Some(chapter_count) = payload.get(offset).copied() else {
+        return Vec::new();
+    };
+    offset += 1;
+
+    let mut chapters = Vec::with_capacity(chapter_count as usize);
+    for _ in 0..chapter_count {
+        if offset + 9 > payload.len() {
+            return Vec::new();
+        }
+        let Some(start_units) = read_u64(&payload[offset..offset + 8]) else {
+            return Vec::new();
+        };
+        offset += 8;
+        let title_len = payload[offset] as usize;
+        offset += 1;
+        if offset + title_len > payload.len() {
+            return Vec::new();
+        }
+        let title = std::str::from_utf8(&payload[offset..offset + title_len])
+            .ok()
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned);
+        offset += title_len;
+        let index = chapters.len();
+        chapters.push(Mp4Chapter {
+            id: format!("ch{index}"),
+            start_ms: start_units / 10_000,
+            end_ms: None,
+            title,
+            language: None,
+        });
+    }
+
+    for idx in 0..chapters.len().saturating_sub(1) {
+        chapters[idx].end_ms = Some(chapters[idx + 1].start_ms);
+    }
+    chapters
+}
+
 fn parse_mdhd_duration_ms(payload: &[u8]) -> Option<u64> {
     let version = *payload.first()?;
     if version == 1 {
@@ -1616,6 +1678,25 @@ mod tests {
         let meta = parse_basic_metadata(&data);
         assert_eq!(meta.tracks.len(), 1);
         assert!(meta.tracks[0].atmos);
+    }
+
+    #[test]
+    fn parses_mp4_chpl_chapters() {
+        let mut data = ftyp();
+        data.extend_from_slice(&atom(
+            b"moov",
+            &chpl(&[(0, "Opening"), (90_000, "Scene 2")]),
+        ));
+
+        let meta = parse_basic_metadata(&data);
+        assert_eq!(meta.chapters.len(), 2);
+        assert_eq!(meta.chapters[0].id, "ch0");
+        assert_eq!(meta.chapters[0].start_ms, 0);
+        assert_eq!(meta.chapters[0].end_ms, Some(90_000));
+        assert_eq!(meta.chapters[0].title.as_deref(), Some("Opening"));
+        assert_eq!(meta.chapters[1].start_ms, 90_000);
+        assert_eq!(meta.chapters[1].end_ms, None);
+        assert_eq!(meta.chapters[1].title.as_deref(), Some("Scene 2"));
     }
 
     #[test]
@@ -1969,6 +2050,18 @@ mod tests {
         payload.extend_from_slice(&encode_iso_639_2(language).to_be_bytes());
         payload.extend_from_slice(&0_u16.to_be_bytes());
         atom(b"mdhd", &payload)
+    }
+
+    fn chpl(chapters: &[(u64, &str)]) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&[0, 0, 0, 0]);
+        payload.push(chapters.len() as u8);
+        for (start_ms, title) in chapters {
+            payload.extend_from_slice(&start_ms.saturating_mul(10_000).to_be_bytes());
+            payload.push(title.len() as u8);
+            payload.extend_from_slice(title.as_bytes());
+        }
+        atom(b"chpl", &payload)
     }
 
     fn encode_iso_639_2(language: &str) -> u16 {

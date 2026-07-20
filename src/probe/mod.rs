@@ -338,6 +338,7 @@ pub fn probe_media_source(path: &Path) -> Result<MediaProbe, ProbeError> {
         let meta = mp4::parse_basic_metadata(mapped.as_ref());
         duration_ms = meta.duration_ms;
         tracks = tracks_from_mp4(&meta);
+        chapters = chapters_from_mp4(&meta.chapters);
     } else if matches!(container, ContainerKind::Matroska | ContainerKind::Webm) {
         let meta = matroska::parse_basic_metadata(mapped.as_ref());
         duration_ms = meta.duration_ms;
@@ -366,6 +367,19 @@ pub fn probe_media_source(path: &Path) -> Result<MediaProbe, ProbeError> {
         },
         capabilities,
     })
+}
+
+fn chapters_from_mp4(chapters: &[mp4::Mp4Chapter]) -> Vec<Chapter> {
+    chapters
+        .iter()
+        .map(|chapter| Chapter {
+            id: chapter.id.clone(),
+            start_ms: chapter.start_ms,
+            end_ms: chapter.end_ms,
+            title: chapter.title.clone(),
+            language: chapter.language.clone(),
+        })
+        .collect()
 }
 
 fn tracks_from_mp4(meta: &mp4::Mp4BasicMetadata) -> Vec<MediaTrack> {
