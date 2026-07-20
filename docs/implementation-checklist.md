@@ -36,13 +36,15 @@
 - [x] Matroska/WebM EBML parser: Segment Info, Tracks, Attachments.
 - [x] Matroska/WebM EBML parser: Chapters.
 - [x] Extract video fields: codec, dimensions.
-- [ ] Extract video fields: frame rate, bitrate, pixel format, HDR/DV hints.
+- [x] Extract video fields: frame rate, bitrate, HDR/DV hints.
+- [ ] Extract video fields: pixel format.
 - [x] Extract Matroska audio fields: codec, channels, language/title, default/forced disposition.
 - [x] Extract MP4 audio fields: codec, channels, sample rate.
-- [ ] Extract MP4 audio language/title/default/forced disposition.
-- [ ] Extract audio fields: bitrate, Atmos/JOC hints.
+- [ ] Extract MP4 audio title/default/forced disposition.
+- [x] Extract audio fields: bitrate and MP4 E-AC-3 Atmos/JOC hints.
+- [ ] Extract Matroska E-AC-3 Atmos/JOC hints.
 - [x] Extract subtitles: text vs bitmap classification, language/title, default/forced disposition.
-- [ ] Extract chapters.
+- [x] Extract chapters.
 - [x] Extract duration.
 - [x] Use memory-mapped probing instead of whole-file reads.
 - [ ] Define Chroma-native error taxonomy.
