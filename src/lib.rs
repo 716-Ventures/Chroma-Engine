@@ -70,5 +70,6 @@ pub use transcode::{
     EncodedVideoOutput, EncodedVideoStream, OperationPlan, PcmAudioFormat, PlanMode,
     RawVideoFormat, RawVideoPixelFormat, SubtitleOp, VideoCodec, VideoEncodeError,
     VideoEncodeSessionInfo, VideoOp, encode_aac_from_interleaved_i16,
-    encode_h264_videotoolbox_bgra_frame, probe_videotoolbox_h264_session,
+    encode_h264_videotoolbox_bgra_frame, encode_hevc_videotoolbox_bgra_frame,
+    probe_videotoolbox_h264_session, probe_videotoolbox_hevc_session,
 };

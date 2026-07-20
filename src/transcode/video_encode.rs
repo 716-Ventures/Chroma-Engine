@@ -119,6 +119,14 @@ pub fn probe_videotoolbox_h264_session(
     platform_probe_videotoolbox_h264_session(format)
 }
 
+/// Creates and prepares a native VideoToolbox HEVC session for the requested raw format.
+pub fn probe_videotoolbox_hevc_session(
+    format: RawVideoFormat,
+) -> Result<VideoEncodeSessionInfo, VideoEncodeError> {
+    validate_raw_video_format(format)?;
+    platform_probe_videotoolbox_hevc_session(format)
+}
+
 /// Encodes one BGRA frame to H.264 using the native VideoToolbox backend.
 pub fn encode_h264_videotoolbox_bgra_frame(
     format: RawVideoFormat,
@@ -133,6 +141,22 @@ pub fn encode_h264_videotoolbox_bgra_frame(
         });
     }
     platform_encode_h264_videotoolbox_bgra_frame(format, bgra, bitrate)
+}
+
+/// Encodes one BGRA frame to HEVC using the native VideoToolbox backend.
+pub fn encode_hevc_videotoolbox_bgra_frame(
+    format: RawVideoFormat,
+    bgra: &[u8],
+    bitrate: u32,
+) -> Result<EncodedVideoOutput, VideoEncodeError> {
+    validate_raw_video_format(format)?;
+    validate_bgra_frame(format, bgra)?;
+    if bitrate == 0 {
+        return Err(VideoEncodeError::InvalidInput {
+            reason: "bitrate must be greater than zero".to_string(),
+        });
+    }
+    platform_encode_hevc_videotoolbox_bgra_frame(format, bgra, bitrate)
 }
 
 fn validate_raw_video_format(format: RawVideoFormat) -> Result<(), VideoEncodeError> {
@@ -208,6 +232,41 @@ fn platform_probe_videotoolbox_h264_session(
     Ok(VideoEncodeSessionInfo {
         codec: VideoCodec::H264,
         encoder: "chroma-videotoolbox-h264".to_string(),
+        width: format.width,
+        height: format.height,
+        hardware_required: false,
+        prepared: true,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn platform_probe_videotoolbox_hevc_session(
+    format: RawVideoFormat,
+) -> Result<VideoEncodeSessionInfo, VideoEncodeError> {
+    use core_media::format_description::kCMVideoCodecType_HEVC;
+    use video_toolbox::compression_session::VTCompressionSession;
+
+    let session = VTCompressionSession::new(
+        format.width as i32,
+        format.height as i32,
+        kCMVideoCodecType_HEVC,
+        None,
+        None,
+        default_allocator(),
+    )
+    .map_err(|status| VideoEncodeError::BackendFailed {
+        reason: format!("VTCompressionSessionCreate(HEVC) returned {status}"),
+    })?;
+    session
+        .prepare_to_encode_frames()
+        .map_err(|status| VideoEncodeError::BackendFailed {
+            reason: format!("VTCompressionSessionPrepareToEncodeFrames(HEVC) returned {status}"),
+        })?;
+    session.invalidate();
+
+    Ok(VideoEncodeSessionInfo {
+        codec: VideoCodec::Hevc,
+        encoder: "chroma-videotoolbox-hevc".to_string(),
         width: format.width,
         height: format.height,
         hardware_required: false,
@@ -347,6 +406,123 @@ fn platform_encode_h264_videotoolbox_bgra_frame(
 }
 
 #[cfg(target_os = "macos")]
+fn platform_encode_hevc_videotoolbox_bgra_frame(
+    format: RawVideoFormat,
+    bgra: &[u8],
+    _bitrate: u32,
+) -> Result<EncodedVideoOutput, VideoEncodeError> {
+    use std::sync::{Arc, Mutex};
+
+    use core_media::{format_description::kCMVideoCodecType_HEVC, time::CMTime};
+    use video_toolbox::compression_session::VTCompressionSession;
+
+    let session = VTCompressionSession::new(
+        format.width as i32,
+        format.height as i32,
+        kCMVideoCodecType_HEVC,
+        None,
+        None,
+        default_allocator(),
+    )
+    .map_err(|status| VideoEncodeError::BackendFailed {
+        reason: format!("VTCompressionSessionCreate(HEVC) returned {status}"),
+    })?;
+    session
+        .prepare_to_encode_frames()
+        .map_err(|status| VideoEncodeError::BackendFailed {
+            reason: format!("VTCompressionSessionPrepareToEncodeFrames(HEVC) returned {status}"),
+        })?;
+
+    let pixel_buffer = bgra_pixel_buffer(format, bgra)?;
+    let image_buffer = image_buffer_from_pixel_buffer(&pixel_buffer);
+    let frames = Arc::new(Mutex::new(Vec::<EncodedVideoFrame>::new()));
+    let decoder_config = Arc::new(Mutex::new(None::<Vec<u8>>));
+    let frames_out = Arc::clone(&frames);
+    let config_out = Arc::clone(&decoder_config);
+    let time_scale = TimeScale {
+        units_per_second: format.frame_rate_num,
+    };
+    let duration = TimeDelta {
+        units: u64::from(format.frame_rate_den),
+        scale: time_scale,
+    };
+
+    session
+        .encode_frame_with_closure(
+            image_buffer,
+            CMTime::make(0, format.frame_rate_num as i32),
+            CMTime::make(format.frame_rate_den as i64, format.frame_rate_num as i32),
+            None,
+            move |status, _flags, sample_buffer_ref| {
+                if status != 0 || sample_buffer_ref.is_null() {
+                    return;
+                }
+                let Some((payload, config)) = copy_hevc_sample(sample_buffer_ref) else {
+                    return;
+                };
+                if let Ok(mut guard) = config_out.lock()
+                    && guard.is_none()
+                {
+                    *guard = config;
+                }
+                if let Ok(mut guard) = frames_out.lock() {
+                    guard.push(EncodedVideoFrame {
+                        pts: TimePoint {
+                            units: 0,
+                            scale: time_scale,
+                        },
+                        dts: TimePoint {
+                            units: 0,
+                            scale: time_scale,
+                        },
+                        duration,
+                        payload,
+                        keyframe: true,
+                    });
+                }
+            },
+        )
+        .map_err(|status| VideoEncodeError::BackendFailed {
+            reason: format!("VTCompressionSessionEncodeFrame(HEVC) returned {status}"),
+        })?;
+    session
+        .complete_frames(CMTime::make(i64::MAX, format.frame_rate_num as i32))
+        .map_err(|status| VideoEncodeError::BackendFailed {
+            reason: format!("VTCompressionSessionCompleteFrames(HEVC) returned {status}"),
+        })?;
+    session.invalidate();
+
+    let frames = frames
+        .lock()
+        .map_err(|_| VideoEncodeError::BackendFailed {
+            reason: "VideoToolbox frame output lock was poisoned".to_string(),
+        })?
+        .clone();
+    if frames.is_empty() {
+        return Err(VideoEncodeError::BackendFailed {
+            reason: "VideoToolbox emitted no HEVC sample buffers".to_string(),
+        });
+    }
+    let decoder_config = decoder_config
+        .lock()
+        .map_err(|_| VideoEncodeError::BackendFailed {
+            reason: "VideoToolbox decoder config lock was poisoned".to_string(),
+        })?
+        .clone();
+
+    Ok(EncodedVideoOutput {
+        stream: EncodedVideoStream {
+            codec: VideoCodec::Hevc,
+            width: format.width,
+            height: format.height,
+            time_scale,
+            decoder_config,
+        },
+        frames,
+    })
+}
+
+#[cfg(target_os = "macos")]
 fn copy_h264_sample(
     sample_buffer_ref: core_media::sample_buffer::CMSampleBufferRef,
 ) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
@@ -363,6 +539,26 @@ fn copy_h264_sample(
     let config = sample_buffer
         .get_format_description()
         .and_then(|description| avc_decoder_config_from_format_description(&description));
+    Some((payload, config))
+}
+
+#[cfg(target_os = "macos")]
+fn copy_hevc_sample(
+    sample_buffer_ref: core_media::sample_buffer::CMSampleBufferRef,
+) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
+    use core_foundation::base::TCFType;
+    use core_media::{block_buffer::CMBlockBuffer, sample_buffer::CMSampleBuffer};
+
+    #[allow(unsafe_code)]
+    // SAFETY: VideoToolbox owns the callback sample buffer for the duration of
+    // this closure. Chroma copies all data and parameter sets before returning.
+    let sample_buffer = unsafe { CMSampleBuffer::wrap_under_get_rule(sample_buffer_ref) };
+    let data_buffer: CMBlockBuffer = sample_buffer.get_data_buffer()?;
+    let mut payload = vec![0; data_buffer.get_data_length()];
+    data_buffer.copy_data_bytes(0, &mut payload).ok()?;
+    let config = sample_buffer
+        .get_format_description()
+        .and_then(|description| hevc_decoder_config_from_format_description(&description));
     Some((payload, config))
 }
 
@@ -388,6 +584,30 @@ fn avc_decoder_config_from_format_description(
         parameter_sets.push(bytes.to_vec());
     }
     build_avc_decoder_config(&parameter_sets, nal_length_size)
+}
+
+#[cfg(target_os = "macos")]
+fn hevc_decoder_config_from_format_description(
+    description: &core_media::format_description::CMFormatDescription,
+) -> Option<Vec<u8>> {
+    use core_foundation::base::TCFType;
+    use core_media::format_description::CMVideoFormatDescription;
+
+    #[allow(unsafe_code)]
+    // SAFETY: The sample buffer's format description is a video format description
+    // for HEVC output. Parameter sets are copied before the description is dropped.
+    let video_description =
+        unsafe { CMVideoFormatDescription::wrap_under_get_rule(description.as_concrete_TypeRef()) };
+    let mut parameter_sets = Vec::new();
+    let (_, parameter_set_count, nal_length_size) =
+        video_description.get_hevc_parameter_set_at_index(0).ok()?;
+    for index in 0..parameter_set_count {
+        let (bytes, _, _) = video_description
+            .get_hevc_parameter_set_at_index(index)
+            .ok()?;
+        parameter_sets.push(bytes.to_vec());
+    }
+    build_hevc_decoder_config(&parameter_sets, nal_length_size)
 }
 
 #[cfg(target_os = "macos")]
@@ -495,6 +715,54 @@ fn build_avc_decoder_config(parameter_sets: &[Vec<u8>], nal_length_size: i32) ->
     Some(out)
 }
 
+#[cfg(target_os = "macos")]
+fn build_hevc_decoder_config(parameter_sets: &[Vec<u8>], nal_length_size: i32) -> Option<Vec<u8>> {
+    let mut arrays: Vec<(u8, Vec<&[u8]>)> = Vec::new();
+    let mut sps = None;
+    for set in parameter_sets {
+        let nal_unit_type = set.first().map(|byte| (byte >> 1) & 0x3f)?;
+        if nal_unit_type == 33 {
+            sps = Some(set.as_slice());
+        }
+        if let Some((_, units)) = arrays
+            .iter_mut()
+            .find(|(existing_type, _)| *existing_type == nal_unit_type)
+        {
+            units.push(set);
+        } else {
+            arrays.push((nal_unit_type, vec![set]));
+        }
+    }
+    let sps = sps?;
+    if sps.len() < 15 || arrays.len() > u8::MAX as usize {
+        return None;
+    }
+    let length_size_minus_one = u8::try_from(nal_length_size.checked_sub(1)?).ok()? & 0x03;
+    let mut out = Vec::new();
+    out.push(1);
+    out.push(sps[3]);
+    out.extend_from_slice(&sps[4..8]);
+    out.extend_from_slice(&sps[8..14]);
+    out.push(sps[14]);
+    out.extend_from_slice(&[0xf0, 0x00]);
+    out.push(0xfc);
+    out.push(0xfc);
+    out.push(0xf8);
+    out.push(0xf8);
+    out.extend_from_slice(&[0x00, 0x00]);
+    out.push(0x0c | length_size_minus_one);
+    out.push(u8::try_from(arrays.len()).ok()?);
+    for (nal_unit_type, units) in arrays {
+        out.push(0x80 | nal_unit_type);
+        out.extend_from_slice(&u16::try_from(units.len()).ok()?.to_be_bytes());
+        for unit in units {
+            out.extend_from_slice(&u16::try_from(unit.len()).ok()?.to_be_bytes());
+            out.extend_from_slice(unit);
+        }
+    }
+    Some(out)
+}
+
 #[cfg(not(target_os = "macos"))]
 fn platform_encode_h264_videotoolbox_bgra_frame(
     _format: RawVideoFormat,
@@ -507,11 +775,31 @@ fn platform_encode_h264_videotoolbox_bgra_frame(
 }
 
 #[cfg(not(target_os = "macos"))]
+fn platform_encode_hevc_videotoolbox_bgra_frame(
+    _format: RawVideoFormat,
+    _bgra: &[u8],
+    _bitrate: u32,
+) -> Result<EncodedVideoOutput, VideoEncodeError> {
+    Err(VideoEncodeError::BackendUnavailable {
+        reason: "VideoToolbox HEVC encode is only available on macOS".to_string(),
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
 fn platform_probe_videotoolbox_h264_session(
     _format: RawVideoFormat,
 ) -> Result<VideoEncodeSessionInfo, VideoEncodeError> {
     Err(VideoEncodeError::BackendUnavailable {
         reason: "VideoToolbox H.264 encode is only available on macOS".to_string(),
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn platform_probe_videotoolbox_hevc_session(
+    _format: RawVideoFormat,
+) -> Result<VideoEncodeSessionInfo, VideoEncodeError> {
+    Err(VideoEncodeError::BackendUnavailable {
+        reason: "VideoToolbox HEVC encode is only available on macOS".to_string(),
     })
 }
 
@@ -561,6 +849,17 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
+    fn macos_prepares_videotoolbox_hevc_session() {
+        let info =
+            probe_videotoolbox_hevc_session(smoke_format()).expect("prepare HEVC VT session");
+
+        assert_eq!(info.codec, VideoCodec::Hevc);
+        assert_eq!(info.encoder, "chroma-videotoolbox-hevc");
+        assert!(info.prepared);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn macos_encodes_bgra_frame_to_h264() {
         let format = smoke_format();
         let bgra = vec![0; format.width as usize * format.height as usize * 4];
@@ -583,11 +882,37 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_encodes_bgra_frame_to_hevc() {
+        let format = smoke_format();
+        let bgra = vec![0; format.width as usize * format.height as usize * 4];
+
+        let encoded =
+            encode_hevc_videotoolbox_bgra_frame(format, &bgra, 500_000).expect("encode HEVC frame");
+
+        assert_eq!(encoded.stream.codec, VideoCodec::Hevc);
+        assert_eq!(encoded.stream.width, format.width);
+        assert!(!encoded.frames.is_empty());
+        assert!(encoded.frames.iter().all(|frame| !frame.payload.is_empty()));
+        let config = encoded.stream.decoder_config.as_deref().expect("hvcC");
+        let parsed = crate::codec::hevc::parse_hevc_decoder_config(config).expect("parse hvcC");
+        assert_eq!(parsed.nalu_length_size, 4);
+        assert!(parsed.arrays.iter().any(|array| array.nal_unit_type == 32));
+        assert!(parsed.arrays.iter().any(|array| array.nal_unit_type == 33));
+        assert!(parsed.arrays.iter().any(|array| array.nal_unit_type == 34));
+    }
+
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn non_macos_reports_backend_unavailable() {
         let err =
             probe_videotoolbox_h264_session(smoke_format()).expect_err("no VideoToolbox backend");
+
+        assert!(matches!(err, VideoEncodeError::BackendUnavailable { .. }));
+
+        let err =
+            probe_videotoolbox_hevc_session(smoke_format()).expect_err("no VideoToolbox backend");
 
         assert!(matches!(err, VideoEncodeError::BackendUnavailable { .. }));
     }

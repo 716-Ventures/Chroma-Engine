@@ -116,13 +116,13 @@
 - [x] Encoded audio output contract. `EncodedAudioStream` and `EncodedAudioFrame` define the stable codec/timing/payload boundary native backends must emit before fMP4/HLS muxing.
 - [x] fMP4 adapter for encoded audio frames. Native audio backend output can be packed into fMP4 fragment tracks with contiguous sample-clock validation before player-visible muxing.
 - [x] macOS VideoToolbox H.264 encode. Native BGRA frames encode through VideoToolbox to length-prefixed AVC access units with avcC decoder config and stable frame timing.
-- [ ] macOS VideoToolbox HEVC encode. Planned in the backend matrix, but not reported as executable until Chroma Engine owns a real native encode path.
+- [x] macOS VideoToolbox HEVC encode. Native BGRA frames encode through VideoToolbox to length-prefixed HEVC access units with hvcC decoder config and stable frame timing.
 - [x] AAC audio encode. macOS AudioToolbox backend encodes interleaved i16 PCM to AAC-LC, emits MPEG-4 AudioSpecificConfig, and returns sample-clocked `EncodedAudioFrame` payloads.
 - [ ] AC-3/E-AC-3 bridge encode. Planned in the backend matrix, but not reported as executable until Chroma Engine owns the decode/bridge/encode path.
 - [x] CPU fallback decision.
 - [x] Linux VAAPI/NVENC/QSV path.
 - [x] Windows NVENC/QSV/AMF path.
-- [ ] Warm encoder session initialization. AAC AudioToolbox and VideoToolbox H.264 now run tiny real encodes before playback; still open until HEVC and bridge backends have matching warmups.
+- [ ] Warm encoder session initialization. AAC AudioToolbox plus VideoToolbox H.264 and HEVC now run tiny real encodes before playback; still open until bridge backends have matching warmups.
 
 ## Integration
 

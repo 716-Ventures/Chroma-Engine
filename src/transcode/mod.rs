@@ -14,7 +14,8 @@ pub use audio_encode::{
 pub use video_encode::{
     EncodedVideoFrame, EncodedVideoOutput, EncodedVideoStream, RawVideoFormat, RawVideoPixelFormat,
     VideoEncodeError, VideoEncodeSessionInfo, encode_h264_videotoolbox_bgra_frame,
-    probe_videotoolbox_h264_session,
+    encode_hevc_videotoolbox_bgra_frame, probe_videotoolbox_h264_session,
+    probe_videotoolbox_hevc_session,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
