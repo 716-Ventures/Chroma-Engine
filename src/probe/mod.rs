@@ -400,6 +400,7 @@ fn tracks_from_mp4(meta: &mp4::Mp4BasicMetadata) -> Vec<MediaTrack> {
                 shape: TrackShape {
                     width: track.width,
                     height: track.height,
+                    frame_rate: None,
                     channels: track.channels,
                     sample_rate: track.sample_rate,
                 },
@@ -444,6 +445,7 @@ fn tracks_from_matroska(meta: &matroska::MatroskaBasicMetadata) -> Vec<MediaTrac
                 shape: TrackShape {
                     width: track.width,
                     height: track.height,
+                    frame_rate: frame_rate_from_default_duration(track.default_duration_ns),
                     channels: track.channels,
                     sample_rate: track.sample_rate,
                 },
@@ -469,6 +471,7 @@ fn chapters_from_matroska(chapters: &[matroska::MatroskaChapter]) -> Vec<Chapter
 struct TrackShape {
     width: Option<u32>,
     height: Option<u32>,
+    frame_rate: Option<f64>,
     channels: Option<u32>,
     sample_rate: Option<u32>,
 }
@@ -504,7 +507,7 @@ fn media_track(input: TrackInput) -> MediaTrack {
         video: (input.kind == TrackKind::Video).then_some(VideoDescriptor {
             width: input.shape.width,
             height: input.shape.height,
-            frame_rate: None,
+            frame_rate: input.shape.frame_rate,
             pixel_format: None,
             dynamic_range: DynamicRange::Unknown,
         }),
@@ -521,6 +524,14 @@ fn media_track(input: TrackInput) -> MediaTrack {
             format: subtitle_format_for_codec(&input.codec),
         }),
     }
+}
+
+fn frame_rate_from_default_duration(default_duration_ns: Option<u64>) -> Option<f64> {
+    let duration_ns = default_duration_ns?;
+    if duration_ns == 0 {
+        return None;
+    }
+    Some(1_000_000_000_f64 / duration_ns as f64)
 }
 
 fn next_track_id(
@@ -696,5 +707,15 @@ mod tests {
             next_track_id(TrackKind::Audio, &mut v, &mut a, &mut s, 10),
             "a1"
         );
+    }
+
+    #[test]
+    fn derives_frame_rate_from_matroska_default_duration() {
+        assert_eq!(
+            frame_rate_from_default_duration(Some(41_666_667)),
+            Some(23.999999808000002)
+        );
+        assert_eq!(frame_rate_from_default_duration(Some(0)), None);
+        assert_eq!(frame_rate_from_default_duration(None), None);
     }
 }
