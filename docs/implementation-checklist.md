@@ -23,7 +23,7 @@
 - [x] Centralize memory-map `unsafe` usage behind an audited source wrapper.
 - [x] Add release profile policy for optimized binaries.
 - [x] Add Criterion benchmark harness for initial hot paths.
-- [ ] Add dependency audit policy once `cargo-deny` is installed or CI can install it reproducibly.
+- [x] Add dependency audit policy once `cargo-deny` is installed or CI can install it reproducibly.
 - [x] Add missing-docs policy for the public facade.
 - [x] Split oversized implementation modules: HLS, MP4, Matroska, CLI.
 - [x] Replace broad `anyhow` use in library-facing APIs with typed engine errors.

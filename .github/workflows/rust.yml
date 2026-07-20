@@ -20,5 +20,9 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Test
         run: cargo test --all-features
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked --version 0.20.2
+      - name: Dependency audit
+        run: cargo deny check
       - name: Docs
         run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features

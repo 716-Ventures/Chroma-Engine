@@ -7,6 +7,7 @@ license = "Proprietary"
 description = "Native Rust media engine for Chroma playback, probing, packet planning, remuxing, and transcoding."
 repository = "https://github.com/716-Ventures/Chroma-Engine"
 readme = "README.md"
+publish = false
 keywords = ["media", "playback", "hls", "mp4", "matroska"]
 categories = ["multimedia::video", "multimedia::audio", "parser-implementations"]
 
