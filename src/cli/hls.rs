@@ -21,6 +21,7 @@ struct HlsPlanOutput {
     audio_codec: String,
     master_playlist: String,
     media_playlist: String,
+    fmp4_media_playlist: String,
     segments: Vec<HlsSegmentInfo>,
 }
 
@@ -112,6 +113,7 @@ pub(super) fn run_hls_plan(
         audio_codec: plan.audio_codec().to_string(),
         master_playlist: plan.master_playlist(),
         media_playlist: plan.media_playlist(),
+        fmp4_media_playlist: plan.fmp4_media_playlist(),
         segments: plan.segments(),
     };
     println!("{}", serde_json::to_string_pretty(&output)?);
