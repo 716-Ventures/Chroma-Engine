@@ -152,7 +152,7 @@ pub fn samples_from_packets_with_timescale(
     packets: &[PacketRef],
     timescale: u32,
 ) -> Vec<Fmp4Sample> {
-    packets
+    let mut samples = packets
         .iter()
         .map(|packet| {
             let duration = rescale_time(
@@ -186,7 +186,21 @@ pub fn samples_from_packets_with_timescale(
                 composition_time_offset,
             }
         })
-        .collect()
+        .collect::<Vec<_>>();
+
+    if let Some(min_offset) = samples
+        .iter()
+        .map(|sample| sample.composition_time_offset)
+        .min()
+        && min_offset < 0
+    {
+        for sample in &mut samples {
+            sample.composition_time_offset =
+                sample.composition_time_offset.saturating_sub(min_offset);
+        }
+    }
+
+    samples
 }
 
 /// Builds one fMP4 fragment track from contiguous encoded audio frames.
@@ -1040,6 +1054,42 @@ mod tests {
             &fragment[mdat_offset + 8..],
             &[0xaa, 0xbb, 0xcc, 0xdd, 0xee]
         );
+    }
+
+    #[test]
+    fn packet_samples_normalize_negative_composition_offsets() {
+        let packets = vec![
+            PacketRef {
+                source_offset: 0,
+                size: 10,
+                pts: TimePoint::millis(0),
+                dts: TimePoint::millis(0),
+                duration: TimeDelta::millis(42),
+                keyframe: true,
+            },
+            PacketRef {
+                source_offset: 10,
+                size: 10,
+                pts: TimePoint::millis(40),
+                dts: TimePoint::millis(84),
+                duration: TimeDelta::millis(42),
+                keyframe: false,
+            },
+            PacketRef {
+                source_offset: 20,
+                size: 10,
+                pts: TimePoint::millis(166),
+                dts: TimePoint::millis(42),
+                duration: TimeDelta::millis(42),
+                keyframe: false,
+            },
+        ];
+
+        let samples = samples_from_packets_with_timescale(&packets, 1_000);
+
+        assert_eq!(samples[0].composition_time_offset, 44);
+        assert_eq!(samples[1].composition_time_offset, 0);
+        assert_eq!(samples[2].composition_time_offset, 168);
     }
 
     #[test]
