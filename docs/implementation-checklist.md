@@ -81,7 +81,7 @@
 - [x] Emit stream chunks through reusable packet/decode/encode stages.
 - [x] H.264/AAC native stream-copy chunks.
 - [x] HEVC native stream-copy chunks.
-- [ ] AC-3/E-AC-3/MP3/FLAC/ALAC native copy paths.
+- [x] AC-3/E-AC-3/MP3/FLAC/ALAC native copy paths.
 - [x] Keyframe-aligned chunk planning.
 - [x] Keyframe-aligned MP4/MOV chunk emission.
 - [ ] Input-side seek anchoring and copy-path coarse seek behavior.

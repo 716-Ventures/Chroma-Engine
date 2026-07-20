@@ -416,6 +416,40 @@ mod tests {
     }
 
     #[test]
+    fn native_chroma_plan_copies_extended_audio_codecs() {
+        for family in [
+            CodecFamily::Ac3,
+            CodecFamily::Eac3,
+            CodecFamily::Mp3,
+            CodecFamily::Flac,
+            CodecFamily::Alac,
+        ] {
+            let probe = probe_with_tracks(vec![
+                track("v0", TrackKind::Video, CodecFamily::H264),
+                track("a0", TrackKind::Audio, family),
+            ]);
+            let plan = plan_playback(&probe, PlaybackConstraints::default());
+            let copy = plan
+                .stages
+                .iter()
+                .find(|stage| stage.id == "packet-copy0")
+                .expect("copy stage");
+
+            assert!(
+                copy.track_ids.contains(&"a0".to_string()),
+                "{family:?} should stay on the packet-copy path"
+            );
+            assert!(
+                !plan
+                    .stages
+                    .iter()
+                    .any(|stage| stage.kind == StageKind::Decode),
+                "{family:?} should not require native Chroma decode"
+            );
+        }
+    }
+
+    #[test]
     fn browser_plan_uses_decode_for_hevc_truehd() {
         let probe = probe_with_tracks(vec![
             track("v0", TrackKind::Video, CodecFamily::Hevc),
