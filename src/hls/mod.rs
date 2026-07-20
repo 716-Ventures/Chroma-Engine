@@ -2637,7 +2637,8 @@ fn matroska_hevc_codec_string(config: &[u8]) -> Option<String> {
     let compatibility = u32::from_be_bytes(config[2..6].try_into().ok()?);
     let level_idc = config[12];
     Some(format!(
-        "hvc1.{profile_space}{profile_idc}.{compatibility:X}.{tier}{level_idc}"
+        "hvc1.{profile_space}{profile_idc}.{:X}.{tier}{level_idc}",
+        compatibility.reverse_bits()
     ))
 }
 
@@ -2722,6 +2723,19 @@ mod tests {
         assert!(
             plan.master_playlist
                 .contains("CODECS=\"avc1.640028,mp4a.40.2,ac-3\"")
+        );
+    }
+
+    #[test]
+    fn matroska_hevc_codec_string_reverses_compatibility_flags() {
+        let mut config = vec![0_u8; 23];
+        config[1] = 0x22;
+        config[2..6].copy_from_slice(&0x2000_0000_u32.to_be_bytes());
+        config[12] = 153;
+
+        assert_eq!(
+            matroska_hevc_codec_string(&config).as_deref(),
+            Some("hvc1.2.4.H153")
         );
     }
 

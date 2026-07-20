@@ -414,7 +414,8 @@ fn hevc_codec_string(config: &[u8]) -> Option<String> {
     let compatibility = u32::from_be_bytes(config[2..6].try_into().ok()?);
     let level_idc = config[12];
     Some(format!(
-        "hvc1.{profile_space}{profile_idc}.{compatibility:X}.{tier}{level_idc}"
+        "hvc1.{profile_space}{profile_idc}.{:X}.{tier}{level_idc}",
+        compatibility.reverse_bits()
     ))
 }
 
@@ -476,6 +477,16 @@ mod tests {
         );
         assert_eq!(codec_string_from_decoder_config("aac", Some("bad")), None);
         assert_eq!(codec_string_from_decoder_config("ac3", Some("1190")), None);
+    }
+
+    #[test]
+    fn derives_hevc_codec_string_with_reversed_compatibility_flags() {
+        let mut config = vec![0_u8; 23];
+        config[1] = 0x22;
+        config[2..6].copy_from_slice(&0x2000_0000_u32.to_be_bytes());
+        config[12] = 153;
+
+        assert_eq!(hevc_codec_string(&config).as_deref(), Some("hvc1.2.4.H153"));
     }
 
     fn fixture_mp4() -> Vec<u8> {
