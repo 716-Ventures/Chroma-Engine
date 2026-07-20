@@ -5,6 +5,10 @@ edition = "2024"
 rust-version = "1.90"
 license = "Proprietary"
 description = "Native Rust media engine for Chroma playback, probing, packet planning, remuxing, and transcoding."
+repository = "https://github.com/716-Ventures/Chroma-Engine"
+readme = "README.md"
+keywords = ["media", "playback", "hls", "mp4", "matroska"]
+categories = ["multimedia::video", "multimedia::audio", "parser-implementations"]
 
 [lib]
 name = "chroma_engine"
@@ -37,3 +41,14 @@ unsafe_code = "deny"
 
 [lints.clippy]
 all = { level = "deny", priority = -1 }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = "none"
