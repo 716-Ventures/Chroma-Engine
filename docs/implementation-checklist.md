@@ -59,7 +59,7 @@
 - [x] Extract MP4/MOV H.264, HEVC, and AAC codec configuration records.
 - [x] AAC/AC-3/E-AC-3/MP3/FLAC/ALAC sample entries.
 - [x] Text subtitle to `mov_text`.
-- [ ] Metadata and chapter copy.
+- [x] Metadata and chapter copy.
 
 ## Native Playback
 

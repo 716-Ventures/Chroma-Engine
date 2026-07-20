@@ -1,5 +1,6 @@
 use std::{io::Write, path::Path};
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
@@ -17,6 +18,76 @@ pub struct RemuxPacketSpans<'a> {
     pub track_id: String,
     /// Borrowed payload spans in packet order.
     pub spans: Vec<PacketPayloadSpan<'a>>,
+}
+
+/// Normalized source metadata that can be copied into remuxed outputs.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RemuxMetadata {
+    /// Source container family.
+    pub container: String,
+    /// Source duration in milliseconds when available.
+    pub duration_ms: Option<u64>,
+    /// Stable normalized track metadata.
+    pub tracks: Vec<RemuxTrackMetadata>,
+    /// Chapter markers copied from the source container.
+    pub chapters: Vec<RemuxChapter>,
+    /// Number of non-track attachments discovered in the source.
+    pub attachment_count: u32,
+}
+
+/// Track metadata needed by a stream-copy remux plan.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RemuxTrackMetadata {
+    /// Stable semantic track identifier.
+    pub id: String,
+    /// Zero-based source track index.
+    pub index: u32,
+    /// Track media kind.
+    pub kind: RemuxTrackKind,
+    /// Normalized codec identifier.
+    pub codec: String,
+    /// Track duration in milliseconds when available.
+    pub duration_ms: Option<u64>,
+    /// ISO/BPC language tag when available.
+    pub language: Option<String>,
+    /// Track title or display name when available.
+    pub title: Option<String>,
+    /// Whether the source marks this as the default track.
+    pub default: bool,
+    /// Whether the source marks this track as forced.
+    pub forced: bool,
+}
+
+/// Media kind for a remuxable source track.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum RemuxTrackKind {
+    /// Video track.
+    Video,
+    /// Audio track.
+    Audio,
+    /// Subtitle track.
+    Subtitle,
+    /// Unknown or unsupported track kind.
+    Unknown,
+}
+
+/// Chapter marker copied from the source container.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RemuxChapter {
+    /// Stable chapter identifier.
+    pub id: String,
+    /// Chapter start timestamp in milliseconds.
+    pub start_ms: u64,
+    /// Chapter end timestamp in milliseconds when available.
+    pub end_ms: Option<u64>,
+    /// Chapter title when available.
+    pub title: Option<String>,
+    /// Chapter language when available.
+    pub language: Option<String>,
 }
 
 /// Error returned while remuxing a source into MP4.
@@ -57,6 +128,22 @@ impl RemuxError {
             Self::NoTrack => EngineErrorCode::NoMatchingTrack,
             Self::Packet(_) => EngineErrorCode::SourceReadFailed,
         }
+    }
+}
+
+/// Returns normalized metadata that a remux writer can copy into its output.
+pub fn copyable_metadata(bytes: &[u8]) -> Result<RemuxMetadata, RemuxError> {
+    let kind = sniff_container(bytes);
+    match kind {
+        ContainerKind::Mp4 | ContainerKind::Mov => {
+            let meta = mp4::parse_basic_metadata(bytes);
+            Ok(metadata_from_mp4(kind, &meta))
+        }
+        ContainerKind::Matroska | ContainerKind::Webm => {
+            let meta = matroska::parse_basic_metadata(bytes);
+            Ok(metadata_from_matroska(kind, &meta))
+        }
+        ContainerKind::Unknown => Err(RemuxError::UnsupportedContainer(kind.public_name())),
     }
 }
 
@@ -125,6 +212,150 @@ pub fn remux_mp4(input: &Path, _output: &Path) -> Result<(), RemuxError> {
             Err(RemuxError::NotImplemented(kind.public_name()))
         }
         ContainerKind::Unknown => Err(RemuxError::UnsupportedContainer(kind.public_name())),
+    }
+}
+
+fn metadata_from_mp4(container: ContainerKind, meta: &mp4::Mp4BasicMetadata) -> RemuxMetadata {
+    let mut video_n = 0;
+    let mut audio_n = 0;
+    let mut subtitle_n = 0;
+    let tracks = meta
+        .tracks
+        .iter()
+        .map(|track| {
+            let kind = remux_kind_from_mp4(track.kind);
+            RemuxTrackMetadata {
+                id: next_track_id(
+                    kind,
+                    &mut video_n,
+                    &mut audio_n,
+                    &mut subtitle_n,
+                    track.index,
+                ),
+                index: track.index,
+                kind,
+                codec: track.codec.clone(),
+                duration_ms: track.duration_ms,
+                language: track.language.clone(),
+                title: track.title.clone(),
+                default: track.default,
+                forced: track.forced,
+            }
+        })
+        .collect();
+
+    RemuxMetadata {
+        container: container.public_name().to_string(),
+        duration_ms: meta.duration_ms,
+        tracks,
+        chapters: meta
+            .chapters
+            .iter()
+            .map(|chapter| RemuxChapter {
+                id: chapter.id.clone(),
+                start_ms: chapter.start_ms,
+                end_ms: chapter.end_ms,
+                title: chapter.title.clone(),
+                language: chapter.language.clone(),
+            })
+            .collect(),
+        attachment_count: 0,
+    }
+}
+
+fn metadata_from_matroska(
+    container: ContainerKind,
+    meta: &matroska::MatroskaBasicMetadata,
+) -> RemuxMetadata {
+    let mut video_n = 0;
+    let mut audio_n = 0;
+    let mut subtitle_n = 0;
+    let tracks = meta
+        .tracks
+        .iter()
+        .map(|track| {
+            let kind = remux_kind_from_matroska(track.kind);
+            RemuxTrackMetadata {
+                id: next_track_id(
+                    kind,
+                    &mut video_n,
+                    &mut audio_n,
+                    &mut subtitle_n,
+                    track.index,
+                ),
+                index: track.index,
+                kind,
+                codec: track.codec.clone(),
+                duration_ms: meta.duration_ms,
+                language: track.language.clone(),
+                title: track.name.clone(),
+                default: track.default,
+                forced: track.forced,
+            }
+        })
+        .collect();
+
+    RemuxMetadata {
+        container: container.public_name().to_string(),
+        duration_ms: meta.duration_ms,
+        tracks,
+        chapters: meta
+            .chapters
+            .iter()
+            .map(|chapter| RemuxChapter {
+                id: chapter.id.clone(),
+                start_ms: chapter.start_ms,
+                end_ms: chapter.end_ms,
+                title: chapter.title.clone(),
+                language: chapter.language.clone(),
+            })
+            .collect(),
+        attachment_count: meta.attachment_count,
+    }
+}
+
+fn remux_kind_from_mp4(kind: mp4::Mp4TrackKind) -> RemuxTrackKind {
+    match kind {
+        mp4::Mp4TrackKind::Video => RemuxTrackKind::Video,
+        mp4::Mp4TrackKind::Audio => RemuxTrackKind::Audio,
+        mp4::Mp4TrackKind::Subtitle => RemuxTrackKind::Subtitle,
+        mp4::Mp4TrackKind::Unknown => RemuxTrackKind::Unknown,
+    }
+}
+
+fn remux_kind_from_matroska(kind: matroska::MatroskaTrackKind) -> RemuxTrackKind {
+    match kind {
+        matroska::MatroskaTrackKind::Video => RemuxTrackKind::Video,
+        matroska::MatroskaTrackKind::Audio => RemuxTrackKind::Audio,
+        matroska::MatroskaTrackKind::Subtitle => RemuxTrackKind::Subtitle,
+        matroska::MatroskaTrackKind::Unknown => RemuxTrackKind::Unknown,
+    }
+}
+
+fn next_track_id(
+    kind: RemuxTrackKind,
+    video_n: &mut u32,
+    audio_n: &mut u32,
+    subtitle_n: &mut u32,
+    fallback: u32,
+) -> String {
+    match kind {
+        RemuxTrackKind::Video => {
+            let id = format!("v{video_n}");
+            *video_n += 1;
+            id
+        }
+        RemuxTrackKind::Audio => {
+            let id = format!("a{audio_n}");
+            *audio_n += 1;
+            id
+        }
+        RemuxTrackKind::Subtitle => {
+            let id = format!("s{subtitle_n}");
+            *subtitle_n += 1;
+            id
+        }
+        RemuxTrackKind::Unknown => format!("x{fallback}"),
     }
 }
 
@@ -208,6 +439,140 @@ mod tests {
         let err = stream_copy_packet_spans(b"not media", None, PacketRange { start: 0, end: 0 })
             .unwrap_err();
         assert_eq!(err.code(), EngineErrorCode::UnsupportedContainer);
+    }
+
+    #[test]
+    fn mp4_metadata_copy_keeps_tracks_and_chapters() {
+        let metadata = metadata_from_mp4(
+            ContainerKind::Mp4,
+            &mp4::Mp4BasicMetadata {
+                major_brand: Some("isom".to_string()),
+                compatible_brands: vec!["iso6".to_string()],
+                duration_ms: Some(120_000),
+                tracks: vec![
+                    mp4::Mp4Track {
+                        index: 7,
+                        kind: mp4::Mp4TrackKind::Video,
+                        codec: "h264".to_string(),
+                        duration_ms: Some(120_000),
+                        language: None,
+                        title: Some("Main".to_string()),
+                        default: true,
+                        forced: false,
+                        frame_rate: Some(23.976),
+                        bitrate_bps: Some(8_000_000),
+                        dynamic_range: mp4::Mp4DynamicRange::Sdr,
+                        pixel_format: Some("yuv420p".to_string()),
+                        width: Some(1920),
+                        height: Some(1080),
+                        channels: None,
+                        sample_rate: None,
+                        atmos: false,
+                    },
+                    mp4::Mp4Track {
+                        index: 8,
+                        kind: mp4::Mp4TrackKind::Audio,
+                        codec: "aac".to_string(),
+                        duration_ms: Some(119_800),
+                        language: Some("eng".to_string()),
+                        title: Some("English".to_string()),
+                        default: true,
+                        forced: false,
+                        frame_rate: None,
+                        bitrate_bps: Some(384_000),
+                        dynamic_range: mp4::Mp4DynamicRange::Unknown,
+                        pixel_format: None,
+                        width: None,
+                        height: None,
+                        channels: Some(6),
+                        sample_rate: Some(48_000),
+                        atmos: false,
+                    },
+                ],
+                chapters: vec![mp4::Mp4Chapter {
+                    id: "ch0".to_string(),
+                    start_ms: 0,
+                    end_ms: Some(60_000),
+                    title: Some("Opening".to_string()),
+                    language: Some("eng".to_string()),
+                }],
+            },
+        );
+
+        assert_eq!(metadata.container, "mp4");
+        assert_eq!(metadata.duration_ms, Some(120_000));
+        assert_eq!(metadata.attachment_count, 0);
+        assert_eq!(metadata.tracks[0].id, "v0");
+        assert_eq!(metadata.tracks[0].kind, RemuxTrackKind::Video);
+        assert_eq!(metadata.tracks[1].id, "a0");
+        assert_eq!(metadata.tracks[1].language.as_deref(), Some("eng"));
+        assert_eq!(metadata.chapters[0].title.as_deref(), Some("Opening"));
+    }
+
+    #[test]
+    fn matroska_metadata_copy_keeps_track_names_and_attachments() {
+        let metadata = metadata_from_matroska(
+            ContainerKind::Matroska,
+            &matroska::MatroskaBasicMetadata {
+                duration_ms: Some(90_000),
+                tracks: vec![
+                    matroska::MatroskaTrack {
+                        index: 3,
+                        number: 1,
+                        kind: matroska::MatroskaTrackKind::Subtitle,
+                        codec: "subrip".to_string(),
+                        language: Some("spa".to_string()),
+                        name: Some("Spanish Forced".to_string()),
+                        default: false,
+                        forced: true,
+                        width: None,
+                        height: None,
+                        pixel_format: None,
+                        channels: None,
+                        sample_rate: None,
+                        atmos: false,
+                        object_audio_candidate: false,
+                        default_duration_ns: None,
+                        codec_private: None,
+                    },
+                    matroska::MatroskaTrack {
+                        index: 4,
+                        number: 2,
+                        kind: matroska::MatroskaTrackKind::Audio,
+                        codec: "eac3".to_string(),
+                        language: Some("eng".to_string()),
+                        name: Some("English 5.1".to_string()),
+                        default: true,
+                        forced: false,
+                        width: None,
+                        height: None,
+                        pixel_format: None,
+                        channels: Some(6),
+                        sample_rate: Some(48_000),
+                        atmos: false,
+                        object_audio_candidate: true,
+                        default_duration_ns: None,
+                        codec_private: None,
+                    },
+                ],
+                chapters: vec![matroska::MatroskaChapter {
+                    id: "edition0_chapter0".to_string(),
+                    start_ms: 1_000,
+                    end_ms: None,
+                    title: Some("Scene 1".to_string()),
+                    language: Some("eng".to_string()),
+                }],
+                attachment_count: 2,
+            },
+        );
+
+        assert_eq!(metadata.container, "mkv");
+        assert_eq!(metadata.attachment_count, 2);
+        assert_eq!(metadata.tracks[0].id, "s0");
+        assert_eq!(metadata.tracks[0].title.as_deref(), Some("Spanish Forced"));
+        assert!(metadata.tracks[0].forced);
+        assert_eq!(metadata.tracks[1].id, "a0");
+        assert_eq!(metadata.chapters[0].start_ms, 1_000);
     }
 
     #[test]
