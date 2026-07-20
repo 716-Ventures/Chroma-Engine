@@ -29,6 +29,12 @@ pub struct ManifestTrack {
     pub kind: String,
     pub codec: String,
     pub codec_string: Option<String>,
+    pub language: Option<String>,
+    pub title: Option<String>,
+    pub channels: Option<u32>,
+    pub sample_rate: Option<u32>,
+    pub default: bool,
+    pub forced: bool,
     pub config_box: Option<String>,
     pub decoder_config_hex: Option<String>,
     pub chunks: Vec<NativeChunk>,
@@ -89,7 +95,7 @@ pub fn build_mp4_playback_manifest(
     }
 
     Some(NativePlaybackManifest {
-        schema_version: 1,
+        schema_version: 2,
         source_path: source_path.display().to_string(),
         duration_ms: metadata.duration_ms,
         chunk_target_ms: options.chunk_target_ms,
@@ -135,7 +141,7 @@ pub fn build_matroska_playback_manifest(
     }
 
     Some(NativePlaybackManifest {
-        schema_version: 1,
+        schema_version: 2,
         source_path: source_path.display().to_string(),
         duration_ms: metadata.duration_ms,
         chunk_target_ms: options.chunk_target_ms,
@@ -192,6 +198,8 @@ fn next_semantic_track_id(prefix: &str, counter: &mut u32) -> String {
 fn manifest_track(bytes: &[u8], track_id: &str, target_ms: u64) -> Option<ManifestTrack> {
     let config = parse_codec_config(bytes, Some(track_id))?;
     let plan = parse_chunk_plan(bytes, Some(track_id), target_ms)?;
+    let metadata = parse_basic_metadata(bytes);
+    let track_meta = mp4_track_by_semantic_id(&metadata.tracks, track_id);
     Some(ManifestTrack {
         id: config.track_id,
         kind: config.track_kind,
@@ -199,10 +207,38 @@ fn manifest_track(bytes: &[u8], track_id: &str, target_ms: u64) -> Option<Manife
             .codec_string
             .or_else(|| fallback_codec_string(config.codec.as_str())),
         codec: config.codec,
+        language: None,
+        title: None,
+        channels: track_meta.and_then(|track| track.channels),
+        sample_rate: track_meta.and_then(|track| track.sample_rate),
+        default: track_id.ends_with('0'),
+        forced: false,
         config_box: config.config_box,
         decoder_config_hex: config.description_hex,
         chunks: plan.chunks,
     })
+}
+
+fn mp4_track_by_semantic_id<'a>(
+    tracks: &'a [crate::container::mp4::Mp4Track],
+    target_id: &str,
+) -> Option<&'a crate::container::mp4::Mp4Track> {
+    let mut video_index = 0_u32;
+    let mut audio_index = 0_u32;
+    let mut subtitle_index = 0_u32;
+    let mut unknown_index = 0_u32;
+    for track in tracks {
+        let track_id = match track.kind {
+            Mp4TrackKind::Video => next_semantic_track_id("v", &mut video_index),
+            Mp4TrackKind::Audio => next_semantic_track_id("a", &mut audio_index),
+            Mp4TrackKind::Subtitle => next_semantic_track_id("s", &mut subtitle_index),
+            Mp4TrackKind::Unknown => next_semantic_track_id("x", &mut unknown_index),
+        };
+        if track_id == target_id {
+            return Some(track);
+        }
+    }
+    None
 }
 
 fn fallback_codec_string(codec: &str) -> Option<String> {
@@ -229,6 +265,12 @@ fn matroska_manifest_track(
         kind: matroska_track_kind_name(track.kind).to_string(),
         codec: track.codec.clone(),
         codec_string: matroska_codec_string(track, private),
+        language: track.language.clone(),
+        title: track.name.clone(),
+        channels: track.channels,
+        sample_rate: track.sample_rate,
+        default: track.default,
+        forced: track.forced,
         config_box: matroska_config_box(track, private).map(str::to_string),
         decoder_config_hex: private.map(hex_string),
         chunks,
@@ -336,7 +378,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(manifest.schema_version, 1);
+        assert_eq!(manifest.schema_version, 2);
         assert_eq!(manifest.duration_ms, Some(3_000));
         assert_eq!(manifest.tracks.len(), 3);
         assert_eq!(manifest.tracks[0].id, "v0");
