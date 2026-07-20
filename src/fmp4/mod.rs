@@ -53,6 +53,7 @@ pub struct Fmp4FragmentTrack {
     pub track_id: u32,
     pub base_decode_time: u64,
     pub samples: Vec<Fmp4Sample>,
+    pub payload: Vec<u8>,
 }
 
 pub fn init_segment(tracks: &[Fmp4Track]) -> Result<Vec<u8>> {
@@ -77,14 +78,25 @@ pub fn init_segment(tracks: &[Fmp4Track]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-pub fn media_fragment(
-    sequence_number: u32,
-    tracks: &[Fmp4FragmentTrack],
-    mdat_payload: &[u8],
-) -> Result<Vec<u8>> {
+pub fn media_fragment(sequence_number: u32, tracks: &[Fmp4FragmentTrack]) -> Result<Vec<u8>> {
     if tracks.is_empty() {
         bail!("fMP4 media fragment requires at least one track");
     }
+    for track in tracks {
+        let sample_bytes: u64 = track
+            .samples
+            .iter()
+            .map(|sample| u64::from(sample.size))
+            .sum();
+        if sample_bytes != track.payload.len() as u64 {
+            bail!(
+                "fMP4 track {} sample bytes ({sample_bytes}) do not match payload bytes ({})",
+                track.track_id,
+                track.payload.len()
+            );
+        }
+    }
+
     let mut out = Vec::new();
     let mut data_offset_patches = Vec::new();
     write_box(&mut out, *b"moof", |out| {
@@ -93,12 +105,19 @@ pub fn media_fragment(
             write_traf(out, track, &mut data_offset_patches);
         }
     });
-    let mdat_start = out.len();
+    let mdat_payload_start = out.len() + 8;
+    let mut track_offsets = Vec::with_capacity(tracks.len());
+    let mut cursor = mdat_payload_start;
+    for track in tracks {
+        track_offsets.push(i32::try_from(cursor).unwrap_or(i32::MAX));
+        cursor = cursor.saturating_add(track.payload.len());
+    }
     write_box(&mut out, *b"mdat", |out| {
-        out.extend_from_slice(mdat_payload)
+        for track in tracks {
+            out.extend_from_slice(&track.payload);
+        }
     });
-    let data_offset = i32::try_from(mdat_start + 8).unwrap_or(i32::MAX);
-    for patch in data_offset_patches {
+    for (patch, data_offset) in data_offset_patches.into_iter().zip(track_offsets) {
         out[patch..patch + 4].copy_from_slice(&data_offset.to_be_bytes());
     }
     Ok(out)
@@ -568,8 +587,8 @@ mod tests {
                     flags: 0x0200_0000,
                     composition_time_offset: 0,
                 }],
+                payload: b"test".to_vec(),
             }],
-            b"test",
         )
         .expect("media fragment");
 
@@ -579,6 +598,69 @@ mod tests {
             .windows(4)
             .any(|w| w == &(mdat_offset as i32).to_be_bytes()));
         assert!(fragment.ends_with(b"test"));
+    }
+
+    #[test]
+    fn media_fragment_patches_each_track_to_its_payload() {
+        let fragment = media_fragment(
+            3,
+            &[
+                Fmp4FragmentTrack {
+                    track_id: 1,
+                    base_decode_time: 0,
+                    samples: vec![Fmp4Sample {
+                        duration: 1_000,
+                        size: 5,
+                        flags: 0x0200_0000,
+                        composition_time_offset: 0,
+                    }],
+                    payload: b"video".to_vec(),
+                },
+                Fmp4FragmentTrack {
+                    track_id: 2,
+                    base_decode_time: 0,
+                    samples: vec![Fmp4Sample {
+                        duration: 1_024,
+                        size: 5,
+                        flags: 0x0200_0000,
+                        composition_time_offset: 0,
+                    }],
+                    payload: b"audio".to_vec(),
+                },
+            ],
+        )
+        .expect("media fragment");
+
+        let mdat_payload = find_top_level_box(&fragment, b"mdat").expect("mdat") + 8;
+        let audio_payload = mdat_payload + 5;
+        assert!(fragment
+            .windows(4)
+            .any(|w| w == &(mdat_payload as i32).to_be_bytes()));
+        assert!(fragment
+            .windows(4)
+            .any(|w| w == &(audio_payload as i32).to_be_bytes()));
+        assert!(fragment.ends_with(b"videoaudio"));
+    }
+
+    #[test]
+    fn media_fragment_rejects_payload_size_mismatch() {
+        let err = media_fragment(
+            1,
+            &[Fmp4FragmentTrack {
+                track_id: 1,
+                base_decode_time: 0,
+                samples: vec![Fmp4Sample {
+                    duration: 1,
+                    size: 4,
+                    flags: 0,
+                    composition_time_offset: 0,
+                }],
+                payload: b"too-long".to_vec(),
+            }],
+        )
+        .expect_err("reject inconsistent fragment");
+
+        assert!(err.to_string().contains("sample bytes"));
     }
 
     fn top_level_boxes(bytes: &[u8]) -> Vec<[u8; 4]> {
