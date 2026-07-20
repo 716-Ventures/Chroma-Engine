@@ -1,3 +1,5 @@
+use crate::packet::ChunkSample;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HevcDecoderConfig {
     pub general_profile_idc: u8,
@@ -100,6 +102,28 @@ pub fn hevc_sample_to_annex_b(
     Ok(out)
 }
 
+pub fn hevc_chunk_to_annex_b(
+    payload: &[u8],
+    samples: &[ChunkSample],
+    nalu_length_size: u8,
+) -> Result<Vec<u8>, HevcParseError> {
+    let mut out = Vec::with_capacity(payload.len());
+    for sample in samples {
+        let start = sample.payload_offset as usize;
+        let end = start
+            .checked_add(sample.byte_count as usize)
+            .ok_or(HevcParseError::TruncatedNalUnit)?;
+        if end > payload.len() {
+            return Err(HevcParseError::TruncatedNalUnit);
+        }
+        out.extend_from_slice(&hevc_sample_to_annex_b(
+            &payload[start..end],
+            nalu_length_size,
+        )?);
+    }
+    Ok(out)
+}
+
 fn read_u16(bytes: &[u8], offset: usize) -> Result<u16, HevcParseError> {
     let end = offset
         .checked_add(2)
@@ -116,6 +140,7 @@ fn read_u16(bytes: &[u8], offset: usize) -> Result<u16, HevcParseError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::packet::{TimeDelta, TimePoint};
 
     #[test]
     fn parses_hevc_decoder_config_arrays() {
@@ -136,5 +161,25 @@ mod tests {
         let sample = [0, 0, 0, 2, 0xaa, 0xbb, 0, 0, 0, 1, 0xcc];
         let out = hevc_sample_to_annex_b(&sample, 4).unwrap();
         assert_eq!(out, vec![0, 0, 0, 1, 0xaa, 0xbb, 0, 0, 0, 1, 0xcc]);
+    }
+
+    #[test]
+    fn converts_hevc_chunk_to_annex_b() {
+        let payload = [0, 0, 0, 2, 0xaa, 0xbb, 0, 0, 0, 1, 0xcc];
+        let samples = vec![sample(0, 0, 6), sample(1, 6, 5)];
+        let out = hevc_chunk_to_annex_b(&payload, &samples, 4).unwrap();
+        assert_eq!(out, vec![0, 0, 0, 1, 0xaa, 0xbb, 0, 0, 0, 1, 0xcc]);
+    }
+
+    fn sample(index: u32, payload_offset: u64, byte_count: u32) -> ChunkSample {
+        ChunkSample {
+            index,
+            payload_offset,
+            byte_count,
+            pts: TimePoint::millis(0),
+            dts: TimePoint::millis(0),
+            duration: TimeDelta::millis(1),
+            keyframe: index == 0,
+        }
     }
 }

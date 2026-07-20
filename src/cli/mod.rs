@@ -4,6 +4,7 @@ mod hls;
 
 use crate::codec::aac::{aac_chunk_to_adts, parse_audio_specific_config};
 use crate::codec::h264::{avc_chunk_to_annex_b, parse_avc_chunk_nalus};
+use crate::codec::hevc::hevc_chunk_to_annex_b;
 use crate::container::{
     matroska::{looks_like_ebml, parse_chunk_plan as parse_matroska_chunk_plan},
     mp4::{
@@ -102,6 +103,17 @@ enum Command {
     },
     /// Write an Annex-B H.264 payload for a native MP4/MOV chunk.
     H264AnnexB {
+        input: PathBuf,
+        output: PathBuf,
+        #[arg(long)]
+        track: Option<String>,
+        #[arg(long, default_value_t = 0)]
+        chunk_index: u32,
+        #[arg(long, default_value_t = 4_000)]
+        target_ms: u64,
+    },
+    /// Write an Annex-B HEVC payload for a native MP4/MOV chunk.
+    HevcAnnexB {
         input: PathBuf,
         output: PathBuf,
         #[arg(long)]
@@ -458,6 +470,41 @@ pub fn run() -> Result<()> {
                 })?
             );
         }
+        Command::HevcAnnexB {
+            input,
+            output,
+            track,
+            chunk_index,
+            target_ms,
+        } => {
+            let source = MappedMediaFile::open(&input)?;
+            let bytes = source.as_ref();
+            if !looks_like_mp4(bytes) {
+                bail!("hevc-annex-b currently supports MP4/MOV packet tables");
+            }
+            let config = parse_mp4_codec_config(bytes, track.as_deref())
+                .ok_or_else(|| anyhow::anyhow!("no matching MP4 codec config found"))?;
+            if config.codec != "hevc" {
+                bail!("selected track is {}, not hevc", config.codec);
+            }
+            let nalu_length_size = config
+                .nalu_length_size
+                .ok_or_else(|| anyhow::anyhow!("missing HEVC NAL length size"))?;
+            let (manifest, payload) =
+                extract_mp4_chunk(bytes, Some(&config.track_id), target_ms, chunk_index)?;
+            let annex_b = hevc_chunk_to_annex_b(&payload, &manifest.samples, nalu_length_size)?;
+            let byte_count = annex_b.len() as u64;
+            std::fs::write(output, annex_b)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&HevcAnnexBOutput {
+                    track_id: config.track_id,
+                    chunk_index,
+                    nalu_length_size,
+                    byte_count,
+                })?
+            );
+        }
         Command::AacAdts {
             input,
             output,
@@ -579,6 +626,15 @@ struct H264NalusOutput {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct H264AnnexBOutput {
+    track_id: String,
+    chunk_index: u32,
+    nalu_length_size: u8,
+    byte_count: u64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HevcAnnexBOutput {
     track_id: String,
     chunk_index: u32,
     nalu_length_size: u8,

@@ -6,7 +6,7 @@
 - [x] Move CLI implementation behind the library entrypoint so the binary is only a launcher.
 - [x] Narrow public API to an explicit crate-root facade; keep parser/muxer implementation modules crate-private.
 - [x] Define native `MediaProbe` JSON with typed tracks, source facts, and capability hints.
-- [x] Define command surface: `probe`, `plan`, `manifest`, `chunks`, `codec-config`, `h264-nalus`, `h264-annex-b`, `aac-adts`, `extract-chunk`, `extract-window`, `hls`, `hls-plan`, `hls-segment`, `hls-segments`, `remux-mp4`, `encoder-probe`, `warmup`.
+- [x] Define command surface: `probe`, `plan`, `manifest`, `chunks`, `codec-config`, `h264-nalus`, `h264-annex-b`, `hevc-annex-b`, `aac-adts`, `extract-chunk`, `extract-window`, `hls`, `hls-plan`, `hls-segment`, `hls-segments`, `remux-mp4`, `encoder-probe`, `warmup`.
 - [x] Define native playback `plan` command with target-specific pipeline stages.
 - [x] Add real-library smoke script for mounted media under `/Volumes/Movies`, `/Volumes/TV Shows`, or `/Volumes/TVShows`.
 - [x] Add sanitized real-library probe fixtures from `/Volumes/Movies` and `/Volumes/TVShows`.
@@ -80,7 +80,7 @@
 - [x] Wrap native MP4/MOV AAC chunks as ADTS without decode.
 - [ ] Emit stream chunks through reusable packet/decode/encode stages.
 - [x] H.264/AAC native stream-copy chunks.
-- [ ] HEVC native stream-copy chunks.
+- [x] HEVC native stream-copy chunks.
 - [ ] AC-3/E-AC-3/MP3/FLAC/ALAC native copy paths.
 - [x] Keyframe-aligned chunk planning.
 - [x] Keyframe-aligned MP4/MOV chunk emission.
