@@ -3,11 +3,31 @@
 ## Contract
 
 - [x] Create Rust repo and library/CLI skeleton.
+- [x] Move CLI implementation behind the library entrypoint so the binary is only a launcher.
+- [x] Narrow public API to an explicit crate-root facade; keep parser/muxer implementation modules crate-private.
 - [x] Define native `MediaProbe` JSON with typed tracks, source facts, and capability hints.
 - [x] Define command surface: `probe`, `plan`, `manifest`, `chunks`, `codec-config`, `h264-nalus`, `h264-annex-b`, `aac-adts`, `extract-chunk`, `extract-window`, `hls`, `hls-plan`, `hls-segment`, `hls-segments`, `remux-mp4`, `encoder-probe`, `warmup`.
 - [x] Define native playback `plan` command with target-specific pipeline stages.
-- [ ] Add real-library probe fixtures from `/Volumes/Movies` and `/Volumes/TVShows`.
+- [x] Add real-library smoke script for mounted media under `/Volumes/Movies`, `/Volumes/TV Shows`, or `/Volumes/TVShows`.
+- [ ] Add sanitized real-library probe fixtures from `/Volumes/Movies` and `/Volumes/TVShows`.
 - [ ] Add Chroma-native snapshot tests for representative MP4/MKV/HDR/audio/subtitle combinations.
+
+## Engineering Quality
+
+- [x] Migrate crate to Rust 2024 edition.
+- [x] Pin Rust toolchain and formatting policy.
+- [x] Enforce `cargo fmt --check`.
+- [x] Enforce `cargo clippy --all-targets --all-features -- -D warnings`.
+- [x] Enforce `cargo test --all-features`.
+- [x] Enforce `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features`.
+- [x] Centralize memory-map `unsafe` usage behind an audited source wrapper.
+- [x] Add release profile policy for optimized binaries.
+- [x] Add Criterion benchmark harness for initial hot paths.
+- [ ] Add dependency audit policy once `cargo-deny` is installed or CI can install it reproducibly.
+- [ ] Add missing-docs policy for the public facade.
+- [ ] Split oversized implementation modules: HLS, MP4, Matroska, CLI.
+- [ ] Replace broad `anyhow` use in library-facing APIs with typed engine errors.
+- [ ] Add fuzz/property tests for EBML, MP4 atoms, packet range math, and timestamp repair.
 
 ## Probe
 
@@ -17,7 +37,9 @@
 - [ ] Matroska/WebM EBML parser: Chapters.
 - [x] Extract video fields: codec, dimensions.
 - [ ] Extract video fields: frame rate, bitrate, pixel format, HDR/DV hints.
-- [ ] Extract audio fields: codec, channels, language/title, default/forced disposition.
+- [x] Extract Matroska audio fields: codec, channels, language/title, default/forced disposition.
+- [x] Extract MP4 audio fields: codec, channels, sample rate.
+- [ ] Extract MP4 audio language/title/default/forced disposition.
 - [ ] Extract audio fields: bitrate, Atmos/JOC hints.
 - [x] Extract subtitles: text vs bitmap classification, language/title, default/forced disposition.
 - [ ] Extract chapters.
@@ -41,6 +63,7 @@
 
 - [x] Define initial Chroma-native MP4/MOV playback manifest with selected tracks, decoder config, and chunk windows.
 - [x] Emit all indexed audio tracks in Chroma-native playback manifests when audio is included.
+- [x] Include audio metadata in Chroma-native playback manifests: language, title, channels, sample rate, default, forced.
 - [x] Add initial Chroma-native playback plan: selected tracks, shared demux, copy/decode/encode, mux, transport adapters.
 - [x] Default playback planning selects primary video/audio and excludes target-unusable bitmap subtitles for browser/Apple targets.
 - [x] Remove legacy transport assumptions from the public core command/module surface.
@@ -79,6 +102,7 @@
 - [x] Collapse pathological sub-second segment windows.
 - [x] Signal AC-3/E-AC-3 in PMT descriptors for more reliable player detection.
 - [x] Add native TS inspection tests for PMT signaling, PCR placement, and continuity counters without external FFmpeg tools.
+- [x] Add benchmark coverage for probe, playback planning, packet-window planning, and subtitle segmentation.
 - [ ] Add native fMP4 inspection tests that validate fragment timing without external FFmpeg tools.
 - [ ] Add multi-audio HLS outputs without duplicating video work.
 - [ ] Add subtitle sidecar/rendition generation from native text subtitle parsing.

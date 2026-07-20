@@ -14,6 +14,9 @@ Chroma Engine is not a command-compatible FFmpeg replacement. It is a media engi
 - **HLS is an adapter over native packet plans.** The engine plans keyframe windows once, then emits playlists, individual segments, or contiguous read-ahead batches from that plan. It should not rebuild container indexes for every future segment.
 - **Multi-output work should share stages.** Multiple audio/subtitle outputs should not duplicate video demux/decode/encode work.
 - **Compatibility is outside the core.** If a deployment later needs a legacy transport, that layer must adapt from the native session model. It should not dictate the engine core or public CLI.
+- **The crate root is the supported API.** Parser, muxer, codec, and source modules are implementation details. Server/client integrations should import re-exported root symbols so internals can be split or replaced without changing host code.
+- **Performance work must be measurable.** Hot paths should get a benchmark before or with major rewrites. The current baseline lives in the `engine_hot_paths` Criterion bench and covers probe, planning, packet windows, and subtitle segmentation.
+- **Real media smoke tests are separate from fixtures.** Scripts may inspect mounted local media, but committed tests use generated or sanitized fixtures so the repo stays small and deterministic.
 
 Near-term implementation order:
 
@@ -23,6 +26,21 @@ Near-term implementation order:
 4. Build ISO-BMFF/fMP4 writers as reusable muxers.
 5. Add platform encode/decode backends only where stream copy cannot satisfy the requested session.
 6. Add any legacy transport adapters only after the native Chroma transport is stable.
+
+## Engineering Baseline
+
+Chroma Engine targets Rust 2024 and pins the local toolchain. The required gates are:
+
+```sh
+cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-features
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
+cargo bench --bench engine_hot_paths
+scripts/smoke-real-media.sh
+```
+
+Release binaries use the repository release profile: thin LTO, one codegen unit, stripped symbols, and abort-on-panic. Profiling builds inherit release settings but keep debug symbols.
 
 ## Web Player Test Milestone
 
