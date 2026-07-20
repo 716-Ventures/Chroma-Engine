@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     codec::{
         aac::{adts_header, parse_audio_specific_config, AacAudioSpecificConfig},
-        ac3::parse_ac3_specific_box,
+        ac3::{parse_ac3_specific_box, parse_eac3_specific_box},
         h264::{avc_sample_to_annex_b, parse_avc_decoder_config, AvcParameterSets},
         hevc::{hevc_sample_to_annex_b, parse_hevc_decoder_config, HevcDecoderConfig},
     },
@@ -517,7 +517,7 @@ pub fn write_hls_fmp4_vod(
     ensure_fmp4_mp4_input(input)?;
     let plan = HlsVodPlan::open(input, options)?;
     if !supports_fmp4_audio(&plan.tracks.audio.payload) {
-        bail!("fMP4 HLS currently requires AAC or AC-3 audio");
+        bail!("fMP4 HLS currently requires AAC, AC-3, or E-AC-3 audio");
     }
 
     create_dir_all(output_dir)?;
@@ -554,7 +554,7 @@ pub fn write_hls_fmp4_init(input: &Path, output: &Path, options: HlsOptions) -> 
     ensure_fmp4_mp4_input(input)?;
     let plan = HlsVodPlan::open(input, options)?;
     if !supports_fmp4_audio(&plan.tracks.audio.payload) {
-        bail!("fMP4 HLS currently requires AAC or AC-3 audio");
+        bail!("fMP4 HLS currently requires AAC, AC-3, or E-AC-3 audio");
     }
     if let Some(parent) = output.parent() {
         create_dir_all(parent)?;
@@ -572,7 +572,7 @@ pub fn write_hls_fmp4_segment(
     ensure_fmp4_mp4_input(input)?;
     let plan = HlsVodPlan::open(input, options)?;
     if !supports_fmp4_audio(&plan.tracks.audio.payload) {
-        bail!("fMP4 HLS currently requires AAC or AC-3 audio");
+        bail!("fMP4 HLS currently requires AAC, AC-3, or E-AC-3 audio");
     }
     plan.write_fmp4_segment(index, output)
 }
@@ -590,7 +590,7 @@ pub fn write_hls_fmp4_segments(
     ensure_fmp4_mp4_input(input)?;
     let plan = HlsVodPlan::open(input, options)?;
     if !supports_fmp4_audio(&plan.tracks.audio.payload) {
-        bail!("fMP4 HLS currently requires AAC or AC-3 audio");
+        bail!("fMP4 HLS currently requires AAC, AC-3, or E-AC-3 audio");
     }
     plan.write_fmp4_segments(start_index, count, output_dir)
 }
@@ -895,6 +895,17 @@ fn hls_tracks_from_mp4(
             let frame = packet_bytes(bytes, first_packet)?;
             Some(Fmp4SampleEntry::Ac3 {
                 dac3: parse_ac3_specific_box(frame)?.dac3_payload(),
+                channel_count: clamped_u16(audio_meta.channels.unwrap_or(2)),
+                sample_rate: audio_meta.sample_rate.unwrap_or(48_000),
+            })
+        }
+        "eac3" => {
+            let first_packet = audio_packets
+                .first()
+                .ok_or_else(|| anyhow!("missing MP4 E-AC-3 packet for dec3"))?;
+            let access_unit = packet_bytes(bytes, first_packet)?;
+            Some(Fmp4SampleEntry::Eac3 {
+                dec3: parse_eac3_specific_box(access_unit)?.dec3_payload(),
                 channel_count: clamped_u16(audio_meta.channels.unwrap_or(2)),
                 sample_rate: audio_meta.sample_rate.unwrap_or(48_000),
             })
@@ -1838,7 +1849,10 @@ fn audio_stream_id(payload: &PayloadKind) -> u8 {
 }
 
 fn supports_fmp4_audio(payload: &PayloadKind) -> bool {
-    matches!(payload, PayloadKind::Aac { .. } | PayloadKind::Ac3)
+    matches!(
+        payload,
+        PayloadKind::Aac { .. } | PayloadKind::Ac3 | PayloadKind::Eac3
+    )
 }
 
 fn pes_packet(stream_id: u8, pts90: u64, dts90: u64, payload: &[u8]) -> Vec<u8> {

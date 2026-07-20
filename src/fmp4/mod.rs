@@ -43,6 +43,11 @@ pub enum Fmp4SampleEntry {
         channel_count: u16,
         sample_rate: u32,
     },
+    Eac3 {
+        dec3: Vec<u8>,
+        channel_count: u16,
+        sample_rate: u32,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -249,7 +254,9 @@ fn write_tkhd(out: &mut Vec<u8>, track: &Fmp4Track) {
                 be_u32(out, u32::from(*width) << 16);
                 be_u32(out, u32::from(*height) << 16);
             }
-            Fmp4SampleEntry::Aac { .. } | Fmp4SampleEntry::Ac3 { .. } => {
+            Fmp4SampleEntry::Aac { .. }
+            | Fmp4SampleEntry::Ac3 { .. }
+            | Fmp4SampleEntry::Eac3 { .. } => {
                 be_u32(out, 0);
                 be_u32(out, 0);
             }
@@ -347,6 +354,13 @@ fn write_stsd(out: &mut Vec<u8>, track: &Fmp4Track) {
                 sample_rate,
             } => write_audio_sample_entry(out, *b"ac-3", *channel_count, *sample_rate, |out| {
                 write_box(out, *b"dac3", |out| out.extend_from_slice(dac3));
+            }),
+            Fmp4SampleEntry::Eac3 {
+                dec3,
+                channel_count,
+                sample_rate,
+            } => write_audio_sample_entry(out, *b"ec-3", *channel_count, *sample_rate, |out| {
+                write_box(out, *b"dec3", |out| out.extend_from_slice(dec3));
             }),
         }
     });
@@ -639,6 +653,28 @@ mod tests {
         assert!(init.windows(4).any(|w| w == b"ac-3"));
         assert!(init.windows(4).any(|w| w == b"dac3"));
         assert!(init.windows(3).any(|w| w == [0x50, 0x51, 0]));
+    }
+
+    #[test]
+    fn init_segment_writes_eac3_sample_description() {
+        let init = init_segment(&[Fmp4Track {
+            id: 2,
+            kind: Fmp4TrackKind::Audio,
+            timescale: 48_000,
+            default_sample_duration: 1_536,
+            default_sample_size: 0,
+            default_sample_flags: 0x0200_0000,
+            sample_entry: Fmp4SampleEntry::Eac3 {
+                dec3: vec![0x00, 0x10, 0x20, 0x0f, 0x00],
+                channel_count: 6,
+                sample_rate: 48_000,
+            },
+        }])
+        .expect("init segment");
+
+        assert!(init.windows(4).any(|w| w == b"ec-3"));
+        assert!(init.windows(4).any(|w| w == b"dec3"));
+        assert!(init.windows(5).any(|w| w == [0x00, 0x10, 0x20, 0x0f, 0x00]));
     }
 
     #[test]
