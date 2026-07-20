@@ -87,7 +87,7 @@
 - [x] Input-side seek anchoring and copy-path coarse seek behavior.
 - [x] WebVTT parsing/rendering foundation.
 - [x] Single-process WebVTT sidecar generation for all selected text subtitles.
-- [ ] Multi-audio output without duplicating video encode.
+- [x] Multi-audio output without duplicating video encode.
 
 ## Native HLS
 

@@ -56,8 +56,9 @@ pub use remux::{
     copyable_metadata, remux_mp4, stream_copy_packet_spans, write_faststart_mp4,
 };
 pub use session::{
-    AudioSelection, PipelineStage, PlaybackConstraints, PlaybackPlan, PlaybackTarget, StageKind,
-    StageMode, TransportKind, TransportPlan, plan_playback,
+    AudioOutputPlan, AudioSelection, MultiAudioOutputPlan, PipelineStage, PlaybackConstraints,
+    PlaybackPlan, PlaybackTarget, StageKind, StageMode, TransportKind, TransportPlan,
+    plan_multi_audio_outputs, plan_playback,
 };
 pub use transcode::{
     AudioCodec, AudioOp, OperationPlan, PlanMode, SubtitleOp, VideoCodec, VideoOp,

@@ -24,6 +24,32 @@ pub struct PlaybackPlan {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+/// Multi-audio output fanout derived from a playback plan.
+pub struct MultiAudioOutputPlan {
+    /// Selected video track when the plan includes video.
+    pub video_track_id: Option<String>,
+    /// Shared stage that emits the selected video representation.
+    pub shared_video_stage_id: Option<String>,
+    /// One output per selected audio track.
+    pub audio_outputs: Vec<AudioOutputPlan>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+/// One selected audio output in a multi-audio fanout plan.
+pub struct AudioOutputPlan {
+    /// Selected audio track id.
+    pub audio_track_id: String,
+    /// Stage that emits this audio representation.
+    pub audio_stage_id: String,
+    /// Shared video stage used by this output.
+    pub shared_video_stage_id: Option<String>,
+    /// Whether serving this audio output requires another video encode.
+    pub duplicates_video_encode: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 /// Constraints provided by a playback client or server policy.
 pub struct PlaybackConstraints {
     /// Playback target type.
@@ -238,6 +264,48 @@ pub fn plan_playback(probe: &MediaProbe, constraints: PlaybackConstraints) -> Pl
     }
 }
 
+/// Plans multi-audio output fanout without duplicating selected video work.
+pub fn plan_multi_audio_outputs(plan: &PlaybackPlan, probe: &MediaProbe) -> MultiAudioOutputPlan {
+    let video_track_id = plan
+        .selected_tracks
+        .iter()
+        .find(|id| {
+            probe
+                .tracks
+                .iter()
+                .any(|track| track.id == **id && track.kind == TrackKind::Video)
+        })
+        .cloned();
+    let shared_video_stage_id = video_track_id
+        .as_deref()
+        .and_then(|track_id| output_stage_for_track(&plan.stages, track_id));
+    let audio_outputs = plan
+        .selected_tracks
+        .iter()
+        .filter(|id| {
+            probe
+                .tracks
+                .iter()
+                .any(|track| track.id == **id && track.kind == TrackKind::Audio)
+        })
+        .filter_map(|audio_track_id| {
+            let audio_stage_id = output_stage_for_track(&plan.stages, audio_track_id)?;
+            Some(AudioOutputPlan {
+                audio_track_id: audio_track_id.clone(),
+                audio_stage_id,
+                shared_video_stage_id: shared_video_stage_id.clone(),
+                duplicates_video_encode: false,
+            })
+        })
+        .collect();
+
+    MultiAudioOutputPlan {
+        video_track_id,
+        shared_video_stage_id,
+        audio_outputs,
+    }
+}
+
 fn select_tracks<'a>(
     probe: &'a MediaProbe,
     constraints: &PlaybackConstraints,
@@ -304,6 +372,19 @@ fn target_can_use_track(track: &MediaTrack, target: PlaybackTarget) -> bool {
             .is_none_or(|subtitle| subtitle.format != SubtitleFormat::Bitmap),
         _ => true,
     }
+}
+
+fn output_stage_for_track(stages: &[PipelineStage], track_id: &str) -> Option<String> {
+    stages
+        .iter()
+        .rev()
+        .find(|stage| {
+            matches!(
+                stage.kind,
+                StageKind::PacketFilter | StageKind::Encode | StageKind::SubtitleTransform
+            ) && stage.track_ids.iter().any(|id| id == track_id)
+        })
+        .map(|stage| stage.id.clone())
 }
 
 fn transports_for_plan(has_decode: bool) -> Vec<TransportPlan> {
@@ -509,6 +590,71 @@ mod tests {
         assert_eq!(
             plan.selected_tracks,
             vec!["v0".to_string(), "a0".to_string(), "a1".to_string()]
+        );
+    }
+
+    #[test]
+    fn multi_audio_outputs_share_one_video_stage() {
+        let probe = probe_with_tracks(vec![
+            track("v0", TrackKind::Video, CodecFamily::H264),
+            track("a0", TrackKind::Audio, CodecFamily::Aac),
+            track("a1", TrackKind::Audio, CodecFamily::Mp3),
+        ]);
+        let plan = plan_playback(
+            &probe,
+            PlaybackConstraints {
+                audio_selection: AudioSelection::All,
+                ..PlaybackConstraints::default()
+            },
+        );
+
+        let fanout = plan_multi_audio_outputs(&plan, &probe);
+
+        assert_eq!(fanout.video_track_id.as_deref(), Some("v0"));
+        assert_eq!(
+            fanout.shared_video_stage_id.as_deref(),
+            Some("packet-copy0")
+        );
+        assert_eq!(fanout.audio_outputs.len(), 2);
+        assert!(
+            fanout
+                .audio_outputs
+                .iter()
+                .all(
+                    |output| output.shared_video_stage_id.as_deref() == Some("packet-copy0")
+                        && !output.duplicates_video_encode
+                )
+        );
+    }
+
+    #[test]
+    fn multi_audio_outputs_do_not_duplicate_encoded_video_stage() {
+        let probe = probe_with_tracks(vec![
+            track("v0", TrackKind::Video, CodecFamily::Hevc),
+            track("a0", TrackKind::Audio, CodecFamily::Aac),
+            track("a1", TrackKind::Audio, CodecFamily::Mp3),
+        ]);
+        let plan = plan_playback(
+            &probe,
+            PlaybackConstraints {
+                target: PlaybackTarget::Browser,
+                audio_selection: AudioSelection::All,
+                ..PlaybackConstraints::default()
+            },
+        );
+
+        let fanout = plan_multi_audio_outputs(&plan, &probe);
+
+        assert_eq!(fanout.shared_video_stage_id.as_deref(), Some("encode0"));
+        assert_eq!(fanout.audio_outputs.len(), 2);
+        assert!(
+            fanout
+                .audio_outputs
+                .iter()
+                .all(
+                    |output| output.shared_video_stage_id.as_deref() == Some("encode0")
+                        && !output.duplicates_video_encode
+                )
         );
     }
 
