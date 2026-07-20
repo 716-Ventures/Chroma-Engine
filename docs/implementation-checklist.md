@@ -4,7 +4,7 @@
 
 - [x] Create Rust repo and library/CLI skeleton.
 - [x] Define native `MediaProbe` JSON with typed tracks, source facts, and capability hints.
-- [x] Define command surface: `probe`, `plan`, `manifest`, `chunks`, `codec-config`, `h264-nalus`, `h264-annex-b`, `aac-adts`, `extract-chunk`, `remux-mp4`, `encoder-probe`, `warmup`.
+- [x] Define command surface: `probe`, `plan`, `manifest`, `chunks`, `codec-config`, `h264-nalus`, `h264-annex-b`, `aac-adts`, `extract-chunk`, `extract-window`, `hls`, `hls-plan`, `hls-segment`, `hls-segments`, `remux-mp4`, `encoder-probe`, `warmup`.
 - [x] Define native playback `plan` command with target-specific pipeline stages.
 - [ ] Add real-library probe fixtures from `/Volumes/Movies` and `/Volumes/TVShows`.
 - [ ] Add Chroma-native snapshot tests for representative MP4/MKV/HDR/audio/subtitle combinations.
@@ -62,6 +62,22 @@
 - [x] WebVTT parsing/rendering foundation.
 - [ ] Single-process WebVTT sidecar generation for all selected text subtitles.
 - [ ] Multi-audio output without duplicating video encode.
+
+## Native HLS
+
+- [x] Build keyframe-aligned HLS VOD plans from MP4/MOV packet tables.
+- [x] Build keyframe-aligned HLS VOD plans from Matroska/WebM Cues with bounded fallback.
+- [x] Write MPEG-TS HLS segments for H.264/AAC without decode.
+- [x] Write MPEG-TS HLS segments for HEVC with AC-3/E-AC-3 without decode.
+- [x] Emit HLS master and media playlists from the native segment plan.
+- [x] Support demand-driven single segment emission.
+- [x] Support contiguous batch segment emission for read-ahead.
+- [x] Sanitize per-stream output timestamps to keep DTS monotonic.
+- [x] Collapse pathological sub-second segment windows.
+- [x] Signal AC-3/E-AC-3 in PMT descriptors for more reliable player detection.
+- [ ] Add native TS/fMP4 inspection tests that validate segment packet timing without external FFmpeg tools.
+- [ ] Add multi-audio HLS outputs without duplicating video work.
+- [ ] Add subtitle sidecar/rendition generation from native text subtitle parsing.
 
 ## Transcode
 

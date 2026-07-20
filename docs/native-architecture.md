@@ -11,6 +11,7 @@ Chroma Engine is not a command-compatible FFmpeg replacement. It is a media engi
 - **Copy paths stay separate from decode paths.** Remuxing and segmenting copy-compatible streams should avoid decoders, frame allocation, and encoder scheduling entirely.
 - **Chunks are packet windows.** The engine plans native chunk ranges from compressed packet indexes first; delivery protocols can adapt after that.
 - **Extraction is byte-range native.** Copy-compatible chunk emission should copy planned packet byte ranges directly from mapped source data before any decode, encode, or mux work is considered.
+- **HLS is an adapter over native packet plans.** The engine plans keyframe windows once, then emits playlists, individual segments, or contiguous read-ahead batches from that plan. It should not rebuild container indexes for every future segment.
 - **Multi-output work should share stages.** Multiple audio/subtitle outputs should not duplicate video demux/decode/encode work.
 - **Compatibility is outside the core.** If a deployment later needs a legacy transport, that layer must adapt from the native session model. It should not dictate the engine core or public CLI.
 
