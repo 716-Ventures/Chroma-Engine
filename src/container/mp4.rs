@@ -29,10 +29,20 @@ pub struct Mp4Track {
     pub language: Option<String>,
     pub frame_rate: Option<f64>,
     pub bitrate_bps: Option<u64>,
+    pub dynamic_range: Mp4DynamicRange,
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub channels: Option<u32>,
     pub sample_rate: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mp4DynamicRange {
+    Sdr,
+    Hdr10,
+    Hlg,
+    DolbyVision,
+    Unknown,
 }
 
 #[cfg(test)]
@@ -350,6 +360,7 @@ fn parse_trak(payload: &[u8], index: u32) -> Option<Mp4Track> {
         language: mdia.language,
         frame_rate: mdia.frame_rate,
         bitrate_bps: mdia.bitrate_bps,
+        dynamic_range: stsd.dynamic_range,
         width,
         height,
         channels: stsd.channels,
@@ -374,6 +385,7 @@ struct SampleEntryInfo {
     height: Option<u32>,
     channels: Option<u32>,
     sample_rate: Option<u32>,
+    dynamic_range: Mp4DynamicRange,
 }
 
 fn parse_mdia(payload: &[u8]) -> Option<MdiaInfo> {
@@ -1136,6 +1148,7 @@ fn parse_sample_entry(codec_fourcc: [u8; 4], payload: &[u8]) -> SampleEntryInfo 
         height: None,
         channels: None,
         sample_rate: None,
+        dynamic_range: Mp4DynamicRange::Unknown,
     };
 
     if is_video_sample_entry(&codec_fourcc) {
@@ -1143,12 +1156,53 @@ fn parse_sample_entry(codec_fourcc: [u8; 4], payload: &[u8]) -> SampleEntryInfo 
             out.width = read_u16(&payload[24..26]).map(u32::from);
             out.height = read_u16(&payload[26..28]).map(u32::from);
         }
+        out.dynamic_range = parse_video_sample_entry_dynamic_range(codec_fourcc, payload);
     } else if is_audio_sample_entry(&codec_fourcc) && payload.len() >= 28 {
         out.channels = read_u16(&payload[16..18]).map(u32::from);
         out.sample_rate = read_u32(&payload[24..28]).map(|v| v >> 16);
     }
 
     out
+}
+
+fn parse_video_sample_entry_dynamic_range(
+    codec_fourcc: [u8; 4],
+    payload: &[u8],
+) -> Mp4DynamicRange {
+    let mut range = if matches!(&codec_fourcc, b"dvh1" | b"dvhe") {
+        Mp4DynamicRange::DolbyVision
+    } else {
+        Mp4DynamicRange::Unknown
+    };
+    let Some(child_boxes) = sample_entry_child_boxes(Mp4TrackKind::Video, codec_fourcc, payload)
+    else {
+        return range;
+    };
+    for atom in AtomIter::new(child_boxes) {
+        match atom.kind {
+            kind if kind == *b"dvcC" || kind == *b"dvvC" => return Mp4DynamicRange::DolbyVision,
+            kind if kind == *b"colr" && range == Mp4DynamicRange::Unknown => {
+                range = dynamic_range_from_colr(atom.payload);
+            }
+            _ => {}
+        }
+    }
+    range
+}
+
+fn dynamic_range_from_colr(payload: &[u8]) -> Mp4DynamicRange {
+    if payload.len() < 10 {
+        return Mp4DynamicRange::Unknown;
+    }
+    let color_type = &payload[0..4];
+    if color_type != b"nclx" && color_type != b"nclc" {
+        return Mp4DynamicRange::Unknown;
+    }
+    match read_u16(&payload[6..8]) {
+        Some(16) => Mp4DynamicRange::Hdr10,
+        Some(18) => Mp4DynamicRange::Hlg,
+        _ => Mp4DynamicRange::Sdr,
+    }
 }
 
 fn parse_hdlr(payload: &[u8]) -> Option<String> {
@@ -1447,6 +1501,38 @@ mod tests {
         assert_eq!(meta.tracks.len(), 1);
         assert_eq!(meta.tracks[0].frame_rate, Some(1.0));
         assert_eq!(meta.tracks[0].bitrate_bps, Some(80));
+    }
+
+    #[test]
+    fn detects_mp4_hdr_transfer_from_colr() {
+        let mut data = ftyp();
+        let sample_entry_payload =
+            video_sample_entry_payload(Some((1920, 1080)), &colr_nclx(9, 16, 9, false));
+        data.extend_from_slice(&atom(
+            b"moov",
+            &trak_with_sample_entry_payload(b"vide", b"hvc1", sample_entry_payload, 1000, 1000),
+        ));
+
+        let meta = parse_basic_metadata(&data);
+        assert_eq!(meta.tracks.len(), 1);
+        assert_eq!(meta.tracks[0].dynamic_range, Mp4DynamicRange::Hdr10);
+    }
+
+    #[test]
+    fn detects_mp4_dolby_vision_before_transfer_classification() {
+        let mut data = ftyp();
+        let sample_entry_payload = video_sample_entry_payload(
+            Some((1920, 1080)),
+            &[colr_nclx(9, 18, 9, false), atom(b"dvcC", &[1, 0, 0, 0])].concat(),
+        );
+        data.extend_from_slice(&atom(
+            b"moov",
+            &trak_with_sample_entry_payload(b"vide", b"hvc1", sample_entry_payload, 1000, 1000),
+        ));
+
+        let meta = parse_basic_metadata(&data);
+        assert_eq!(meta.tracks.len(), 1);
+        assert_eq!(meta.tracks[0].dynamic_range, Mp4DynamicRange::DolbyVision);
     }
 
     #[test]
@@ -1900,6 +1986,16 @@ mod tests {
             payload.extend_from_slice(&offset.to_be_bytes());
         }
         atom(b"stco", &payload)
+    }
+
+    fn colr_nclx(primaries: u16, transfer: u16, matrix: u16, full_range: bool) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(b"nclx");
+        payload.extend_from_slice(&primaries.to_be_bytes());
+        payload.extend_from_slice(&transfer.to_be_bytes());
+        payload.extend_from_slice(&matrix.to_be_bytes());
+        payload.push(if full_range { 0x80 } else { 0 });
+        atom(b"colr", &payload)
     }
 
     fn sample_entry_atom(

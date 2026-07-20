@@ -406,6 +406,7 @@ fn tracks_from_mp4(meta: &mp4::Mp4BasicMetadata) -> Vec<MediaTrack> {
                     height: track.height,
                     frame_rate: track.frame_rate,
                     bitrate_bps: track.bitrate_bps,
+                    dynamic_range: dynamic_range_from_mp4(track.dynamic_range),
                     channels: track.channels,
                     sample_rate: track.sample_rate,
                 },
@@ -452,6 +453,7 @@ fn tracks_from_matroska(meta: &matroska::MatroskaBasicMetadata) -> Vec<MediaTrac
                     height: track.height,
                     frame_rate: frame_rate_from_default_duration(track.default_duration_ns),
                     bitrate_bps: None,
+                    dynamic_range: DynamicRange::Unknown,
                     channels: track.channels,
                     sample_rate: track.sample_rate,
                 },
@@ -479,6 +481,7 @@ struct TrackShape {
     height: Option<u32>,
     frame_rate: Option<f64>,
     bitrate_bps: Option<u64>,
+    dynamic_range: DynamicRange,
     channels: Option<u32>,
     sample_rate: Option<u32>,
 }
@@ -517,7 +520,7 @@ fn media_track(input: TrackInput) -> MediaTrack {
             frame_rate: input.shape.frame_rate,
             bitrate_bps: input.shape.bitrate_bps,
             pixel_format: None,
-            dynamic_range: DynamicRange::Unknown,
+            dynamic_range: input.shape.dynamic_range,
         }),
         audio: (input.kind == TrackKind::Audio).then_some(AudioDescriptor {
             channels: input.shape.channels,
@@ -532,6 +535,16 @@ fn media_track(input: TrackInput) -> MediaTrack {
         subtitle: (input.kind == TrackKind::Subtitle).then_some(SubtitleDescriptor {
             format: subtitle_format_for_codec(&input.codec),
         }),
+    }
+}
+
+fn dynamic_range_from_mp4(range: mp4::Mp4DynamicRange) -> DynamicRange {
+    match range {
+        mp4::Mp4DynamicRange::Sdr => DynamicRange::Sdr,
+        mp4::Mp4DynamicRange::Hdr10 => DynamicRange::Hdr10,
+        mp4::Mp4DynamicRange::Hlg => DynamicRange::Hlg,
+        mp4::Mp4DynamicRange::DolbyVision => DynamicRange::DolbyVision,
+        mp4::Mp4DynamicRange::Unknown => DynamicRange::Unknown,
     }
 }
 
