@@ -24,7 +24,8 @@ pub(crate) mod source;
 pub(crate) mod transcode;
 
 pub use codec::subtitles::{
-    TextSubtitleCue, WebVttSegment, parse_subrip, render_webvtt, segment_webvtt,
+    MovTextSample, TextSubtitleCue, WebVttSegment, cues_to_mov_text_samples,
+    encode_mov_text_sample, parse_subrip, render_webvtt, segment_webvtt,
 };
 pub use container::{ContainerKind, sniff_container};
 pub use error::EngineErrorCode;

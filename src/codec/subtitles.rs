@@ -9,6 +9,17 @@ pub struct TextSubtitleCue {
     pub text: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+/// One MP4 timed-text (`mov_text`) sample derived from a normalized cue.
+pub struct MovTextSample {
+    /// Inclusive cue start timestamp in milliseconds.
+    pub start_ms: u64,
+    /// Exclusive cue end timestamp in milliseconds.
+    pub end_ms: u64,
+    /// MP4 timed-text sample payload: 16-bit text length followed by UTF-8 text bytes.
+    pub payload: Vec<u8>,
+}
+
 /// Parses SubRip text into normalized subtitle cues.
 pub fn parse_subrip(input: &str) -> Vec<TextSubtitleCue> {
     let normalized = input.replace("\r\n", "\n").replace('\r', "\n");
@@ -16,6 +27,31 @@ pub fn parse_subrip(input: &str) -> Vec<TextSubtitleCue> {
         .split("\n\n")
         .filter_map(parse_subrip_block)
         .collect()
+}
+
+/// Converts normalized text cues into MP4 timed-text (`mov_text`) samples.
+pub fn cues_to_mov_text_samples(cues: &[TextSubtitleCue]) -> Vec<MovTextSample> {
+    cues.iter()
+        .filter_map(|cue| {
+            encode_mov_text_sample(&cue.text).map(|payload| MovTextSample {
+                start_ms: cue.start_ms,
+                end_ms: cue.end_ms,
+                payload,
+            })
+        })
+        .collect()
+}
+
+/// Encodes one plain-text subtitle body as an MP4 timed-text sample.
+pub fn encode_mov_text_sample(text: &str) -> Option<Vec<u8>> {
+    let sanitized = sanitize_subtitle_text(text);
+    if sanitized.is_empty() || sanitized.len() > usize::from(u16::MAX) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(2 + sanitized.len());
+    out.extend_from_slice(&(sanitized.len() as u16).to_be_bytes());
+    out.extend_from_slice(sanitized.as_bytes());
+    Some(out)
 }
 
 /// Renders normalized subtitle cues as a complete WebVTT document.
@@ -139,6 +175,27 @@ fn parse_millis(raw: &str) -> Option<u64> {
     padded.parse::<u64>().ok()
 }
 
+fn sanitize_subtitle_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut brace_depth = 0_u32;
+    let mut in_tag = false;
+    for ch in text.chars() {
+        match ch {
+            '{' if !in_tag => brace_depth = brace_depth.saturating_add(1),
+            '}' if brace_depth > 0 && !in_tag => brace_depth -= 1,
+            '<' if brace_depth == 0 => in_tag = true,
+            '>' if in_tag => in_tag = false,
+            _ if brace_depth == 0 && !in_tag => out.push(ch),
+            _ => {}
+        }
+    }
+    out.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn format_timestamp(ms: u64) -> String {
     let total_seconds = ms / 1000;
     let millis = ms % 1000;
@@ -173,6 +230,34 @@ mod tests {
         }]);
         assert!(out.starts_with("WEBVTT"));
         assert!(out.contains("00:00:01.500 --> 00:00:03.000"));
+    }
+
+    #[test]
+    fn encodes_mov_text_sample_with_length_prefix() {
+        let sample = encode_mov_text_sample("{\\an8}<i>Hello</i>\nworld").unwrap();
+        assert_eq!(&sample[..2], &(11_u16).to_be_bytes());
+        assert_eq!(&sample[2..], b"Hello\nworld");
+    }
+
+    #[test]
+    fn converts_cues_to_mov_text_samples() {
+        let samples = cues_to_mov_text_samples(&[
+            TextSubtitleCue {
+                start_ms: 100,
+                end_ms: 900,
+                text: "First".to_string(),
+            },
+            TextSubtitleCue {
+                start_ms: 1_000,
+                end_ms: 1_100,
+                text: "   ".to_string(),
+            },
+        ]);
+
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].start_ms, 100);
+        assert_eq!(samples[0].end_ms, 900);
+        assert_eq!(&samples[0].payload[2..], b"First");
     }
 
     #[test]
