@@ -2820,6 +2820,7 @@ mod tests {
                 height: None,
                 channels: None,
                 sample_rate: None,
+                atmos: false,
             },
             mp4::Mp4Track {
                 index: 1,
@@ -2834,6 +2835,7 @@ mod tests {
                 height: None,
                 channels: Some(2),
                 sample_rate: Some(48_000),
+                atmos: false,
             },
             mp4::Mp4Track {
                 index: 2,
@@ -2848,6 +2850,7 @@ mod tests {
                 height: None,
                 channels: Some(6),
                 sample_rate: Some(48_000),
+                atmos: false,
             },
         ];
 

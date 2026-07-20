@@ -409,6 +409,7 @@ fn tracks_from_mp4(meta: &mp4::Mp4BasicMetadata) -> Vec<MediaTrack> {
                     dynamic_range: dynamic_range_from_mp4(track.dynamic_range),
                     channels: track.channels,
                     sample_rate: track.sample_rate,
+                    atmos: track.atmos,
                 },
             })
         })
@@ -456,6 +457,7 @@ fn tracks_from_matroska(meta: &matroska::MatroskaBasicMetadata) -> Vec<MediaTrac
                     dynamic_range: DynamicRange::Unknown,
                     channels: track.channels,
                     sample_rate: track.sample_rate,
+                    atmos: false,
                 },
             })
         })
@@ -484,6 +486,7 @@ struct TrackShape {
     dynamic_range: DynamicRange,
     channels: Option<u32>,
     sample_rate: Option<u32>,
+    atmos: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -526,7 +529,7 @@ fn media_track(input: TrackInput) -> MediaTrack {
             channels: input.shape.channels,
             sample_rate: input.shape.sample_rate,
             bitrate_bps: input.shape.bitrate_bps,
-            atmos: family == CodecFamily::Eac3,
+            atmos: input.shape.atmos,
             lossless: matches!(
                 family,
                 CodecFamily::TrueHd | CodecFamily::Flac | CodecFamily::Alac

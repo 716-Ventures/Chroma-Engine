@@ -34,6 +34,7 @@ pub struct Mp4Track {
     pub height: Option<u32>,
     pub channels: Option<u32>,
     pub sample_rate: Option<u32>,
+    pub atmos: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -365,6 +366,7 @@ fn parse_trak(payload: &[u8], index: u32) -> Option<Mp4Track> {
         height,
         channels: stsd.channels,
         sample_rate: stsd.sample_rate,
+        atmos: stsd.atmos,
     })
 }
 
@@ -386,6 +388,7 @@ struct SampleEntryInfo {
     channels: Option<u32>,
     sample_rate: Option<u32>,
     dynamic_range: Mp4DynamicRange,
+    atmos: bool,
 }
 
 fn parse_mdia(payload: &[u8]) -> Option<MdiaInfo> {
@@ -1149,6 +1152,7 @@ fn parse_sample_entry(codec_fourcc: [u8; 4], payload: &[u8]) -> SampleEntryInfo 
         channels: None,
         sample_rate: None,
         dynamic_range: Mp4DynamicRange::Unknown,
+        atmos: false,
     };
 
     if is_video_sample_entry(&codec_fourcc) {
@@ -1160,9 +1164,73 @@ fn parse_sample_entry(codec_fourcc: [u8; 4], payload: &[u8]) -> SampleEntryInfo 
     } else if is_audio_sample_entry(&codec_fourcc) && payload.len() >= 28 {
         out.channels = read_u16(&payload[16..18]).map(u32::from);
         out.sample_rate = read_u32(&payload[24..28]).map(|v| v >> 16);
+        out.atmos = parse_audio_sample_entry_atmos(codec_fourcc, payload);
     }
 
     out
+}
+
+fn parse_audio_sample_entry_atmos(codec_fourcc: [u8; 4], payload: &[u8]) -> bool {
+    if codec_fourcc != *b"ec-3" {
+        return false;
+    }
+    let Some(child_boxes) = sample_entry_child_boxes(Mp4TrackKind::Audio, codec_fourcc, payload)
+    else {
+        return false;
+    };
+    AtomIter::new(child_boxes)
+        .any(|atom| atom.kind == *b"dec3" && dec3_has_eac3_extension_type_a(atom.payload))
+}
+
+fn dec3_has_eac3_extension_type_a(payload: &[u8]) -> bool {
+    let mut bits = BitReader::new(payload);
+    if bits.read(13).is_none() {
+        return false;
+    }
+    let Some(num_ind_sub) = bits.read(3) else {
+        return false;
+    };
+    for _ in 0..=num_ind_sub {
+        if bits.read(24).is_none() {
+            return false;
+        }
+        let Some(num_dep_sub) = bits.read(4) else {
+            return false;
+        };
+        let dependent_bits = if num_dep_sub == 0 { 1 } else { 9 };
+        if bits.read(dependent_bits).is_none() {
+            return false;
+        }
+    }
+    bits.read(7).is_some() && bits.read(1) == Some(1)
+}
+
+struct BitReader<'a> {
+    bytes: &'a [u8],
+    bit_offset: usize,
+}
+
+impl<'a> BitReader<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self {
+            bytes,
+            bit_offset: 0,
+        }
+    }
+
+    fn read(&mut self, bit_count: usize) -> Option<u32> {
+        if bit_count > 32 || self.bit_offset.saturating_add(bit_count) > self.bytes.len() * 8 {
+            return None;
+        }
+        let mut value = 0_u32;
+        for _ in 0..bit_count {
+            let byte = self.bytes[self.bit_offset / 8];
+            let bit = (byte >> (7 - (self.bit_offset % 8))) & 1;
+            value = (value << 1) | u32::from(bit);
+            self.bit_offset += 1;
+        }
+        Some(value)
+    }
 }
 
 fn parse_video_sample_entry_dynamic_range(
@@ -1533,6 +1601,21 @@ mod tests {
         let meta = parse_basic_metadata(&data);
         assert_eq!(meta.tracks.len(), 1);
         assert_eq!(meta.tracks[0].dynamic_range, Mp4DynamicRange::DolbyVision);
+    }
+
+    #[test]
+    fn detects_mp4_eac3_atmos_from_dec3_extension_type_a() {
+        let mut data = ftyp();
+        let sample_entry_payload =
+            audio_sample_entry_payload(6, 48_000, &atom(b"dec3", &dec3_with_extension_type_a()));
+        data.extend_from_slice(&atom(
+            b"moov",
+            &trak_with_sample_entry_payload(b"soun", b"ec-3", sample_entry_payload, 1000, 1000),
+        ));
+
+        let meta = parse_basic_metadata(&data);
+        assert_eq!(meta.tracks.len(), 1);
+        assert!(meta.tracks[0].atmos);
     }
 
     #[test]
@@ -1996,6 +2079,43 @@ mod tests {
         payload.extend_from_slice(&matrix.to_be_bytes());
         payload.push(if full_range { 0x80 } else { 0 });
         atom(b"colr", &payload)
+    }
+
+    fn dec3_with_extension_type_a() -> Vec<u8> {
+        let mut bits = TestBitWriter::default();
+        bits.write(0, 13);
+        bits.write(0, 3);
+        bits.write(0, 24);
+        bits.write(0, 4);
+        bits.write(0, 1);
+        bits.write(0, 7);
+        bits.write(1, 1);
+        bits.write(16, 8);
+        bits.finish()
+    }
+
+    #[derive(Default)]
+    struct TestBitWriter {
+        bytes: Vec<u8>,
+        bit_len: usize,
+    }
+
+    impl TestBitWriter {
+        fn write(&mut self, value: u32, bit_count: usize) {
+            for idx in (0..bit_count).rev() {
+                if self.bit_len.is_multiple_of(8) {
+                    self.bytes.push(0);
+                }
+                let bit = ((value >> idx) & 1) as u8;
+                let byte = self.bytes.last_mut().expect("byte exists after push");
+                *byte |= bit << (7 - (self.bit_len % 8));
+                self.bit_len += 1;
+            }
+        }
+
+        fn finish(self) -> Vec<u8> {
+            self.bytes
+        }
     }
 
     fn sample_entry_atom(
