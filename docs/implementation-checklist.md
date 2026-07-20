@@ -123,7 +123,7 @@
 
 ## Integration
 
-- [x] **Milestone: ready to update GenusServer and test in the web player.** Verified with `/Volumes/Movies/42.mp4`: Chroma Engine emits an fMP4 HLS playlist with `#EXT-X-MAP`, `init.mp4`, and `.m4s` media fragments without FFmpeg. Test artifact: `/tmp/chroma-engine-milestone-42-20260720`.
+- [x] **Milestone: ready to update GenusServer and test in the web player.** Verified with `/Volumes/TVShows/Big Fat Quiz/Season 2026/Big.Fat.Quiz.S2026E01.The.Big.Fat.Quiz.of.Telly.1080p.ALL4.WEB-DL.AAC2.0.H.264-RAWR.mp4`: Chroma Engine emits an fMP4 HLS playlist with `#EXT-X-MAP`, `init.mp4`, and `.m4s` media fragments without FFmpeg. Test artifact: `/tmp/chroma-engine-milestone-aac-20260720-111252`. `/Volumes/Movies/42.mp4` is now correctly rejected for native browser HLS because its `mp4a` object type is DTS (`mp4a.a9`), not AAC.
 - [x] Define minimum web-player test contract: Chroma-native manifest, selected tracks, codec config, chunk URLs, timestamp model, and error shape. See `docs/web-player-test-contract.md`.
 - [x] Emit browser-playable or WebCodecs-ready H.264/AAC output for one real MP4. Covered by `scripts/smoke-web-player-output.sh`.
 - [x] Add a GenusServer env-flagged route that serves the Chroma-native manifest and chunks. GenusServer now proxies `/v1/chroma/{sessionId}/...` and the stream sidecar serves Chroma Engine manifests, fMP4 HLS playlists, `init.mp4`, and `.m4s` fragments; smoke-covered by `npm run smoke:chroma-hls --workspace @chroma-server/admin-web -- /Volumes/Movies/42.mp4`.

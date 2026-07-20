@@ -367,7 +367,7 @@ fn parse_trak(payload: &[u8], index: u32) -> Option<Mp4Track> {
     let mdia = mdia?;
     let stsd = mdia.sample_entry?;
     let kind = handler_to_track_kind(mdia.handler.kind.as_deref());
-    let codec = sample_entry_codec(&stsd.codec_fourcc, kind);
+    let codec = stsd.codec.clone();
     let (width, height) = if stsd.width.is_some() || stsd.height.is_some() {
         (stsd.width, stsd.height)
     } else {
@@ -422,7 +422,7 @@ struct TkhdInfo {
 
 #[derive(Debug, Clone)]
 struct SampleEntryInfo {
-    codec_fourcc: [u8; 4],
+    codec: String,
     width: Option<u32>,
     height: Option<u32>,
     channels: Option<u32>,
@@ -520,8 +520,8 @@ fn parse_trak_codec_config(
     let stbl = find_atom(find_atom(mdia, b"minf")?, b"stbl")?;
     let entry = parse_stsd_entry(find_atom(stbl, b"stsd")?)?;
     let sample_entry = fourcc_to_string(&entry.codec_fourcc)?;
-    let codec = sample_entry_codec(&entry.codec_fourcc, kind);
     let config = codec_config_from_sample_entry(kind, &entry);
+    let codec = sample_entry_codec_from_config(&entry.codec_fourcc, kind, config.as_ref());
 
     Some(Mp4CodecConfig {
         track_id,
@@ -1053,11 +1053,18 @@ fn codec_config_from_sample_entry(
                 let asc = audio_specific_config_from_esds(atom.payload);
                 return Some(SampleEntryCodecConfig {
                     box_type: atom.kind,
-                    codec_string: asc
-                        .as_ref()
-                        .map(|config| format!("mp4a.40.{}", config.audio_object_type)),
+                    codec_string: asc.as_ref().and_then(mp4a_codec_string),
                     nalu_length_size: None,
-                    description: asc.map_or_else(|| atom.payload.to_vec(), |config| config.bytes),
+                    description: asc.map_or_else(
+                        || atom.payload.to_vec(),
+                        |config| {
+                            if config.object_type_indication == 0x40 && !config.bytes.is_empty() {
+                                config.bytes
+                            } else {
+                                atom.payload.to_vec()
+                            }
+                        },
+                    ),
                 });
             }
             kind if kind == *b"dfLa" => {
@@ -1159,21 +1166,38 @@ fn flac_stream_info_from_dfla(payload: &[u8]) -> Option<&[u8]> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AudioSpecificConfig {
-    audio_object_type: u8,
+    object_type_indication: u8,
+    audio_object_type: Option<u8>,
     bytes: Vec<u8>,
 }
 
 fn audio_specific_config_from_esds(payload: &[u8]) -> Option<AudioSpecificConfig> {
     let descriptors = payload.get(4..).unwrap_or(payload);
-    let config = find_descriptor_payload(descriptors, 0x05)?;
-    let first = *config.first()?;
-    let second = *config.get(1)?;
-    let audio_object_type = first >> 3;
-    let _frequency_index = ((first & 0x07) << 1) | (second >> 7);
+    let decoder_config = find_descriptor_payload(descriptors, 0x04)?;
+    let object_type_indication = *decoder_config.first()?;
+    let config = find_descriptor_payload(descriptors, 0x05).unwrap_or_default();
+    let audio_object_type = match (config.first(), config.get(1)) {
+        (Some(first), Some(second)) => {
+            let _frequency_index = ((*first & 0x07) << 1) | (*second >> 7);
+            Some(*first >> 3)
+        }
+        _ => None,
+    };
     Some(AudioSpecificConfig {
+        object_type_indication,
         audio_object_type,
         bytes: config.to_vec(),
     })
+}
+
+fn mp4a_codec_string(config: &AudioSpecificConfig) -> Option<String> {
+    if config.object_type_indication == 0x40 {
+        return config
+            .audio_object_type
+            .filter(|object_type| *object_type > 0)
+            .map(|object_type| format!("mp4a.40.{object_type}"));
+    }
+    Some(format!("mp4a.{:02x}", config.object_type_indication))
 }
 
 fn find_descriptor_payload(payload: &[u8], tag: u8) -> Option<&[u8]> {
@@ -1216,8 +1240,22 @@ fn read_descriptor_size(payload: &[u8]) -> Option<(usize, usize)> {
 }
 
 fn parse_sample_entry(codec_fourcc: [u8; 4], payload: &[u8]) -> SampleEntryInfo {
+    let kind = if is_video_sample_entry(&codec_fourcc) {
+        Mp4TrackKind::Video
+    } else if is_audio_sample_entry(&codec_fourcc) {
+        Mp4TrackKind::Audio
+    } else {
+        Mp4TrackKind::Unknown
+    };
+    let config = codec_config_from_sample_entry(
+        kind,
+        &SampleEntry {
+            codec_fourcc,
+            payload,
+        },
+    );
     let mut out = SampleEntryInfo {
-        codec_fourcc,
+        codec: sample_entry_codec_from_config(&codec_fourcc, kind, config.as_ref()),
         width: None,
         height: None,
         channels: None,
@@ -1587,6 +1625,27 @@ fn sample_entry_codec(fourcc: &[u8; 4], kind: Mp4TrackKind) -> String {
         b"tx3g" | b"text" => "mov_text".to_string(),
         b"wvtt" => "webvtt".to_string(),
         _ => fourcc_to_string(fourcc).unwrap_or_else(|| "unknown".to_string()),
+    }
+}
+
+fn sample_entry_codec_from_config(
+    fourcc: &[u8; 4],
+    kind: Mp4TrackKind,
+    config: Option<&SampleEntryCodecConfig>,
+) -> String {
+    match (
+        fourcc,
+        kind,
+        config.and_then(|config| config.codec_string.as_deref()),
+    ) {
+        (b"mp4a", Mp4TrackKind::Audio, Some(codec_string))
+            if codec_string.starts_with("mp4a.40.") =>
+        {
+            "aac".to_string()
+        }
+        (b"mp4a", Mp4TrackKind::Audio, Some("mp4a.a9" | "mp4a.ac")) => "dts".to_string(),
+        (b"mp4a", Mp4TrackKind::Audio, Some(codec_string)) => codec_string.to_string(),
+        _ => sample_entry_codec(fourcc, kind),
     }
 }
 
@@ -2111,6 +2170,39 @@ mod tests {
         assert_eq!(config.description_hex.as_deref(), Some("1210"));
     }
 
+    #[test]
+    fn does_not_label_non_aac_mp4a_as_aac() {
+        let mut data = ftyp();
+        let esds = atom(
+            b"esds",
+            &[
+                [0, 0, 0, 0].as_slice(),
+                &es_descriptor(&object_type_descriptor(
+                    0xa9,
+                    &decoder_specific_descriptor(&[0x02]),
+                )),
+            ]
+            .concat(),
+        );
+        data.extend_from_slice(&atom(
+            b"moov",
+            &trak_with_sample_entry_payload(
+                b"soun",
+                b"mp4a",
+                audio_sample_entry_payload(6, 48000, &esds),
+                3000,
+                1000,
+            ),
+        ));
+
+        let meta = parse_basic_metadata(&data);
+        assert_eq!(meta.tracks[0].codec, "dts");
+
+        let config = parse_codec_config(&data, Some("a0")).unwrap();
+        assert_eq!(config.codec, "dts");
+        assert_eq!(config.codec_string.as_deref(), Some("mp4a.a9"));
+    }
+
     fn ftyp() -> Vec<u8> {
         atom(
             b"ftyp",
@@ -2490,10 +2582,14 @@ mod tests {
     }
 
     fn decoder_config_descriptor(nested: &[u8]) -> Vec<u8> {
+        object_type_descriptor(0x40, nested)
+    }
+
+    fn object_type_descriptor(object_type: u8, nested: &[u8]) -> Vec<u8> {
         descriptor(
             0x04,
             &[
-                [0x40, 0x15].as_slice(),
+                [object_type, 0x15].as_slice(),
                 &[0, 0, 0],
                 &128_000_u32.to_be_bytes(),
                 &128_000_u32.to_be_bytes(),

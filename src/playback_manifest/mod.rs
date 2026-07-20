@@ -228,12 +228,20 @@ fn manifest_track(bytes: &[u8], track_id: &str, target_ms: u64) -> Option<Manife
     let plan = parse_chunk_plan(bytes, Some(track_id), target_ms)?;
     let metadata = parse_basic_metadata(bytes);
     let track_meta = mp4_track_by_semantic_id(&metadata.tracks, track_id);
+    let codec_string = config
+        .codec_string
+        .clone()
+        .or_else(|| {
+            codec_string_from_decoder_config(
+                config.codec.as_str(),
+                config.description_hex.as_deref(),
+            )
+        })
+        .or_else(|| fallback_codec_string(config.codec.as_str()));
     Some(ManifestTrack {
         id: config.track_id,
         kind: config.track_kind,
-        codec_string: config
-            .codec_string
-            .or_else(|| fallback_codec_string(config.codec.as_str())),
+        codec_string,
         codec: config.codec,
         language: track_meta.and_then(|track| track.language.clone()),
         title: track_meta.and_then(|track| track.title.clone()),
@@ -273,6 +281,39 @@ fn fallback_codec_string(codec: &str) -> Option<String> {
     match codec {
         "ac3" => Some("ac-3".to_string()),
         "eac3" => Some("ec-3".to_string()),
+        _ => None,
+    }
+}
+
+fn codec_string_from_decoder_config(codec: &str, config_hex: Option<&str>) -> Option<String> {
+    let config = hex_bytes(config_hex?)?;
+    match codec {
+        "aac" => parse_audio_specific_config(&config)
+            .ok()
+            .map(|config| format!("mp4a.40.{}", config.object_type)),
+        _ => None,
+    }
+}
+
+fn hex_bytes(hex: &str) -> Option<Vec<u8>> {
+    let clean = hex.trim();
+    if !clean.len().is_multiple_of(2) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(clean.len() / 2);
+    for chunk in clean.as_bytes().chunks_exact(2) {
+        let hi = hex_nibble(chunk[0])?;
+        let lo = hex_nibble(chunk[1])?;
+        out.push((hi << 4) | lo);
+    }
+    Some(out)
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
         _ => None,
     }
 }
@@ -425,6 +466,16 @@ mod tests {
             manifest.tracks[2].codec_string.as_deref(),
             Some("mp4a.40.2")
         );
+    }
+
+    #[test]
+    fn derives_aac_codec_string_from_decoder_config_hex() {
+        assert_eq!(
+            codec_string_from_decoder_config("aac", Some("1190")).as_deref(),
+            Some("mp4a.40.2")
+        );
+        assert_eq!(codec_string_from_decoder_config("aac", Some("bad")), None);
+        assert_eq!(codec_string_from_decoder_config("ac3", Some("1190")), None);
     }
 
     fn fixture_mp4() -> Vec<u8> {
