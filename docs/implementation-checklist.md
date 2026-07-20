@@ -86,7 +86,7 @@
 - [x] Keyframe-aligned MP4/MOV chunk emission.
 - [x] Input-side seek anchoring and copy-path coarse seek behavior.
 - [x] WebVTT parsing/rendering foundation.
-- [ ] Single-process WebVTT sidecar generation for all selected text subtitles.
+- [x] Single-process WebVTT sidecar generation for all selected text subtitles.
 - [ ] Multi-audio output without duplicating video encode.
 
 ## Native HLS

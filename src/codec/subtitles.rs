@@ -1,3 +1,8 @@
+use std::{
+    fs::{create_dir_all, write},
+    path::Path,
+};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// A normalized text subtitle cue using millisecond timing.
 pub struct TextSubtitleCue {
@@ -97,7 +102,7 @@ pub fn segment_webvtt(
                 index: idx as u32,
                 start_ms: start,
                 duration_ms: segment_ms.min(max_end.saturating_sub(start)),
-                uri: format!("{uri_prefix}/seg-{idx:05}.vtt"),
+                uri: segment_uri(uri_prefix, idx),
                 body: render_webvtt(&segment_cues),
             }
         })
@@ -117,6 +122,85 @@ pub struct WebVttSegment {
     pub uri: String,
     /// Complete WebVTT body for this segment.
     pub body: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+/// Input cues for one selected text subtitle track.
+pub struct WebVttSidecarInput {
+    /// Stable subtitle track identifier.
+    pub track_id: String,
+    /// Subtitle language when available.
+    pub language: Option<String>,
+    /// Human-readable subtitle track name when available.
+    pub name: Option<String>,
+    /// Normalized cues for this text subtitle track.
+    pub cues: Vec<TextSubtitleCue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+/// WebVTT sidecar output for all selected text subtitle tracks.
+pub struct WebVttSidecarSet {
+    /// One WebVTT rendition per selected text subtitle track.
+    pub tracks: Vec<WebVttSidecarTrack>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+/// WebVTT sidecar output for one text subtitle track.
+pub struct WebVttSidecarTrack {
+    /// Stable subtitle track identifier.
+    pub track_id: String,
+    /// Subtitle language when available.
+    pub language: Option<String>,
+    /// Human-readable subtitle track name when available.
+    pub name: Option<String>,
+    /// Relative URI for this track's WebVTT media playlist.
+    pub playlist_uri: String,
+    /// Generated WebVTT media segments.
+    pub segments: Vec<WebVttSegment>,
+    /// Complete WebVTT media playlist body.
+    pub playlist_body: String,
+}
+
+/// Builds WebVTT sidecar playlists and segments for all selected text subtitle tracks.
+pub fn build_webvtt_sidecars(tracks: &[WebVttSidecarInput], segment_ms: u64) -> WebVttSidecarSet {
+    let tracks = tracks
+        .iter()
+        .map(|track| {
+            let safe_id = safe_path_component(&track.track_id);
+            let segments = segment_webvtt(&track.cues, segment_ms, "");
+            let playlist_body = render_webvtt_media_playlist(&segments);
+            WebVttSidecarTrack {
+                track_id: track.track_id.clone(),
+                language: track.language.clone(),
+                name: track.name.clone(),
+                playlist_uri: format!("subs/{safe_id}/index.m3u8"),
+                segments,
+                playlist_body,
+            }
+        })
+        .collect();
+
+    WebVttSidecarSet { tracks }
+}
+
+/// Writes WebVTT sidecar playlists and segment files for all selected text subtitle tracks.
+pub fn write_webvtt_sidecars(
+    output_dir: &Path,
+    tracks: &[WebVttSidecarInput],
+    segment_ms: u64,
+) -> std::io::Result<WebVttSidecarSet> {
+    let sidecars = build_webvtt_sidecars(tracks, segment_ms);
+    for track in &sidecars.tracks {
+        let safe_id = safe_path_component(&track.track_id);
+        let track_dir = output_dir.join("subs").join(safe_id);
+        create_dir_all(&track_dir)?;
+        write(track_dir.join("index.m3u8"), &track.playlist_body)?;
+        for segment in &track.segments {
+            write(track_dir.join(&segment.uri), &segment.body)?;
+        }
+    }
+
+    Ok(sidecars)
 }
 
 fn parse_subrip_block(block: &str) -> Option<TextSubtitleCue> {
@@ -194,6 +278,53 @@ fn sanitize_subtitle_text(text: &str) -> String {
         .filter(|line| !line.is_empty())
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn render_webvtt_media_playlist(segments: &[WebVttSegment]) -> String {
+    let target_duration = segments
+        .iter()
+        .map(|segment| segment.duration_ms.div_ceil(1000))
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    let mut out = format!(
+        "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:{target_duration}\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n"
+    );
+    for segment in segments {
+        out.push_str(&format!(
+            "#EXTINF:{:.3},\n{}\n",
+            segment.duration_ms as f64 / 1000.0,
+            segment.uri
+        ));
+    }
+    out.push_str("#EXT-X-ENDLIST\n");
+    out
+}
+
+fn segment_uri(uri_prefix: &str, idx: u64) -> String {
+    if uri_prefix.is_empty() {
+        format!("seg-{idx:05}.vtt")
+    } else {
+        format!("{uri_prefix}/seg-{idx:05}.vtt")
+    }
+}
+
+fn safe_path_component(value: &str) -> String {
+    let safe = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if safe.is_empty() {
+        "subtitle".to_string()
+    } else {
+        safe
+    }
 }
 
 fn format_timestamp(ms: u64) -> String {
@@ -279,5 +410,75 @@ mod tests {
         assert_eq!(segments[0].uri, "s0/seg-00000.vtt");
         assert!(segments[0].body.contains("A"));
         assert!(segments[1].body.contains("B"));
+    }
+
+    #[test]
+    fn builds_webvtt_sidecars_for_all_selected_text_tracks() {
+        let sidecars = build_webvtt_sidecars(
+            &[
+                WebVttSidecarInput {
+                    track_id: "s0".to_string(),
+                    language: Some("eng".to_string()),
+                    name: Some("English".to_string()),
+                    cues: vec![TextSubtitleCue {
+                        start_ms: 0,
+                        end_ms: 1000,
+                        text: "Hello".to_string(),
+                    }],
+                },
+                WebVttSidecarInput {
+                    track_id: "commentary/fr".to_string(),
+                    language: Some("fra".to_string()),
+                    name: None,
+                    cues: vec![TextSubtitleCue {
+                        start_ms: 1500,
+                        end_ms: 2500,
+                        text: "Bonjour".to_string(),
+                    }],
+                },
+            ],
+            1000,
+        );
+
+        assert_eq!(sidecars.tracks.len(), 2);
+        assert_eq!(sidecars.tracks[0].playlist_uri, "subs/s0/index.m3u8");
+        assert_eq!(
+            sidecars.tracks[1].playlist_uri,
+            "subs/commentary_fr/index.m3u8"
+        );
+        assert!(sidecars.tracks[0].playlist_body.contains("#EXTM3U"));
+        assert_eq!(sidecars.tracks[0].segments[0].uri, "seg-00000.vtt");
+    }
+
+    #[test]
+    fn writes_webvtt_sidecars_in_one_call() {
+        let temp = tempfile::tempdir().unwrap();
+        let sidecars = write_webvtt_sidecars(
+            temp.path(),
+            &[WebVttSidecarInput {
+                track_id: "s0".to_string(),
+                language: Some("eng".to_string()),
+                name: Some("English".to_string()),
+                cues: vec![TextSubtitleCue {
+                    start_ms: 0,
+                    end_ms: 1000,
+                    text: "Hello".to_string(),
+                }],
+            }],
+            1000,
+        )
+        .unwrap();
+
+        assert_eq!(sidecars.tracks.len(), 1);
+        let playlist = temp.path().join("subs").join("s0").join("index.m3u8");
+        let segment = temp.path().join("subs").join("s0").join("seg-00000.vtt");
+        assert!(playlist.exists());
+        assert!(segment.exists());
+        assert!(
+            std::fs::read_to_string(playlist)
+                .unwrap()
+                .contains("#EXT-X-ENDLIST")
+        );
+        assert!(std::fs::read_to_string(segment).unwrap().contains("Hello"));
     }
 }
