@@ -72,6 +72,7 @@
 - [x] Emit HLS master and media playlists from the native segment plan.
 - [x] Support demand-driven single segment emission.
 - [x] Support contiguous batch segment emission for read-ahead.
+- [x] Support explicit native HLS audio track selection by stable `aN` track ID.
 - [x] Sanitize per-stream output timestamps to keep DTS monotonic.
 - [x] Collapse pathological sub-second segment windows.
 - [x] Signal AC-3/E-AC-3 in PMT descriptors for more reliable player detection.

@@ -29,15 +29,17 @@ const PRIVATE_STREAM_ID: u8 = 0xbd;
 const TS_CLOCK: u64 = 90_000;
 const MIN_SEGMENT_MS: u64 = 1_000;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HlsOptions {
     pub segment_target_ms: u64,
+    pub audio_track_id: Option<String>,
 }
 
 impl Default for HlsOptions {
     fn default() -> Self {
         Self {
             segment_target_ms: 4_000,
+            audio_track_id: None,
         }
     }
 }
@@ -76,9 +78,9 @@ impl HlsVodPlan {
             unsafe { Mmap::map(&file) }.with_context(|| format!("map {}", input.display()))?;
         let bytes = source.as_ref();
         let tracks = if mp4::looks_like_mp4(bytes) {
-            hls_tracks_from_mp4(bytes)?
+            hls_tracks_from_mp4(bytes, options.audio_track_id.as_deref())?
         } else if matroska::looks_like_ebml(bytes) {
-            hls_tracks_from_matroska(bytes)?
+            hls_tracks_from_matroska(bytes, options.audio_track_id.as_deref())?
         } else {
             bail!("native HLS currently supports MP4/MOV and Matroska/WebM sources");
         };
@@ -287,33 +289,144 @@ pub fn write_hls_vod(input: &Path, output_dir: &Path, options: HlsOptions) -> Re
     })
 }
 
-fn hls_tracks_from_mp4(bytes: &[u8]) -> Result<HlsTrackSet> {
+fn select_mp4_hls_track<'a>(
+    tracks: &'a [mp4::Mp4Track],
+    kind: Mp4TrackKind,
+    requested_track_id: Option<&str>,
+) -> Option<(String, &'a mp4::Mp4Track)> {
+    let mut video_index = 0_u32;
+    let mut audio_index = 0_u32;
+    let mut subtitle_index = 0_u32;
+    let mut unknown_index = 0_u32;
+    for track in tracks {
+        let track_id = match track.kind {
+            Mp4TrackKind::Video => next_semantic_track_id("v", &mut video_index),
+            Mp4TrackKind::Audio => next_semantic_track_id("a", &mut audio_index),
+            Mp4TrackKind::Subtitle => next_semantic_track_id("s", &mut subtitle_index),
+            Mp4TrackKind::Unknown => next_semantic_track_id("x", &mut unknown_index),
+        };
+        if track.kind != kind || !is_supported_hls_codec(kind, &track.codec) {
+            continue;
+        }
+        if requested_track_id
+            .map(|requested| requested == track_id)
+            .unwrap_or(true)
+        {
+            return Some((track_id, track));
+        }
+    }
+    None
+}
+
+fn select_matroska_hls_track<'a>(
+    tracks: &'a [matroska::MatroskaTrack],
+    kind: MatroskaTrackKind,
+    requested_track_id: Option<&str>,
+) -> Option<(String, &'a matroska::MatroskaTrack)> {
+    let mut video_index = 0_u32;
+    let mut audio_index = 0_u32;
+    let mut subtitle_index = 0_u32;
+    let mut unknown_index = 0_u32;
+    let mut first_supported = None;
+    for track in tracks {
+        let track_id = match track.kind {
+            MatroskaTrackKind::Video => next_semantic_track_id("v", &mut video_index),
+            MatroskaTrackKind::Audio => next_semantic_track_id("a", &mut audio_index),
+            MatroskaTrackKind::Subtitle => next_semantic_track_id("s", &mut subtitle_index),
+            MatroskaTrackKind::Unknown => next_semantic_track_id("x", &mut unknown_index),
+        };
+        if track.kind != kind || !is_supported_hls_codec(kind, &track.codec) {
+            continue;
+        }
+        if requested_track_id
+            .map(|requested| requested == track_id)
+            .unwrap_or(false)
+        {
+            return Some((track_id, track));
+        }
+        if requested_track_id.is_none() && track.default {
+            return Some((track_id, track));
+        }
+        if requested_track_id.is_none() && first_supported.is_none() {
+            first_supported = Some((track_id, track));
+        }
+    }
+    first_supported
+}
+
+fn next_semantic_track_id(prefix: &str, counter: &mut u32) -> String {
+    let id = format!("{prefix}{counter}");
+    *counter = counter.saturating_add(1);
+    id
+}
+
+fn is_supported_hls_codec<K>(kind: K, codec: &str) -> bool
+where
+    K: Into<HlsTrackKind>,
+{
+    match (kind.into(), codec) {
+        (HlsTrackKind::Video, "h264" | "hevc") => true,
+        (HlsTrackKind::Audio, "aac" | "ac3" | "eac3") => true,
+        _ => false,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HlsTrackKind {
+    Video,
+    Audio,
+    Other,
+}
+
+impl From<Mp4TrackKind> for HlsTrackKind {
+    fn from(kind: Mp4TrackKind) -> Self {
+        match kind {
+            Mp4TrackKind::Video => Self::Video,
+            Mp4TrackKind::Audio => Self::Audio,
+            Mp4TrackKind::Subtitle | Mp4TrackKind::Unknown => Self::Other,
+        }
+    }
+}
+
+impl From<MatroskaTrackKind> for HlsTrackKind {
+    fn from(kind: MatroskaTrackKind) -> Self {
+        match kind {
+            MatroskaTrackKind::Video => Self::Video,
+            MatroskaTrackKind::Audio => Self::Audio,
+            MatroskaTrackKind::Subtitle | MatroskaTrackKind::Unknown => Self::Other,
+        }
+    }
+}
+
+fn hls_tracks_from_mp4(
+    bytes: &[u8],
+    requested_audio_track_id: Option<&str>,
+) -> Result<HlsTrackSet> {
     let meta = mp4::parse_basic_metadata(bytes);
-    let video_meta = meta
-        .tracks
-        .iter()
-        .find(|track| {
-            track.kind == Mp4TrackKind::Video && matches!(track.codec.as_str(), "h264" | "hevc")
-        })
-        .ok_or_else(|| anyhow!("native HLS MP4 path currently requires H.264 or HEVC video"))?;
-    let audio_meta = meta
-        .tracks
-        .iter()
-        .find(|track| {
-            track.kind == Mp4TrackKind::Audio
-                && matches!(track.codec.as_str(), "aac" | "ac3" | "eac3")
-        })
-        .ok_or_else(|| {
-            anyhow!("native HLS MP4 path currently requires AAC, AC-3, or E-AC-3 audio")
-        })?;
-    let video_config = mp4::parse_codec_config(bytes, Some("v0"))
+    let (video_track_id, video_meta) =
+        select_mp4_hls_track(&meta.tracks, Mp4TrackKind::Video, None)
+            .ok_or_else(|| anyhow!("native HLS MP4 path currently requires H.264 or HEVC video"))?;
+    let (audio_track_id, audio_meta) =
+        select_mp4_hls_track(&meta.tracks, Mp4TrackKind::Audio, requested_audio_track_id)
+            .ok_or_else(|| {
+                requested_audio_track_id
+                    .map(|track_id| {
+                        anyhow!(
+                            "native HLS MP4 path could not use requested audio track {track_id}"
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        anyhow!("native HLS MP4 path currently requires AAC, AC-3, or E-AC-3 audio")
+                    })
+            })?;
+    let video_config = mp4::parse_codec_config(bytes, Some(&video_track_id))
         .ok_or_else(|| anyhow!("missing MP4 video decoder config"))?;
-    let audio_config = mp4::parse_codec_config(bytes, Some("a0"))
+    let audio_config = mp4::parse_codec_config(bytes, Some(&audio_track_id))
         .ok_or_else(|| anyhow!("missing MP4 audio decoder config"))?;
-    let video_packets = mp4::parse_packet_track(bytes, Some("v0"))
+    let video_packets = mp4::parse_packet_track(bytes, Some(&video_track_id))
         .ok_or_else(|| anyhow!("missing MP4 video packet index"))?
         .packets;
-    let audio_packets = mp4::parse_packet_track(bytes, Some("a0"))
+    let audio_packets = mp4::parse_packet_track(bytes, Some(&audio_track_id))
         .ok_or_else(|| anyhow!("missing MP4 audio packet index"))?
         .packets;
 
@@ -382,28 +495,33 @@ fn hls_tracks_from_mp4(bytes: &[u8]) -> Result<HlsTrackSet> {
     })
 }
 
-fn hls_tracks_from_matroska(bytes: &[u8]) -> Result<HlsTrackSet> {
+fn hls_tracks_from_matroska(
+    bytes: &[u8],
+    requested_audio_track_id: Option<&str>,
+) -> Result<HlsTrackSet> {
     let meta = matroska::parse_basic_metadata(bytes);
-    let video = meta
-        .tracks
-        .iter()
-        .filter(|track| track.kind == MatroskaTrackKind::Video)
-        .find(|track| matches!(track.codec.as_str(), "h264" | "hevc"))
-        .ok_or_else(|| {
-            anyhow!("native HLS Matroska path currently requires H.264 or HEVC video")
-        })?;
-    let audio = meta
-        .tracks
-        .iter()
-        .filter(|track| track.kind == MatroskaTrackKind::Audio)
-        .find(|track| matches!(track.codec.as_str(), "aac" | "ac3" | "eac3"))
-        .ok_or_else(|| {
-            anyhow!("native HLS Matroska path currently requires AAC, AC-3, or E-AC-3 audio")
-        })?;
-    let video_packets = matroska::parse_packet_track(bytes, Some("v0"))
+    let (video_track_id, video) =
+        select_matroska_hls_track(&meta.tracks, MatroskaTrackKind::Video, None).ok_or_else(
+            || anyhow!("native HLS Matroska path currently requires H.264 or HEVC video"),
+        )?;
+    let (audio_track_id, audio) = select_matroska_hls_track(
+        &meta.tracks,
+        MatroskaTrackKind::Audio,
+        requested_audio_track_id,
+    )
+    .ok_or_else(|| {
+        requested_audio_track_id
+            .map(|track_id| {
+                anyhow!("native HLS Matroska path could not use requested audio track {track_id}")
+            })
+            .unwrap_or_else(|| {
+                anyhow!("native HLS Matroska path currently requires AAC, AC-3, or E-AC-3 audio")
+            })
+    })?;
+    let video_packets = matroska::parse_packet_track(bytes, Some(&video_track_id))
         .ok_or_else(|| anyhow!("missing Matroska video packet index"))?
         .packets;
-    let audio_packets = matroska::parse_packet_track(bytes, Some("a0"))
+    let audio_packets = matroska::parse_packet_track(bytes, Some(&audio_track_id))
         .ok_or_else(|| anyhow!("missing Matroska audio packet index"))?
         .packets;
     let video_payload = match video.codec.as_str() {
@@ -1232,6 +1350,101 @@ mod tests {
             .write_segments(1, 1, out.path())
             .expect_err("out-of-range start should fail");
         assert!(err.to_string().contains("out of range"));
+    }
+
+    #[test]
+    fn mp4_hls_audio_selection_uses_stable_audio_track_ids() {
+        let tracks = vec![
+            mp4::Mp4Track {
+                index: 0,
+                kind: Mp4TrackKind::Video,
+                codec: "h264".to_string(),
+                duration_ms: None,
+                width: None,
+                height: None,
+                channels: None,
+                sample_rate: None,
+            },
+            mp4::Mp4Track {
+                index: 1,
+                kind: Mp4TrackKind::Audio,
+                codec: "aac".to_string(),
+                duration_ms: None,
+                width: None,
+                height: None,
+                channels: Some(2),
+                sample_rate: Some(48_000),
+            },
+            mp4::Mp4Track {
+                index: 2,
+                kind: Mp4TrackKind::Audio,
+                codec: "eac3".to_string(),
+                duration_ms: None,
+                width: None,
+                height: None,
+                channels: Some(6),
+                sample_rate: Some(48_000),
+            },
+        ];
+
+        let default_audio =
+            select_mp4_hls_track(&tracks, Mp4TrackKind::Audio, None).expect("default audio");
+        assert_eq!(default_audio.0, "a0");
+
+        let requested_audio = select_mp4_hls_track(&tracks, Mp4TrackKind::Audio, Some("a1"))
+            .expect("requested audio");
+        assert_eq!(requested_audio.0, "a1");
+        assert_eq!(requested_audio.1.codec, "eac3");
+
+        assert!(select_mp4_hls_track(&tracks, Mp4TrackKind::Audio, Some("a9")).is_none());
+    }
+
+    #[test]
+    fn matroska_hls_audio_selection_prefers_default_track() {
+        let tracks = vec![
+            matroska::MatroskaTrack {
+                index: 0,
+                number: 1,
+                kind: MatroskaTrackKind::Audio,
+                codec: "aac".to_string(),
+                language: None,
+                name: None,
+                default: false,
+                forced: false,
+                width: None,
+                height: None,
+                channels: Some(2),
+                sample_rate: Some(48_000),
+                default_duration_ns: None,
+                codec_private: None,
+            },
+            matroska::MatroskaTrack {
+                index: 1,
+                number: 2,
+                kind: MatroskaTrackKind::Audio,
+                codec: "eac3".to_string(),
+                language: None,
+                name: None,
+                default: true,
+                forced: false,
+                width: None,
+                height: None,
+                channels: Some(6),
+                sample_rate: Some(48_000),
+                default_duration_ns: None,
+                codec_private: None,
+            },
+        ];
+
+        let default_audio = select_matroska_hls_track(&tracks, MatroskaTrackKind::Audio, None)
+            .expect("default audio");
+        assert_eq!(default_audio.0, "a1");
+        assert_eq!(default_audio.1.codec, "eac3");
+
+        let requested_audio =
+            select_matroska_hls_track(&tracks, MatroskaTrackKind::Audio, Some("a0"))
+                .expect("requested audio");
+        assert_eq!(requested_audio.0, "a0");
     }
 
     #[test]

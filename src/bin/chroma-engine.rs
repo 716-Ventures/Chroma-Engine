@@ -129,12 +129,16 @@ enum Command {
     Hls {
         input: PathBuf,
         output_dir: PathBuf,
+        #[arg(long)]
+        audio_track: Option<String>,
         #[arg(long, default_value_t = 4_000)]
         segment_ms: u64,
     },
     /// Emit native HLS VOD playlists and segment plan without writing segments.
     HlsPlan {
         input: PathBuf,
+        #[arg(long)]
+        audio_track: Option<String>,
         #[arg(long, default_value_t = 4_000)]
         segment_ms: u64,
     },
@@ -144,6 +148,8 @@ enum Command {
         output: PathBuf,
         #[arg(long)]
         index: usize,
+        #[arg(long)]
+        audio_track: Option<String>,
         #[arg(long, default_value_t = 4_000)]
         segment_ms: u64,
     },
@@ -155,6 +161,8 @@ enum Command {
         start: usize,
         #[arg(long)]
         count: usize,
+        #[arg(long)]
+        audio_track: Option<String>,
         #[arg(long, default_value_t = 4_000)]
         segment_ms: u64,
     },
@@ -452,6 +460,7 @@ fn main() -> Result<()> {
         Command::Hls {
             input,
             output_dir,
+            audio_track,
             segment_ms,
         } => {
             let output = write_hls_vod(
@@ -459,15 +468,21 @@ fn main() -> Result<()> {
                 &output_dir,
                 HlsOptions {
                     segment_target_ms: segment_ms,
+                    audio_track_id: audio_track,
                 },
             )?;
             println!("{}", serde_json::to_string_pretty(&output)?);
         }
-        Command::HlsPlan { input, segment_ms } => {
+        Command::HlsPlan {
+            input,
+            audio_track,
+            segment_ms,
+        } => {
             let plan = HlsVodPlan::open(
                 &input,
                 HlsOptions {
                     segment_target_ms: segment_ms,
+                    audio_track_id: audio_track,
                 },
             )?;
             let output = HlsPlanOutput {
@@ -485,12 +500,14 @@ fn main() -> Result<()> {
             input,
             output,
             index,
+            audio_track,
             segment_ms,
         } => {
             let plan = HlsVodPlan::open(
                 &input,
                 HlsOptions {
                     segment_target_ms: segment_ms,
+                    audio_track_id: audio_track,
                 },
             )?;
             let segment = plan.write_segment(index, &output)?;
@@ -501,12 +518,14 @@ fn main() -> Result<()> {
             output_dir,
             start,
             count,
+            audio_track,
             segment_ms,
         } => {
             let plan = HlsVodPlan::open(
                 &input,
                 HlsOptions {
                     segment_target_ms: segment_ms,
+                    audio_track_id: audio_track,
                 },
             )?;
             let segments = plan.write_segments(start, count, &output_dir)?;
