@@ -1,5 +1,5 @@
-use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -69,6 +69,14 @@ pub enum VideoOutputCodec {
     Hevc,
 }
 
+#[derive(Debug, Error)]
+/// Error returned while warming an encoder backend.
+#[error("encoder warmup failed: {reason}")]
+pub struct EncoderWarmupError {
+    /// Warmup failure reason.
+    pub reason: String,
+}
+
 /// Probes host encoder support and returns the preferred profile.
 pub fn encoder_probe() -> EncoderProbe {
     EncoderProbe {
@@ -84,7 +92,7 @@ pub fn encoder_probe() -> EncoderProbe {
 }
 
 /// Performs lightweight encoder startup work before serving playback.
-pub fn warmup() -> Result<()> {
+pub fn warmup() -> Result<(), EncoderWarmupError> {
     Ok(())
 }
 

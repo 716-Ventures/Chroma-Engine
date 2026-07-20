@@ -27,24 +27,24 @@ pub use codec::subtitles::{
 };
 pub use container::{ContainerKind, sniff_container};
 pub use hls::{
-    HlsOptions, HlsOutput, HlsSegmentInfo, HlsVodPlan, HlsVodPlaylistPlan, write_hls_fmp4_init,
-    write_hls_fmp4_segment, write_hls_fmp4_segments, write_hls_fmp4_vod, write_hls_segment,
-    write_hls_segments, write_hls_vod,
+    HlsError, HlsOptions, HlsOutput, HlsSegmentInfo, HlsVodPlan, HlsVodPlaylistPlan,
+    write_hls_fmp4_init, write_hls_fmp4_segment, write_hls_fmp4_segments, write_hls_fmp4_vod,
+    write_hls_segment, write_hls_segments, write_hls_vod,
 };
 pub use packet::{
     ChunkPlan, ChunkSample, ExtractedChunk, NativeChunk, PacketRange, PacketRef, TimeDelta,
     TimePoint, TimeScale, plan_fixed_chunks,
 };
 pub use platform::{
-    EncoderFailureNote, EncoderProbe, EncoderProfile, HardwareKind, VideoOutputCodec,
-    encoder_probe, warmup,
+    EncoderFailureNote, EncoderProbe, EncoderProfile, EncoderWarmupError, HardwareKind,
+    VideoOutputCodec, encoder_probe, warmup,
 };
 pub use playback_manifest::{
     ManifestTrack, MatroskaManifestOptions, Mp4ManifestOptions, NativePlaybackManifest,
     build_matroska_playback_manifest, build_mp4_playback_manifest,
 };
 pub use probe::{MediaProbe, ProbeError, probe_media_source};
-pub use remux::remux_mp4;
+pub use remux::{RemuxError, remux_mp4};
 pub use session::{
     AudioSelection, PipelineStage, PlaybackConstraints, PlaybackPlan, PlaybackTarget, StageKind,
     StageMode, TransportKind, TransportPlan, plan_playback,

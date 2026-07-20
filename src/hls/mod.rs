@@ -5,15 +5,18 @@ use std::{
 
 mod playlist;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use crate::{
     codec::{
-        aac::{AacAudioSpecificConfig, adts_header, parse_audio_specific_config},
+        aac::{AacAudioSpecificConfig, AacError, adts_header, parse_audio_specific_config},
         ac3::{parse_ac3_specific_box, parse_eac3_specific_box},
-        h264::{AvcParameterSets, avc_sample_to_annex_b, parse_avc_decoder_config},
-        hevc::{HevcDecoderConfig, hevc_sample_to_annex_b, parse_hevc_decoder_config},
+        h264::{AvcParameterSets, H264ParseError, avc_sample_to_annex_b, parse_avc_decoder_config},
+        hevc::{
+            HevcDecoderConfig, HevcParseError, hevc_sample_to_annex_b, parse_hevc_decoder_config,
+        },
     },
     container::{
         matroska::{self, MatroskaTrackKind},
@@ -32,6 +35,14 @@ use playlist::{
     segment_name,
 };
 
+type Result<T> = std::result::Result<T, HlsError>;
+
+macro_rules! bail {
+    ($($arg:tt)*) => {
+        return Err(HlsError::message(format!($($arg)*)))
+    };
+}
+
 const VIDEO_PID: u16 = 0x0100;
 const AUDIO_PID: u16 = 0x0101;
 const PMT_PID: u16 = 0x1000;
@@ -40,6 +51,35 @@ const AUDIO_STREAM_ID: u8 = 0xc0;
 const PRIVATE_STREAM_ID: u8 = 0xbd;
 const TS_CLOCK: u64 = 90_000;
 const MIN_SEGMENT_MS: u64 = 1_000;
+
+#[derive(Debug, Error)]
+/// Error returned by native HLS planning and writing.
+pub enum HlsError {
+    /// Filesystem I/O failed while reading or writing HLS output.
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    /// A lower-level parser or muxer rejected the source.
+    #[error(transparent)]
+    Internal(#[from] anyhow::Error),
+    /// AAC parsing or framing failed.
+    #[error(transparent)]
+    Aac(#[from] AacError),
+    /// H.264 parsing or conversion failed.
+    #[error(transparent)]
+    H264(#[from] H264ParseError),
+    /// HEVC parsing or conversion failed.
+    #[error(transparent)]
+    Hevc(#[from] HevcParseError),
+    /// The source or requested operation is unsupported by native HLS.
+    #[error("{0}")]
+    Unsupported(String),
+}
+
+impl HlsError {
+    fn message(message: String) -> Self {
+        Self::Unsupported(message)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Options for native HLS generation.
@@ -644,7 +684,7 @@ pub fn write_hls_fmp4_segments(
 }
 
 fn map_input(input: &Path) -> Result<MappedMediaFile> {
-    MappedMediaFile::open(input)
+    Ok(MappedMediaFile::open(input)?)
 }
 
 /// Writes one MPEG-TS media segment for a source.
@@ -1840,7 +1880,7 @@ fn mux_fmp4_segment(bytes: &[u8], tracks: &HlsTrackSet, window: SegmentWindow) -
 
     let video_payload = raw_packet_payload(bytes, &video_packets)?;
     let audio_payload = raw_packet_payload(bytes, &audio_packets)?;
-    media_fragment(
+    Ok(media_fragment(
         window.index as u32 + 1,
         &[
             Fmp4FragmentTrack {
@@ -1868,7 +1908,7 @@ fn mux_fmp4_segment(bytes: &[u8], tracks: &HlsTrackSet, window: SegmentWindow) -
                 payload: audio_payload,
             },
         ],
-    )
+    )?)
 }
 
 fn fmp4_init_segment_for_tracks(tracks: &HlsTrackSet) -> Result<Vec<u8>> {
@@ -1882,7 +1922,7 @@ fn fmp4_init_segment_for_tracks(tracks: &HlsTrackSet) -> Result<Vec<u8>> {
         .fmp4_sample_entry
         .clone()
         .ok_or_else(|| anyhow!("fMP4 HLS requires audio sample-entry metadata"))?;
-    init_segment(&[
+    Ok(init_segment(&[
         Fmp4Track {
             id: 1,
             kind: Fmp4TrackKind::Video,
@@ -1901,7 +1941,7 @@ fn fmp4_init_segment_for_tracks(tracks: &HlsTrackSet) -> Result<Vec<u8>> {
             default_sample_flags: 0x0200_0000,
             sample_entry: audio_entry,
         },
-    ])
+    ])?)
 }
 
 fn packets_in_window(packets: &[PacketRef], window: SegmentWindow) -> Vec<PacketRef> {
