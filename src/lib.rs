@@ -36,8 +36,9 @@ pub use hls::{
     write_hls_segment, write_hls_segments, write_hls_vod,
 };
 pub use packet::{
-    ChunkPlan, ChunkSample, ExtractedChunk, NativeChunk, PacketPayloadSpan, PacketRange, PacketRef,
-    TimeDelta, TimePoint, TimeScale, packet_payload_spans, plan_fixed_chunks,
+    ChunkPlan, ChunkSample, CopySeekPlan, ExtractedChunk, NativeChunk, PacketPayloadSpan,
+    PacketRange, PacketRef, SeekAnchor, TimeDelta, TimePoint, TimeScale, packet_payload_spans,
+    plan_copy_seek, plan_fixed_chunks, seek_anchor_for_packets,
 };
 pub use pipeline::{PipelineError, PipelineStageChunk, PipelineStagePayload, emit_stage_chunks};
 pub use platform::{

@@ -47,6 +47,36 @@ pub struct NativeChunk {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+/// Keyframe-aware input seek anchor for compressed packet-copy playback.
+pub struct SeekAnchor {
+    /// Requested playback timestamp in milliseconds.
+    pub target_ms: u64,
+    /// Timestamp where source reads must begin.
+    pub anchor_ms: u64,
+    /// Packet index where source reads must begin.
+    pub packet_index: u32,
+    /// Media time between the read anchor and requested target.
+    pub preroll_ms: u64,
+    /// Whether the anchor packet is a random access point.
+    pub key_aligned: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+/// Coarse packet-copy seek plan for one native source track.
+pub struct CopySeekPlan {
+    /// Track identifier covered by the seek plan.
+    pub track_id: String,
+    /// Requested playback timestamp in milliseconds.
+    pub target_ms: u64,
+    /// Keyframe-aware read anchor.
+    pub anchor: SeekAnchor,
+    /// Chunk of packets to copy after anchoring.
+    pub chunk: NativeChunk,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 /// Materialized packet payload and sample table for a chunk.
 pub struct ExtractedChunk {
     /// Track identifier for the extracted chunk.
@@ -258,6 +288,84 @@ pub fn plan_track_chunks(track_id: &str, packets: &[PacketRef], target_ms: u64) 
     ChunkPlan { track_ids, chunks }
 }
 
+/// Finds the packet-copy read anchor at or before a requested timestamp.
+pub fn seek_anchor_for_packets(packets: &[PacketRef], target_ms: u64) -> Option<SeekAnchor> {
+    if packets.is_empty() {
+        return None;
+    }
+
+    let mut fallback_idx = 0_usize;
+    let mut keyframe_idx = None;
+    for (idx, packet) in packets.iter().enumerate() {
+        if packet.pts.as_millis() > target_ms {
+            break;
+        }
+        fallback_idx = idx;
+        if packet.keyframe {
+            keyframe_idx = Some(idx);
+        }
+    }
+
+    let packet_index = keyframe_idx.unwrap_or(fallback_idx);
+    let packet = &packets[packet_index];
+    let anchor_ms = packet.pts.as_millis();
+    Some(SeekAnchor {
+        target_ms,
+        anchor_ms,
+        packet_index: packet_index as u32,
+        preroll_ms: target_ms.saturating_sub(anchor_ms),
+        key_aligned: packet.keyframe,
+    })
+}
+
+/// Builds a coarse packet-copy chunk that starts on the seek anchor.
+pub fn plan_copy_seek(
+    track_id: &str,
+    packets: &[PacketRef],
+    target_ms: u64,
+    window_ms: u64,
+) -> Option<CopySeekPlan> {
+    let anchor = seek_anchor_for_packets(packets, target_ms)?;
+    let start = anchor.packet_index as usize;
+    let target_end_ms = target_ms.saturating_add(window_ms.max(1));
+    let mut end = start.saturating_add(1).min(packets.len());
+
+    for (idx, packet) in packets.iter().enumerate().skip(start + 1) {
+        if packet.pts.as_millis() >= target_end_ms {
+            end = idx;
+            break;
+        }
+        end = idx.saturating_add(1);
+    }
+
+    let last_end_ms = packets[start..end]
+        .iter()
+        .map(|packet| {
+            packet
+                .pts
+                .as_millis()
+                .saturating_add(packet.duration.as_millis())
+        })
+        .max()
+        .unwrap_or(anchor.anchor_ms);
+
+    Some(CopySeekPlan {
+        track_id: track_id.to_string(),
+        target_ms,
+        anchor: anchor.clone(),
+        chunk: NativeChunk {
+            index: 0,
+            start: TimePoint::millis(anchor.anchor_ms),
+            duration: TimeDelta::millis(last_end_ms.saturating_sub(anchor.anchor_ms)),
+            packet_range: PacketRange {
+                start: anchor.packet_index,
+                end: end as u32,
+            },
+            key_aligned: anchor.key_aligned,
+        },
+    })
+}
+
 /// Copies packet payload bytes for a range into a contiguous buffer.
 pub fn extract_packet_payload(
     source: &[u8],
@@ -374,6 +482,64 @@ mod tests {
             plan.chunks[2].packet_range,
             PacketRange { start: 4, end: 5 }
         );
+    }
+
+    #[test]
+    fn seek_anchor_rolls_back_to_previous_keyframe() {
+        let packets = vec![
+            packet(0, true),
+            packet(1000, false),
+            packet(2000, false),
+            packet(3000, true),
+        ];
+
+        let anchor = seek_anchor_for_packets(&packets, 2_500).unwrap();
+
+        assert_eq!(
+            anchor,
+            SeekAnchor {
+                target_ms: 2_500,
+                anchor_ms: 0,
+                packet_index: 0,
+                preroll_ms: 2_500,
+                key_aligned: true,
+            }
+        );
+    }
+
+    #[test]
+    fn seek_anchor_uses_first_packet_when_no_prior_keyframe_exists() {
+        let packets = vec![packet(0, false), packet(1000, true)];
+
+        let anchor = seek_anchor_for_packets(&packets, 500).unwrap();
+
+        assert_eq!(anchor.packet_index, 0);
+        assert!(!anchor.key_aligned);
+    }
+
+    #[test]
+    fn copy_seek_plan_starts_at_anchor_and_extends_to_requested_window() {
+        let packets = vec![
+            packet(0, true),
+            packet(1000, false),
+            packet(2000, false),
+            packet(3000, true),
+            packet(4000, false),
+        ];
+
+        let plan = plan_copy_seek("v0", &packets, 2_500, 1_500).unwrap();
+
+        assert_eq!(plan.track_id, "v0");
+        assert_eq!(plan.anchor.packet_index, 0);
+        assert_eq!(plan.chunk.start, TimePoint::millis(0));
+        assert_eq!(plan.chunk.packet_range, PacketRange { start: 0, end: 4 });
+        assert!(plan.chunk.key_aligned);
+    }
+
+    #[test]
+    fn seek_anchor_rejects_empty_packet_indexes() {
+        assert_eq!(seek_anchor_for_packets(&[], 1_000), None);
+        assert_eq!(plan_copy_seek("v0", &[], 1_000, 4_000), None);
     }
 
     #[test]

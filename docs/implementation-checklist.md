@@ -84,7 +84,7 @@
 - [x] AC-3/E-AC-3/MP3/FLAC/ALAC native copy paths.
 - [x] Keyframe-aligned chunk planning.
 - [x] Keyframe-aligned MP4/MOV chunk emission.
-- [ ] Input-side seek anchoring and copy-path coarse seek behavior.
+- [x] Input-side seek anchoring and copy-path coarse seek behavior.
 - [x] WebVTT parsing/rendering foundation.
 - [ ] Single-process WebVTT sidecar generation for all selected text subtitles.
 - [ ] Multi-audio output without duplicating video encode.
