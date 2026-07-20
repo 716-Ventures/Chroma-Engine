@@ -3230,6 +3230,57 @@ mod tests {
     }
 
     #[test]
+    fn matroska_hls_audio_selection_skips_unsupported_default_track() {
+        let tracks = vec![
+            matroska::MatroskaTrack {
+                index: 0,
+                number: 1,
+                kind: MatroskaTrackKind::Audio,
+                codec: "dts".to_string(),
+                language: Some("eng".to_string()),
+                name: None,
+                default: true,
+                forced: false,
+                width: None,
+                height: None,
+                pixel_format: None,
+                channels: Some(6),
+                sample_rate: Some(48_000),
+                atmos: false,
+                object_audio_candidate: true,
+                default_duration_ns: None,
+                codec_private: None,
+            },
+            matroska::MatroskaTrack {
+                index: 1,
+                number: 2,
+                kind: MatroskaTrackKind::Audio,
+                codec: "ac3".to_string(),
+                language: Some("eng".to_string()),
+                name: None,
+                default: false,
+                forced: false,
+                width: None,
+                height: None,
+                pixel_format: None,
+                channels: Some(6),
+                sample_rate: Some(48_000),
+                atmos: false,
+                object_audio_candidate: false,
+                default_duration_ns: None,
+                codec_private: None,
+            },
+        ];
+
+        let default_audio = select_matroska_hls_track(&tracks, MatroskaTrackKind::Audio, None)
+            .expect("fallback streamable audio");
+        assert_eq!(default_audio.0, "a1");
+        assert_eq!(default_audio.1.codec, "ac3");
+
+        assert!(select_matroska_hls_track(&tracks, MatroskaTrackKind::Audio, Some("a0")).is_none());
+    }
+
+    #[test]
     fn collapses_pathological_short_windows() {
         let windows = vec![
             SegmentWindow {

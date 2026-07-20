@@ -357,10 +357,23 @@ fn primary_audio_track(probe: &MediaProbe, target: PlaybackTarget) -> Option<&Me
         .filter(|track| track.kind == TrackKind::Audio)
         .filter(|track| target_can_use_track(track, target))
         .collect::<Vec<_>>();
+
     audio_tracks
         .iter()
         .copied()
-        .find(|track| track.flags.default)
+        .find(|track| track.flags.default && track_can_copy_for_target(track, target))
+        .or_else(|| {
+            audio_tracks
+                .iter()
+                .copied()
+                .find(|track| track_can_copy_for_target(track, target))
+        })
+        .or_else(|| {
+            audio_tracks
+                .iter()
+                .copied()
+                .find(|track| track.flags.default)
+        })
         .or_else(|| audio_tracks.first().copied())
 }
 
@@ -558,6 +571,61 @@ mod tests {
     }
 
     #[test]
+    fn primary_audio_prefers_copyable_track_before_decode_bridge() {
+        let probe = probe_with_tracks(vec![
+            track("v0", TrackKind::Video, CodecFamily::H264),
+            track("a0", TrackKind::Audio, CodecFamily::Dts),
+            track("a1", TrackKind::Audio, CodecFamily::Aac),
+        ]);
+        let plan = plan_playback(
+            &probe,
+            PlaybackConstraints {
+                target: PlaybackTarget::Browser,
+                ..PlaybackConstraints::default()
+            },
+        );
+
+        assert_eq!(
+            plan.selected_tracks,
+            vec!["v0".to_string(), "a1".to_string()]
+        );
+        let copy = plan
+            .stages
+            .iter()
+            .find(|stage| stage.id == "packet-copy0")
+            .expect("copy stage");
+        assert!(copy.track_ids.contains(&"a1".to_string()));
+        assert!(!plan.stages.iter().any(|stage| stage.id == "decode0"));
+    }
+
+    #[test]
+    fn primary_audio_uses_decode_bridge_when_no_copyable_track_exists() {
+        let probe = probe_with_tracks(vec![
+            track("v0", TrackKind::Video, CodecFamily::H264),
+            track("a0", TrackKind::Audio, CodecFamily::Dts),
+            default_track("a1", TrackKind::Audio, CodecFamily::TrueHd),
+        ]);
+        let plan = plan_playback(
+            &probe,
+            PlaybackConstraints {
+                target: PlaybackTarget::Browser,
+                ..PlaybackConstraints::default()
+            },
+        );
+
+        assert_eq!(
+            plan.selected_tracks,
+            vec!["v0".to_string(), "a1".to_string()]
+        );
+        let decode = plan
+            .stages
+            .iter()
+            .find(|stage| stage.id == "decode0")
+            .expect("decode stage");
+        assert_eq!(decode.track_ids, vec!["a1".to_string()]);
+    }
+
+    #[test]
     fn browser_plan_excludes_bitmap_subtitles() {
         let probe = probe_with_tracks(vec![
             track("v0", TrackKind::Video, CodecFamily::H264),
@@ -689,6 +757,19 @@ mod tests {
     }
 
     fn track(id: &str, kind: TrackKind, family: CodecFamily) -> MediaTrack {
+        track_with_default(id, kind, family, false)
+    }
+
+    fn default_track(id: &str, kind: TrackKind, family: CodecFamily) -> MediaTrack {
+        track_with_default(id, kind, family, true)
+    }
+
+    fn track_with_default(
+        id: &str,
+        kind: TrackKind,
+        family: CodecFamily,
+        default: bool,
+    ) -> MediaTrack {
         MediaTrack {
             id: id.to_string(),
             index: 0,
@@ -702,7 +783,7 @@ mod tests {
             language: None,
             title: None,
             flags: TrackFlags {
-                default: false,
+                default,
                 forced: false,
             },
             video: None,

@@ -100,6 +100,7 @@
 - [x] Support demand-driven single segment emission.
 - [x] Support contiguous batch segment emission for read-ahead.
 - [x] Support explicit native HLS audio track selection by stable `aN` track ID.
+- [x] Prefer native-HLS streamable MKV audio over unsupported default/first tracks when no explicit audio track is requested. Verified with Gremlins 4K MKV: native HLS plan selects `v0` + `a1` AC-3 instead of the first DTS track.
 - [x] Sanitize per-stream output timestamps to keep DTS monotonic.
 - [x] Collapse pathological sub-second segment windows.
 - [x] Signal AC-3/E-AC-3 in PMT descriptors for more reliable player detection.
@@ -123,6 +124,7 @@
 - [x] Linux VAAPI/NVENC/QSV path.
 - [x] Windows NVENC/QSV/AMF path.
 - [x] Warm encoder session initialization. AAC AudioToolbox, VideoToolbox H.264/HEVC, and AC-3/E-AC-3 bridge backends run tiny real encodes before playback so startup failures surface before the first segment request.
+- [ ] Native DTS/TrueHD decode bridge for MKV audio tracks that have no AAC/AC-3/E-AC-3 alternate. Follow the FFmpeg send/receive/drain state-machine shape and AetherEngine's copy-first/bridge-only policy, but keep the API Chroma-native.
 
 ## Integration
 
