@@ -188,6 +188,7 @@ dependencies = [
  "core-foundation",
  "core-foundation-sys",
  "core-media",
+ "core-video",
  "criterion",
  "insta",
  "memmap2",

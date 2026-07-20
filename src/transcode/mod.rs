@@ -12,7 +12,8 @@ pub use audio_encode::{
     AudioEncodeError, EncodedAudioOutput, PcmAudioFormat, encode_aac_from_interleaved_i16,
 };
 pub use video_encode::{
-    RawVideoFormat, RawVideoPixelFormat, VideoEncodeError, VideoEncodeSessionInfo,
+    EncodedVideoFrame, EncodedVideoOutput, EncodedVideoStream, RawVideoFormat, RawVideoPixelFormat,
+    VideoEncodeError, VideoEncodeSessionInfo, encode_h264_videotoolbox_bgra_frame,
     probe_videotoolbox_h264_session,
 };
 

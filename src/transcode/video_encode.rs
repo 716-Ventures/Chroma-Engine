@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::packet::{TimeDelta, TimePoint, TimeScale};
 use crate::transcode::VideoCodec;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -45,6 +46,48 @@ pub struct VideoEncodeSessionInfo {
     pub prepared: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+/// Encoded video stream description plus emitted access units.
+pub struct EncodedVideoOutput {
+    /// Output stream description.
+    pub stream: EncodedVideoStream,
+    /// Encoded access units.
+    pub frames: Vec<EncodedVideoFrame>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+/// Stable output description for an encoded video stream.
+pub struct EncodedVideoStream {
+    /// Output codec carried by the stream.
+    pub codec: VideoCodec,
+    /// Encoded width in pixels.
+    pub width: u32,
+    /// Encoded height in pixels.
+    pub height: u32,
+    /// Output time scale used by frame timing.
+    pub time_scale: TimeScale,
+    /// Codec-specific decoder configuration bytes, when required by the muxer.
+    pub decoder_config: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+/// One encoded video access unit emitted by a native backend.
+pub struct EncodedVideoFrame {
+    /// Presentation timestamp.
+    pub pts: TimePoint,
+    /// Decode timestamp.
+    pub dts: TimePoint,
+    /// Frame duration.
+    pub duration: TimeDelta,
+    /// Compressed payload bytes.
+    pub payload: Vec<u8>,
+    /// True when this access unit is independently decodable.
+    pub keyframe: bool,
+}
+
 #[derive(Debug, Error)]
 /// Error returned by native video encode backends.
 pub enum VideoEncodeError {
@@ -76,6 +119,22 @@ pub fn probe_videotoolbox_h264_session(
     platform_probe_videotoolbox_h264_session(format)
 }
 
+/// Encodes one BGRA frame to H.264 using the native VideoToolbox backend.
+pub fn encode_h264_videotoolbox_bgra_frame(
+    format: RawVideoFormat,
+    bgra: &[u8],
+    bitrate: u32,
+) -> Result<EncodedVideoOutput, VideoEncodeError> {
+    validate_raw_video_format(format)?;
+    validate_bgra_frame(format, bgra)?;
+    if bitrate == 0 {
+        return Err(VideoEncodeError::InvalidInput {
+            reason: "bitrate must be greater than zero".to_string(),
+        });
+    }
+    platform_encode_h264_videotoolbox_bgra_frame(format, bgra, bitrate)
+}
+
 fn validate_raw_video_format(format: RawVideoFormat) -> Result<(), VideoEncodeError> {
     if format.width == 0 {
         return Err(VideoEncodeError::InvalidInput {
@@ -95,6 +154,27 @@ fn validate_raw_video_format(format: RawVideoFormat) -> Result<(), VideoEncodeEr
     if format.width > i32::MAX as u32 || format.height > i32::MAX as u32 {
         return Err(VideoEncodeError::InvalidInput {
             reason: "dimensions exceed VideoToolbox session limits".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_bgra_frame(format: RawVideoFormat, bgra: &[u8]) -> Result<(), VideoEncodeError> {
+    if format.pixel_format != RawVideoPixelFormat::Bgra {
+        return Err(VideoEncodeError::InvalidInput {
+            reason: "only BGRA frames can be encoded by this entrypoint".to_string(),
+        });
+    }
+    let expected = usize::try_from(format.width)
+        .ok()
+        .and_then(|width| width.checked_mul(format.height as usize))
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| VideoEncodeError::InvalidInput {
+            reason: "BGRA frame byte count overflowed".to_string(),
+        })?;
+    if bgra.len() != expected {
+        return Err(VideoEncodeError::InvalidInput {
+            reason: format!("BGRA frame has {} byte(s), expected {expected}", bgra.len()),
         });
     }
     Ok(())
@@ -148,6 +228,284 @@ fn default_allocator() -> core_foundation::base::CFAllocator {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn platform_encode_h264_videotoolbox_bgra_frame(
+    format: RawVideoFormat,
+    bgra: &[u8],
+    _bitrate: u32,
+) -> Result<EncodedVideoOutput, VideoEncodeError> {
+    use std::sync::{Arc, Mutex};
+
+    use core_media::{format_description::kCMVideoCodecType_H264, time::CMTime};
+    use video_toolbox::compression_session::VTCompressionSession;
+
+    let session = VTCompressionSession::new(
+        format.width as i32,
+        format.height as i32,
+        kCMVideoCodecType_H264,
+        None,
+        None,
+        default_allocator(),
+    )
+    .map_err(|status| VideoEncodeError::BackendFailed {
+        reason: format!("VTCompressionSessionCreate(H.264) returned {status}"),
+    })?;
+    session
+        .prepare_to_encode_frames()
+        .map_err(|status| VideoEncodeError::BackendFailed {
+            reason: format!("VTCompressionSessionPrepareToEncodeFrames(H.264) returned {status}"),
+        })?;
+
+    let pixel_buffer = bgra_pixel_buffer(format, bgra)?;
+    let image_buffer = image_buffer_from_pixel_buffer(&pixel_buffer);
+    let frames = Arc::new(Mutex::new(Vec::<EncodedVideoFrame>::new()));
+    let decoder_config = Arc::new(Mutex::new(None::<Vec<u8>>));
+    let frames_out = Arc::clone(&frames);
+    let config_out = Arc::clone(&decoder_config);
+    let time_scale = TimeScale {
+        units_per_second: format.frame_rate_num,
+    };
+    let duration_units = format.frame_rate_den;
+    let duration = TimeDelta {
+        units: u64::from(duration_units),
+        scale: time_scale,
+    };
+
+    session
+        .encode_frame_with_closure(
+            image_buffer,
+            CMTime::make(0, format.frame_rate_num as i32),
+            CMTime::make(format.frame_rate_den as i64, format.frame_rate_num as i32),
+            None,
+            move |status, _flags, sample_buffer_ref| {
+                if status != 0 || sample_buffer_ref.is_null() {
+                    return;
+                }
+                let Some((payload, config)) = copy_h264_sample(sample_buffer_ref) else {
+                    return;
+                };
+                if let Ok(mut guard) = config_out.lock()
+                    && guard.is_none()
+                {
+                    *guard = config;
+                }
+                if let Ok(mut guard) = frames_out.lock() {
+                    guard.push(EncodedVideoFrame {
+                        pts: TimePoint {
+                            units: 0,
+                            scale: time_scale,
+                        },
+                        dts: TimePoint {
+                            units: 0,
+                            scale: time_scale,
+                        },
+                        duration,
+                        payload,
+                        keyframe: true,
+                    });
+                }
+            },
+        )
+        .map_err(|status| VideoEncodeError::BackendFailed {
+            reason: format!("VTCompressionSessionEncodeFrame(H.264) returned {status}"),
+        })?;
+    session
+        .complete_frames(CMTime::make(i64::MAX, format.frame_rate_num as i32))
+        .map_err(|status| VideoEncodeError::BackendFailed {
+            reason: format!("VTCompressionSessionCompleteFrames(H.264) returned {status}"),
+        })?;
+    session.invalidate();
+
+    let frames = frames
+        .lock()
+        .map_err(|_| VideoEncodeError::BackendFailed {
+            reason: "VideoToolbox frame output lock was poisoned".to_string(),
+        })?
+        .clone();
+    if frames.is_empty() {
+        return Err(VideoEncodeError::BackendFailed {
+            reason: "VideoToolbox emitted no H.264 sample buffers".to_string(),
+        });
+    }
+    let decoder_config = decoder_config
+        .lock()
+        .map_err(|_| VideoEncodeError::BackendFailed {
+            reason: "VideoToolbox decoder config lock was poisoned".to_string(),
+        })?
+        .clone();
+
+    Ok(EncodedVideoOutput {
+        stream: EncodedVideoStream {
+            codec: VideoCodec::H264,
+            width: format.width,
+            height: format.height,
+            time_scale,
+            decoder_config,
+        },
+        frames,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn copy_h264_sample(
+    sample_buffer_ref: core_media::sample_buffer::CMSampleBufferRef,
+) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
+    use core_foundation::base::TCFType;
+    use core_media::{block_buffer::CMBlockBuffer, sample_buffer::CMSampleBuffer};
+
+    #[allow(unsafe_code)]
+    // SAFETY: VideoToolbox owns the callback sample buffer for the duration of
+    // this closure. Chroma copies all data and parameter sets before returning.
+    let sample_buffer = unsafe { CMSampleBuffer::wrap_under_get_rule(sample_buffer_ref) };
+    let data_buffer: CMBlockBuffer = sample_buffer.get_data_buffer()?;
+    let mut payload = vec![0; data_buffer.get_data_length()];
+    data_buffer.copy_data_bytes(0, &mut payload).ok()?;
+    let config = sample_buffer
+        .get_format_description()
+        .and_then(|description| avc_decoder_config_from_format_description(&description));
+    Some((payload, config))
+}
+
+#[cfg(target_os = "macos")]
+fn avc_decoder_config_from_format_description(
+    description: &core_media::format_description::CMFormatDescription,
+) -> Option<Vec<u8>> {
+    use core_foundation::base::TCFType;
+    use core_media::format_description::CMVideoFormatDescription;
+
+    #[allow(unsafe_code)]
+    // SAFETY: The sample buffer's format description is a video format description
+    // for H.264 output. Parameter sets are copied before the description is dropped.
+    let video_description =
+        unsafe { CMVideoFormatDescription::wrap_under_get_rule(description.as_concrete_TypeRef()) };
+    let mut parameter_sets = Vec::new();
+    let (_, parameter_set_count, nal_length_size) =
+        video_description.get_h264_parameter_set_at_index(0).ok()?;
+    for index in 0..parameter_set_count {
+        let (bytes, _, _) = video_description
+            .get_h264_parameter_set_at_index(index)
+            .ok()?;
+        parameter_sets.push(bytes.to_vec());
+    }
+    build_avc_decoder_config(&parameter_sets, nal_length_size)
+}
+
+#[cfg(target_os = "macos")]
+fn image_buffer_from_pixel_buffer(
+    pixel_buffer: &core_video::pixel_buffer::CVPixelBuffer,
+) -> core_video::image_buffer::CVImageBuffer {
+    use core_foundation::base::TCFType;
+    use core_video::image_buffer::CVImageBuffer;
+
+    #[allow(unsafe_code)]
+    // SAFETY: CVPixelBuffer is a CVImageBuffer subtype. The wrapper retains the
+    // CoreVideo object while it is handed to VideoToolbox.
+    unsafe {
+        CVImageBuffer::wrap_under_get_rule(pixel_buffer.as_concrete_TypeRef())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn bgra_pixel_buffer(
+    format: RawVideoFormat,
+    bgra: &[u8],
+) -> Result<core_video::pixel_buffer::CVPixelBuffer, VideoEncodeError> {
+    use core_video::pixel_buffer::{CVPixelBuffer, kCVPixelFormatType_32BGRA};
+    use core_video::r#return::kCVReturnSuccess;
+
+    let pixel_buffer = CVPixelBuffer::new(
+        kCVPixelFormatType_32BGRA,
+        format.width as usize,
+        format.height as usize,
+        None,
+    )
+    .map_err(|status| VideoEncodeError::BackendFailed {
+        reason: format!("CVPixelBufferCreate(BGRA) returned {status}"),
+    })?;
+    let status = pixel_buffer.lock_base_address(0);
+    if status != kCVReturnSuccess {
+        return Err(VideoEncodeError::BackendFailed {
+            reason: format!("CVPixelBufferLockBaseAddress returned {status}"),
+        });
+    }
+    let bytes_per_row = pixel_buffer.get_bytes_per_row();
+    let row_bytes = format.width as usize * 4;
+    #[allow(unsafe_code)]
+    // SAFETY: The pixel buffer is locked for CPU writes, `base` points to at
+    // least `bytes_per_row * height` bytes owned by CoreVideo, and each source
+    // row is exactly `row_bytes` bytes from the validated BGRA frame slice.
+    unsafe {
+        let base = pixel_buffer.get_base_address() as *mut u8;
+        if base.is_null() || bytes_per_row < row_bytes {
+            let _ = pixel_buffer.unlock_base_address(0);
+            return Err(VideoEncodeError::BackendFailed {
+                reason: "CVPixelBuffer returned invalid BGRA storage".to_string(),
+            });
+        }
+        for row in 0..format.height as usize {
+            let src = bgra.as_ptr().add(row * row_bytes);
+            let dst = base.add(row * bytes_per_row);
+            std::ptr::copy_nonoverlapping(src, dst, row_bytes);
+        }
+    }
+    let status = pixel_buffer.unlock_base_address(0);
+    if status != kCVReturnSuccess {
+        return Err(VideoEncodeError::BackendFailed {
+            reason: format!("CVPixelBufferUnlockBaseAddress returned {status}"),
+        });
+    }
+    Ok(pixel_buffer)
+}
+
+#[cfg(target_os = "macos")]
+fn build_avc_decoder_config(parameter_sets: &[Vec<u8>], nal_length_size: i32) -> Option<Vec<u8>> {
+    let mut sps = Vec::new();
+    let mut pps = Vec::new();
+    for set in parameter_sets {
+        match set.first().map(|byte| byte & 0x1f) {
+            Some(7) => sps.push(set.as_slice()),
+            Some(8) => pps.push(set.as_slice()),
+            _ => {}
+        }
+    }
+    let first_sps = *sps.first()?;
+    if first_sps.len() < 4 || sps.len() > 31 || pps.len() > u8::MAX as usize {
+        return None;
+    }
+    let length_size_minus_one = u8::try_from(nal_length_size.checked_sub(1)?).ok()? & 0x03;
+    let mut out = vec![
+        1,
+        first_sps[1],
+        first_sps[2],
+        first_sps[3],
+        0xfc | length_size_minus_one,
+        0xe0 | u8::try_from(sps.len()).ok()?,
+    ];
+    for set in sps {
+        let len = u16::try_from(set.len()).ok()?;
+        out.extend_from_slice(&len.to_be_bytes());
+        out.extend_from_slice(set);
+    }
+    out.push(u8::try_from(pps.len()).ok()?);
+    for set in pps {
+        let len = u16::try_from(set.len()).ok()?;
+        out.extend_from_slice(&len.to_be_bytes());
+        out.extend_from_slice(set);
+    }
+    Some(out)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn platform_encode_h264_videotoolbox_bgra_frame(
+    _format: RawVideoFormat,
+    _bgra: &[u8],
+    _bitrate: u32,
+) -> Result<EncodedVideoOutput, VideoEncodeError> {
+    Err(VideoEncodeError::BackendUnavailable {
+        reason: "VideoToolbox H.264 encode is only available on macOS".to_string(),
+    })
+}
+
 #[cfg(not(target_os = "macos"))]
 fn platform_probe_videotoolbox_h264_session(
     _format: RawVideoFormat,
@@ -182,6 +540,14 @@ mod tests {
         assert!(err.to_string().contains("width"));
     }
 
+    #[test]
+    fn rejects_wrong_bgra_byte_count() {
+        let err = encode_h264_videotoolbox_bgra_frame(smoke_format(), &[0; 3], 500_000)
+            .expect_err("reject bad BGRA frame size");
+
+        assert!(err.to_string().contains("BGRA"));
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_prepares_videotoolbox_h264_session() {
@@ -191,6 +557,30 @@ mod tests {
         assert_eq!(info.codec, VideoCodec::H264);
         assert_eq!(info.encoder, "chroma-videotoolbox-h264");
         assert!(info.prepared);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_encodes_bgra_frame_to_h264() {
+        let format = smoke_format();
+        let bgra = vec![0; format.width as usize * format.height as usize * 4];
+
+        let encoded = encode_h264_videotoolbox_bgra_frame(format, &bgra, 500_000)
+            .expect("encode H.264 frame");
+
+        assert_eq!(encoded.stream.codec, VideoCodec::H264);
+        assert_eq!(encoded.stream.width, format.width);
+        assert!(!encoded.frames.is_empty());
+        assert!(encoded.frames.iter().all(|frame| !frame.payload.is_empty()));
+        assert!(
+            encoded
+                .stream
+                .decoder_config
+                .as_deref()
+                .is_some_and(|config| {
+                    config.first() == Some(&1) && config.windows(2).any(|w| w == [0xe1, 0x00])
+                })
+        );
     }
 
     #[cfg(not(target_os = "macos"))]
