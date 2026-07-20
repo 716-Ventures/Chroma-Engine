@@ -781,10 +781,13 @@ fn pat_section() -> Vec<u8> {
 }
 
 fn pmt_section(video_stream_type: u8, audio_stream_type: u8) -> Vec<u8> {
-    let mut section = vec![
+    let audio_descriptors = pmt_audio_descriptors(audio_stream_type);
+    let section_length = 5 + 4 + 2 + 5 + 5 + audio_descriptors.len() + 4;
+    let mut section = Vec::with_capacity(3 + section_length);
+    section.extend_from_slice(&[
         0x02,
-        0xb0,
-        0x17,
+        0xb0 | ((section_length >> 8) as u8 & 0x0f),
+        section_length as u8,
         0x00,
         0x01,
         0xc1,
@@ -802,11 +805,32 @@ fn pmt_section(video_stream_type: u8, audio_stream_type: u8) -> Vec<u8> {
         audio_stream_type,
         0xe0 | ((AUDIO_PID >> 8) as u8 & 0x1f),
         AUDIO_PID as u8,
-        0xf0,
-        0x00,
-    ];
+        0xf0 | ((audio_descriptors.len() >> 8) as u8 & 0x0f),
+        audio_descriptors.len() as u8,
+    ]);
+    section.extend_from_slice(&audio_descriptors);
     append_crc32(&mut section);
     section
+}
+
+fn pmt_audio_descriptors(audio_stream_type: u8) -> Vec<u8> {
+    match audio_stream_type {
+        0x81 => registration_descriptor(*b"AC-3"),
+        0x87 => {
+            let mut descriptors = registration_descriptor(*b"AC-3");
+            descriptors.extend_from_slice(&registration_descriptor(*b"EAC3"));
+            descriptors
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn registration_descriptor(format_identifier: [u8; 4]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(6);
+    out.push(0x05);
+    out.push(0x04);
+    out.extend_from_slice(&format_identifier);
+    out
 }
 
 fn ts_stream_type(payload: &PayloadKind) -> u8 {
@@ -1082,6 +1106,20 @@ mod tests {
         assert_eq!(out.len(), 376);
         assert_eq!(out[0], 0x47);
         assert_eq!(out[188], 0x47);
+    }
+
+    #[test]
+    fn pmt_signals_dolby_audio_with_registration_descriptors() {
+        let aac = pmt_section(0x1b, 0x0f);
+        assert!(!aac.windows(4).any(|window| window == b"AC-3"));
+
+        let ac3 = pmt_section(0x1b, 0x81);
+        assert!(ac3.windows(4).any(|window| window == b"AC-3"));
+        assert!(!ac3.windows(4).any(|window| window == b"EAC3"));
+
+        let eac3 = pmt_section(0x24, 0x87);
+        assert!(eac3.windows(4).any(|window| window == b"AC-3"));
+        assert!(eac3.windows(4).any(|window| window == b"EAC3"));
     }
 
     #[test]
