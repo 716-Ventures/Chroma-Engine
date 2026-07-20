@@ -52,7 +52,7 @@
 ## Remux MP4
 
 - [x] Zero-copy packet path for supported stream-copy remux.
-- [ ] Matroska block reader.
+- [x] Matroska block reader.
 - [ ] MP4 writer with faststart `moov` before media data.
 - [x] H.264 AVC configuration parsing and Annex-B conversion.
 - [ ] HEVC configuration conversion.
