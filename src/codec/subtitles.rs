@@ -3,6 +3,8 @@ use std::{
     path::Path,
 };
 
+use crate::packet::ChunkSample;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// A normalized text subtitle cue using millisecond timing.
 pub struct TextSubtitleCue {
@@ -161,6 +163,23 @@ pub struct WebVttSidecarTrack {
     pub playlist_body: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+/// Borrowed native text subtitle packet data for one selected subtitle track.
+pub struct NativeTextSubtitleTrack<'a> {
+    /// Stable subtitle track identifier.
+    pub track_id: String,
+    /// Normalized subtitle codec identifier.
+    pub codec: String,
+    /// Subtitle language when available.
+    pub language: Option<String>,
+    /// Human-readable subtitle track name when available.
+    pub name: Option<String>,
+    /// Sample metadata for the subtitle packet payload.
+    pub samples: &'a [ChunkSample],
+    /// Contiguous subtitle packet payload bytes.
+    pub payload: &'a [u8],
+}
+
 /// Builds WebVTT sidecar playlists and segments for all selected text subtitle tracks.
 pub fn build_webvtt_sidecars(tracks: &[WebVttSidecarInput], segment_ms: u64) -> WebVttSidecarSet {
     let tracks = tracks
@@ -183,6 +202,23 @@ pub fn build_webvtt_sidecars(tracks: &[WebVttSidecarInput], segment_ms: u64) -> 
     WebVttSidecarSet { tracks }
 }
 
+/// Parses native text subtitle packets and builds WebVTT sidecars for every selected track.
+pub fn build_webvtt_sidecars_from_native_text_tracks(
+    tracks: &[NativeTextSubtitleTrack<'_>],
+    segment_ms: u64,
+) -> WebVttSidecarSet {
+    let inputs = tracks
+        .iter()
+        .map(|track| WebVttSidecarInput {
+            track_id: track.track_id.clone(),
+            language: track.language.clone(),
+            name: track.name.clone(),
+            cues: parse_native_text_subtitle_cues(&track.codec, track.samples, track.payload),
+        })
+        .collect::<Vec<_>>();
+    build_webvtt_sidecars(&inputs, segment_ms)
+}
+
 /// Writes WebVTT sidecar playlists and segment files for all selected text subtitle tracks.
 pub fn write_webvtt_sidecars(
     output_dir: &Path,
@@ -201,6 +237,32 @@ pub fn write_webvtt_sidecars(
     }
 
     Ok(sidecars)
+}
+
+/// Parses one native text subtitle payload chunk into normalized cues.
+pub fn parse_native_text_subtitle_cues(
+    codec: &str,
+    samples: &[ChunkSample],
+    payload: &[u8],
+) -> Vec<TextSubtitleCue> {
+    samples
+        .iter()
+        .filter_map(|sample| {
+            let start = sample.payload_offset as usize;
+            let end = start.checked_add(sample.byte_count as usize)?;
+            let bytes = payload.get(start..end)?;
+            let text = decode_native_text_payload(codec, bytes)?;
+            Some(TextSubtitleCue {
+                start_ms: sample.pts.as_millis(),
+                end_ms: sample
+                    .pts
+                    .as_millis()
+                    .saturating_add(sample.duration.as_millis())
+                    .max(sample.pts.as_millis().saturating_add(1)),
+                text,
+            })
+        })
+        .collect()
 }
 
 fn parse_subrip_block(block: &str) -> Option<TextSubtitleCue> {
@@ -278,6 +340,39 @@ fn sanitize_subtitle_text(text: &str) -> String {
         .filter(|line| !line.is_empty())
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn decode_native_text_payload(codec: &str, payload: &[u8]) -> Option<String> {
+    let raw = match codec {
+        "mov_text" | "tx3g" | "text" => decode_mov_text_payload(payload)?,
+        "ass" | "ssa" => decode_ass_payload(payload)?,
+        "subrip" | "webvtt" | "subviewer" | "microdvd" => {
+            String::from_utf8_lossy(payload).into_owned()
+        }
+        _ => return None,
+    };
+    let sanitized = sanitize_subtitle_text(&raw);
+    (!sanitized.is_empty()).then_some(sanitized)
+}
+
+fn decode_mov_text_payload(payload: &[u8]) -> Option<String> {
+    if payload.len() < 2 {
+        return None;
+    }
+    let len = u16::from_be_bytes([payload[0], payload[1]]) as usize;
+    let text = payload.get(2..2 + len)?;
+    Some(String::from_utf8_lossy(text).into_owned())
+}
+
+fn decode_ass_payload(payload: &[u8]) -> Option<String> {
+    let raw = String::from_utf8_lossy(payload);
+    let body = raw
+        .strip_prefix("Dialogue:")
+        .map(str::trim)
+        .and_then(|line| line.splitn(10, ',').nth(9))
+        .or_else(|| raw.splitn(9, ',').nth(8))
+        .unwrap_or(raw.as_ref());
+    Some(body.replace("\\N", "\n").replace("\\n", "\n"))
 }
 
 fn render_webvtt_media_playlist(segments: &[WebVttSegment]) -> String {
@@ -480,5 +575,63 @@ mod tests {
                 .contains("#EXT-X-ENDLIST")
         );
         assert!(std::fs::read_to_string(segment).unwrap().contains("Hello"));
+    }
+
+    #[test]
+    fn parses_native_mov_text_subtitle_packets() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&5_u16.to_be_bytes());
+        payload.extend_from_slice(b"Hello");
+        let samples = vec![sample(0, payload.len() as u32, 1_000, 2_000)];
+
+        let cues = parse_native_text_subtitle_cues("mov_text", &samples, &payload);
+
+        assert_eq!(cues.len(), 1);
+        assert_eq!(cues[0].start_ms, 1_000);
+        assert_eq!(cues[0].end_ms, 3_000);
+        assert_eq!(cues[0].text, "Hello");
+    }
+
+    #[test]
+    fn parses_native_ass_subtitle_packets() {
+        let payload = b"0,0,Default,,0,0,0,,{\\an8}<i>Hello\\Nworld</i>";
+        let samples = vec![sample(0, payload.len() as u32, 5_000, 1_500)];
+
+        let cues = parse_native_text_subtitle_cues("ass", &samples, payload);
+
+        assert_eq!(cues.len(), 1);
+        assert_eq!(cues[0].text, "Hello\nworld");
+    }
+
+    #[test]
+    fn builds_sidecars_from_native_text_tracks() {
+        let payload = b"Native line";
+        let samples = vec![sample(0, payload.len() as u32, 0, 1_000)];
+        let sidecars = build_webvtt_sidecars_from_native_text_tracks(
+            &[NativeTextSubtitleTrack {
+                track_id: "s0".to_string(),
+                codec: "subrip".to_string(),
+                language: Some("eng".to_string()),
+                name: Some("English".to_string()),
+                samples: &samples,
+                payload,
+            }],
+            1_000,
+        );
+
+        assert_eq!(sidecars.tracks.len(), 1);
+        assert!(sidecars.tracks[0].segments[0].body.contains("Native line"));
+    }
+
+    fn sample(offset: u64, size: u32, pts_ms: u64, duration_ms: u64) -> ChunkSample {
+        ChunkSample {
+            index: 0,
+            payload_offset: offset,
+            byte_count: size,
+            pts: crate::packet::TimePoint::millis(pts_ms),
+            dts: crate::packet::TimePoint::millis(pts_ms),
+            duration: crate::packet::TimeDelta::millis(duration_ms),
+            keyframe: true,
+        }
     }
 }

@@ -107,7 +107,7 @@
 - [x] Add benchmark coverage for probe, playback planning, packet-window planning, and subtitle segmentation.
 - [x] Add native fMP4 inspection tests that validate fragment timing without external FFmpeg tools.
 - [x] Add multi-audio HLS outputs without duplicating video work.
-- [ ] Add subtitle sidecar/rendition generation from native text subtitle parsing.
+- [x] Add subtitle sidecar/rendition generation from native text subtitle parsing.
 
 ## Transcode
 
