@@ -118,11 +118,11 @@
 - [x] macOS VideoToolbox H.264 encode. Native BGRA frames encode through VideoToolbox to length-prefixed AVC access units with avcC decoder config and stable frame timing.
 - [x] macOS VideoToolbox HEVC encode. Native BGRA frames encode through VideoToolbox to length-prefixed HEVC access units with hvcC decoder config and stable frame timing.
 - [x] AAC audio encode. macOS AudioToolbox backend encodes interleaved i16 PCM to AAC-LC, emits MPEG-4 AudioSpecificConfig, and returns sample-clocked `EncodedAudioFrame` payloads.
-- [ ] AC-3/E-AC-3 bridge encode. Planned in the backend matrix, but not reported as executable until Chroma Engine owns the decode/bridge/encode path.
+- [x] AC-3/E-AC-3 bridge encode. Pure-Rust oxideav bridge encodes interleaved S16 PCM to AC-3/E-AC-3 syncframes with sample-clocked 1536-sample output packets.
 - [x] CPU fallback decision.
 - [x] Linux VAAPI/NVENC/QSV path.
 - [x] Windows NVENC/QSV/AMF path.
-- [ ] Warm encoder session initialization. AAC AudioToolbox plus VideoToolbox H.264 and HEVC now run tiny real encodes before playback; still open until bridge backends have matching warmups.
+- [x] Warm encoder session initialization. AAC AudioToolbox, VideoToolbox H.264/HEVC, and AC-3/E-AC-3 bridge backends run tiny real encodes before playback so startup failures surface before the first segment request.
 
 ## Integration
 

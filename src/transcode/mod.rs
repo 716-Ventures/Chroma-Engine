@@ -10,6 +10,7 @@ mod video_encode;
 pub use audio_clock::{AudioClockConfig, AudioFrameTiming, AudioSampleClock};
 pub use audio_encode::{
     AudioEncodeError, EncodedAudioOutput, PcmAudioFormat, encode_aac_from_interleaved_i16,
+    encode_ac3_from_interleaved_i16, encode_eac3_from_interleaved_i16,
 };
 pub use video_encode::{
     EncodedVideoFrame, EncodedVideoOutput, EncodedVideoStream, RawVideoFormat, RawVideoPixelFormat,

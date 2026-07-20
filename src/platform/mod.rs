@@ -5,7 +5,8 @@ use crate::{
     error::EngineErrorCode,
     transcode::{
         AudioCodec, PcmAudioFormat, RawVideoFormat, RawVideoPixelFormat,
-        encode_aac_from_interleaved_i16, encode_h264_videotoolbox_bgra_frame,
+        encode_aac_from_interleaved_i16, encode_ac3_from_interleaved_i16,
+        encode_eac3_from_interleaved_i16, encode_h264_videotoolbox_bgra_frame,
         encode_hevc_videotoolbox_bgra_frame,
     },
 };
@@ -256,6 +257,8 @@ fn run_warmup_task(task: &EncoderWarmupTask) -> Result<(), EncoderWarmupError> {
         (EncoderWarmupKind::Video, "chroma-videotoolbox-h264", "h264") => warm_h264_encoder(),
         (EncoderWarmupKind::Video, "chroma-videotoolbox-hevc", "hevc") => warm_hevc_encoder(),
         (EncoderWarmupKind::Audio, "chroma-audiotoolbox-aac", "aac") => warm_aac_encoder(),
+        (EncoderWarmupKind::Audio, "chroma-ac3-bridge", "ac3") => warm_ac3_encoder(),
+        (EncoderWarmupKind::Audio, "chroma-eac3-bridge", "eac3") => warm_eac3_encoder(),
         _ => Ok(()),
     }
 }
@@ -314,6 +317,32 @@ fn warm_aac_encoder() -> Result<(), EncoderWarmupError> {
             }
         })?;
     }
+    Ok(())
+}
+
+fn warm_ac3_encoder() -> Result<(), EncoderWarmupError> {
+    let format = PcmAudioFormat {
+        sample_rate: 48_000,
+        channels: 2,
+    };
+    let pcm = vec![0_i16; 1536 * format.channels as usize];
+    encode_ac3_from_interleaved_i16(format, &pcm, 192_000).map_err(|error| EncoderWarmupError {
+        reason: format!("AC-3 bridge warmup failed: {error}"),
+    })?;
+    Ok(())
+}
+
+fn warm_eac3_encoder() -> Result<(), EncoderWarmupError> {
+    let format = PcmAudioFormat {
+        sample_rate: 48_000,
+        channels: 6,
+    };
+    let pcm = vec![0_i16; 1536 * format.channels as usize];
+    encode_eac3_from_interleaved_i16(format, &pcm, 768_000).map_err(|error| {
+        EncoderWarmupError {
+            reason: format!("E-AC-3 bridge warmup failed: {error}"),
+        }
+    })?;
     Ok(())
 }
 
@@ -438,7 +467,10 @@ fn audio_backend_matrix() -> Vec<AudioEncoderBackend> {
 }
 
 fn audio_backend_available(codec: AudioCodec) -> bool {
-    matches!(codec, AudioCodec::Aac) && cfg!(target_os = "macos")
+    match codec {
+        AudioCodec::Aac => cfg!(target_os = "macos"),
+        AudioCodec::Ac3 | AudioCodec::Eac3 => true,
+    }
 }
 
 fn video_codec_label(codec: VideoOutputCodec) -> &'static str {
@@ -576,12 +608,12 @@ mod tests {
         assert!(
             plan.audio_backends
                 .iter()
-                .any(|backend| backend.codec == AudioCodec::Ac3 && !backend.available)
+                .any(|backend| backend.codec == AudioCodec::Ac3 && backend.available)
         );
         assert!(
             plan.audio_backends
                 .iter()
-                .any(|backend| backend.codec == AudioCodec::Eac3 && !backend.available)
+                .any(|backend| backend.codec == AudioCodec::Eac3 && backend.available)
         );
     }
 
@@ -634,6 +666,16 @@ mod tests {
         });
 
         assert_eq!(has_aac_warmup, cfg!(target_os = "macos"));
+        assert!(plan.warmup_tasks.iter().any(|task| {
+            task.kind == EncoderWarmupKind::Audio
+                && task.codec == "ac3"
+                && task.encoder == "chroma-ac3-bridge"
+        }));
+        assert!(plan.warmup_tasks.iter().any(|task| {
+            task.kind == EncoderWarmupKind::Audio
+                && task.codec == "eac3"
+                && task.encoder == "chroma-eac3-bridge"
+        }));
     }
 
     #[test]
