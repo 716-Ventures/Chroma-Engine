@@ -434,6 +434,7 @@ fn tracks_from_mp4(meta: &mp4::Mp4BasicMetadata) -> Vec<MediaTrack> {
                     frame_rate: track.frame_rate,
                     bitrate_bps: track.bitrate_bps,
                     dynamic_range: dynamic_range_from_mp4(track.dynamic_range),
+                    pixel_format: track.pixel_format.clone(),
                     channels: track.channels,
                     sample_rate: track.sample_rate,
                     atmos: track.atmos,
@@ -482,6 +483,7 @@ fn tracks_from_matroska(meta: &matroska::MatroskaBasicMetadata) -> Vec<MediaTrac
                     frame_rate: frame_rate_from_default_duration(track.default_duration_ns),
                     bitrate_bps: None,
                     dynamic_range: DynamicRange::Unknown,
+                    pixel_format: track.pixel_format.clone(),
                     channels: track.channels,
                     sample_rate: track.sample_rate,
                     atmos: false,
@@ -504,13 +506,14 @@ fn chapters_from_matroska(chapters: &[matroska::MatroskaChapter]) -> Vec<Chapter
         .collect()
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct TrackShape {
     width: Option<u32>,
     height: Option<u32>,
     frame_rate: Option<f64>,
     bitrate_bps: Option<u64>,
     dynamic_range: DynamicRange,
+    pixel_format: Option<String>,
     channels: Option<u32>,
     sample_rate: Option<u32>,
     atmos: bool,
@@ -549,7 +552,7 @@ fn media_track(input: TrackInput) -> MediaTrack {
             height: input.shape.height,
             frame_rate: input.shape.frame_rate,
             bitrate_bps: input.shape.bitrate_bps,
-            pixel_format: None,
+            pixel_format: input.shape.pixel_format,
             dynamic_range: input.shape.dynamic_range,
         }),
         audio: (input.kind == TrackKind::Audio).then_some(AudioDescriptor {
@@ -762,6 +765,7 @@ mod tests {
                 frame_rate: None,
                 bitrate_bps: Some(192_000),
                 dynamic_range: mp4::Mp4DynamicRange::Unknown,
+                pixel_format: None,
                 width: None,
                 height: None,
                 channels: Some(6),

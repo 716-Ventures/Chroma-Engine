@@ -1,6 +1,9 @@
 mod atom;
 
 use crate::{
+    codec::pixel_format::{
+        pixel_format_from_avc_decoder_config, pixel_format_from_hevc_decoder_config,
+    },
     container::ContainerKind,
     packet::{
         ChunkPlan, ExtractedChunk, NativeChunk, PacketExtractError, PacketRange, PacketRef,
@@ -34,6 +37,7 @@ pub struct Mp4Track {
     pub frame_rate: Option<f64>,
     pub bitrate_bps: Option<u64>,
     pub dynamic_range: Mp4DynamicRange,
+    pub pixel_format: Option<String>,
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub channels: Option<u32>,
@@ -385,6 +389,7 @@ fn parse_trak(payload: &[u8], index: u32) -> Option<Mp4Track> {
         frame_rate: mdia.frame_rate,
         bitrate_bps: mdia.bitrate_bps,
         dynamic_range: stsd.dynamic_range,
+        pixel_format: stsd.pixel_format,
         width,
         height,
         channels: stsd.channels,
@@ -423,6 +428,7 @@ struct SampleEntryInfo {
     channels: Option<u32>,
     sample_rate: Option<u32>,
     dynamic_range: Mp4DynamicRange,
+    pixel_format: Option<String>,
     atmos: bool,
 }
 
@@ -1187,6 +1193,7 @@ fn parse_sample_entry(codec_fourcc: [u8; 4], payload: &[u8]) -> SampleEntryInfo 
         channels: None,
         sample_rate: None,
         dynamic_range: Mp4DynamicRange::Unknown,
+        pixel_format: None,
         atmos: false,
     };
 
@@ -1196,6 +1203,7 @@ fn parse_sample_entry(codec_fourcc: [u8; 4], payload: &[u8]) -> SampleEntryInfo 
             out.height = read_u16(&payload[26..28]).map(u32::from);
         }
         out.dynamic_range = parse_video_sample_entry_dynamic_range(codec_fourcc, payload);
+        out.pixel_format = parse_video_sample_entry_pixel_format(codec_fourcc, payload);
     } else if is_audio_sample_entry(&codec_fourcc) && payload.len() >= 28 {
         out.channels = read_u16(&payload[16..18]).map(u32::from);
         out.sample_rate = read_u32(&payload[24..28]).map(|v| v >> 16);
@@ -1203,6 +1211,18 @@ fn parse_sample_entry(codec_fourcc: [u8; 4], payload: &[u8]) -> SampleEntryInfo 
     }
 
     out
+}
+
+fn parse_video_sample_entry_pixel_format(codec_fourcc: [u8; 4], payload: &[u8]) -> Option<String> {
+    let child_boxes = sample_entry_child_boxes(Mp4TrackKind::Video, codec_fourcc, payload)?;
+    for atom in AtomIter::new(child_boxes) {
+        match atom.kind {
+            kind if kind == *b"avcC" => return pixel_format_from_avc_decoder_config(atom.payload),
+            kind if kind == *b"hvcC" => return pixel_format_from_hevc_decoder_config(atom.payload),
+            _ => {}
+        }
+    }
+    None
 }
 
 fn parse_audio_sample_entry_atmos(codec_fourcc: [u8; 4], payload: &[u8]) -> bool {
@@ -1798,6 +1818,45 @@ mod tests {
         let meta = parse_basic_metadata(&data);
         assert_eq!(meta.tracks.len(), 1);
         assert_eq!(meta.tracks[0].dynamic_range, Mp4DynamicRange::DolbyVision);
+    }
+
+    #[test]
+    fn derives_mp4_pixel_format_from_avc_config() {
+        let mut data = ftyp();
+        let avcc = atom(
+            b"avcC",
+            &[
+                1, 110, 0, 31, 0xff, 0xe1, 0, 1, 0x67, 1, 0, 1, 0x68, 0xfd, 0xfa, 0xfa,
+            ],
+        );
+        let sample_entry_payload = video_sample_entry_payload(Some((1920, 1080)), &avcc);
+        data.extend_from_slice(&atom(
+            b"moov",
+            &trak_with_sample_entry_payload(b"vide", b"avc1", sample_entry_payload, 1000, 1000),
+        ));
+
+        let meta = parse_basic_metadata(&data);
+        assert_eq!(meta.tracks.len(), 1);
+        assert_eq!(meta.tracks[0].pixel_format.as_deref(), Some("yuv420-10bit"));
+    }
+
+    #[test]
+    fn derives_mp4_pixel_format_from_hevc_config() {
+        let mut data = ftyp();
+        let mut hvcc = vec![
+            1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 120, 0xfd, 0xfa, 0, 0, 0, 0, 0, 0, 3, 0,
+        ];
+        hvcc[22] = 0;
+        let sample_entry_payload =
+            video_sample_entry_payload(Some((1920, 1080)), &atom(b"hvcC", &hvcc));
+        data.extend_from_slice(&atom(
+            b"moov",
+            &trak_with_sample_entry_payload(b"vide", b"hvc1", sample_entry_payload, 1000, 1000),
+        ));
+
+        let meta = parse_basic_metadata(&data);
+        assert_eq!(meta.tracks.len(), 1);
+        assert_eq!(meta.tracks[0].pixel_format.as_deref(), Some("yuv420-10bit"));
     }
 
     #[test]

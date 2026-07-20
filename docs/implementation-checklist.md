@@ -37,7 +37,7 @@
 - [x] Matroska/WebM EBML parser: Chapters.
 - [x] Extract video fields: codec, dimensions.
 - [x] Extract video fields: frame rate, bitrate, HDR/DV hints.
-- [ ] Extract video fields: pixel format.
+- [x] Extract video fields: pixel format.
 - [x] Extract Matroska audio fields: codec, channels, language/title, default/forced disposition.
 - [x] Extract MP4 audio fields: codec, channels, sample rate.
 - [x] Extract MP4 audio title/default/forced disposition.

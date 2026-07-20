@@ -2,6 +2,9 @@ mod ebml;
 
 use thiserror::Error;
 
+use crate::codec::pixel_format::{
+    pixel_format_from_avc_decoder_config, pixel_format_from_hevc_decoder_config,
+};
 use crate::packet::{
     ChunkPlan, ExtractedChunk, NativeChunk, PacketExtractError, PacketRange, PacketRef, TimeDelta,
     TimePoint, TimeScale, extract_packet_payload, packet_samples_for_range,
@@ -41,6 +44,7 @@ pub struct MatroskaTrack {
     pub forced: bool,
     pub width: Option<u32>,
     pub height: Option<u32>,
+    pub pixel_format: Option<String>,
     pub channels: Option<u32>,
     pub sample_rate: Option<u32>,
     pub default_duration_ns: Option<u64>,
@@ -716,6 +720,9 @@ fn parse_track_entry(payload: &[u8], index: u32) -> Option<MatroskaTrack> {
     }
 
     let codec = codec_id.map(|id| normalize_codec_id(&id))?;
+    let pixel_format = (kind == MatroskaTrackKind::Video)
+        .then(|| video_pixel_format_from_codec_private(&codec, codec_private.as_deref()))
+        .flatten();
     Some(MatroskaTrack {
         index,
         number: number.unwrap_or(u64::from(index) + 1),
@@ -727,11 +734,24 @@ fn parse_track_entry(payload: &[u8], index: u32) -> Option<MatroskaTrack> {
         forced,
         width,
         height,
+        pixel_format,
         channels,
         sample_rate,
         default_duration_ns,
         codec_private,
     })
+}
+
+fn video_pixel_format_from_codec_private(
+    codec: &str,
+    codec_private: Option<&[u8]>,
+) -> Option<String> {
+    let private = codec_private?;
+    match codec {
+        "h264" => pixel_format_from_avc_decoder_config(private),
+        "hevc" => pixel_format_from_hevc_decoder_config(private),
+        _ => None,
+    }
 }
 
 fn parse_video(payload: &[u8]) -> (Option<u32>, Option<u32>) {
@@ -1371,10 +1391,18 @@ mod tests {
             1,
             1,
             "V_MPEG4/ISO/AVC",
-            &[elem(
-                0xe0,
-                &[elem(0xb0, &[0x07, 0x80]), elem(0xba, &[0x04, 0x38])].concat(),
-            )],
+            &[
+                elem(
+                    0xe0,
+                    &[elem(0xb0, &[0x07, 0x80]), elem(0xba, &[0x04, 0x38])].concat(),
+                ),
+                elem(
+                    0x63a2,
+                    &[
+                        1, 110, 0, 31, 0xff, 0xe1, 0, 1, 0x67, 1, 0, 1, 0x68, 0xfd, 0xfa, 0xfa,
+                    ],
+                ),
+            ],
         );
         let audio = track_entry(
             2,
@@ -1415,6 +1443,7 @@ mod tests {
         assert_eq!(meta.tracks[0].codec, "h264");
         assert_eq!(meta.tracks[0].width, Some(1920));
         assert_eq!(meta.tracks[0].height, Some(1080));
+        assert_eq!(meta.tracks[0].pixel_format.as_deref(), Some("yuv420-10bit"));
         assert_eq!(meta.tracks[1].codec, "aac");
         assert_eq!(meta.tracks[1].channels, Some(2));
         assert_eq!(meta.tracks[1].sample_rate, Some(48000));
