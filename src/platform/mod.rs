@@ -298,20 +298,28 @@ fn video_backend_matrix() -> Vec<EncoderBackend> {
 
 fn audio_backend_matrix() -> Vec<AudioEncoderBackend> {
     [
-        (AudioCodec::Aac, "chroma-aac"),
+        (AudioCodec::Aac, "chroma-audiotoolbox-aac"),
         (AudioCodec::Ac3, "chroma-ac3-bridge"),
         (AudioCodec::Eac3, "chroma-eac3-bridge"),
     ]
     .into_iter()
-    .map(|(codec, encoder)| AudioEncoderBackend {
-        codec,
-        encoder: encoder.to_string(),
-        available: false,
-        unavailable_reason: Some(
-            "native audio encode backend is planned but not executable in this build".to_string(),
-        ),
+    .map(|(codec, encoder)| {
+        let available = audio_backend_available(codec);
+        AudioEncoderBackend {
+            codec,
+            encoder: encoder.to_string(),
+            available,
+            unavailable_reason: (!available).then(|| {
+                "native audio encode backend is planned but not executable in this build"
+                    .to_string()
+            }),
+        }
     })
     .collect()
+}
+
+fn audio_backend_available(codec: AudioCodec) -> bool {
+    matches!(codec, AudioCodec::Aac) && cfg!(target_os = "macos")
 }
 
 fn planned_video_backend(
@@ -385,14 +393,22 @@ mod tests {
     }
 
     #[test]
-    fn backend_plan_includes_planned_audio_bridges_and_cpu_fallback() {
+    fn backend_plan_reports_audio_backend_availability_and_cpu_fallback() {
         let plan = encoder_backend_plan();
 
         assert_eq!(plan.cpu_fallback.kind, HardwareKind::Cpu);
+        let aac = plan
+            .audio_backends
+            .iter()
+            .find(|backend| backend.codec == AudioCodec::Aac)
+            .expect("AAC backend");
+        assert_eq!(aac.available, cfg!(target_os = "macos"));
         assert!(
-            plan.audio_backends
-                .iter()
-                .any(|backend| backend.codec == AudioCodec::Aac && !backend.available)
+            aac.available
+                || aac
+                    .unavailable_reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("planned"))
         );
         assert!(
             plan.audio_backends

@@ -59,3 +59,6 @@ panic = "abort"
 inherits = "release"
 debug = true
 strip = "none"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+audiotoolbox = "0.4.0"

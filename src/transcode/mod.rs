@@ -4,8 +4,12 @@ use crate::packet::TimeScale;
 use crate::platform::EncoderProfile;
 
 mod audio_clock;
+mod audio_encode;
 
 pub use audio_clock::{AudioClockConfig, AudioFrameTiming, AudioSampleClock};
+pub use audio_encode::{
+    AudioEncodeError, EncodedAudioOutput, PcmAudioFormat, encode_aac_from_interleaved_i16,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
