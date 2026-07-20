@@ -4,6 +4,7 @@ use anyhow::{Result, bail};
 
 use crate::container::{ContainerKind, sniff_container};
 
+/// Remuxes a supported source into MP4 without decoding.
 pub fn remux_mp4(input: &Path, _output: &Path) -> Result<()> {
     let mut file = std::fs::File::open(input)?;
     let mut head = [0_u8; 4096];

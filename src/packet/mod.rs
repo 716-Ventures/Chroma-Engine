@@ -3,96 +3,143 @@ use thiserror::Error;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+/// A compressed packet reference inside the original source.
 pub struct PacketRef {
+    /// Byte offset where the packet payload starts in the source.
     pub source_offset: u64,
+    /// Packet payload size in bytes.
     pub size: u32,
+    /// Presentation timestamp.
     pub pts: TimePoint,
+    /// Decode timestamp.
     pub dts: TimePoint,
+    /// Packet presentation duration.
     pub duration: TimeDelta,
+    /// Whether this packet starts at a random access point.
     pub keyframe: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+/// A keyframe-aligned chunking plan for one or more tracks.
 pub struct ChunkPlan {
+    /// Track identifiers covered by this plan.
     pub track_ids: Vec<String>,
+    /// Ordered native chunks.
     pub chunks: Vec<NativeChunk>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+/// A native playback chunk backed by a packet range.
 pub struct NativeChunk {
+    /// Zero-based chunk index.
     pub index: u32,
+    /// Chunk start timestamp.
     pub start: TimePoint,
+    /// Chunk duration.
     pub duration: TimeDelta,
+    /// Half-open packet range included in the chunk.
     pub packet_range: PacketRange,
+    /// Whether the first packet in the chunk is keyframe aligned.
     pub key_aligned: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+/// Materialized packet payload and sample table for a chunk.
 pub struct ExtractedChunk {
+    /// Track identifier for the extracted chunk.
     pub track_id: String,
+    /// Chunk timing and packet range metadata.
     pub chunk: NativeChunk,
+    /// Number of packets included.
     pub packet_count: u32,
+    /// Total payload bytes included.
     pub byte_count: u64,
+    /// Per-packet sample metadata relative to the extracted payload.
     pub samples: Vec<ChunkSample>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+/// Sample metadata for one packet inside an extracted chunk.
 pub struct ChunkSample {
+    /// Source packet index.
     pub index: u32,
+    /// Byte offset inside the extracted payload.
     pub payload_offset: u64,
+    /// Sample payload size in bytes.
     pub byte_count: u32,
+    /// Presentation timestamp.
     pub pts: TimePoint,
+    /// Decode timestamp.
     pub dts: TimePoint,
+    /// Sample duration.
     pub duration: TimeDelta,
+    /// Whether the sample starts at a random access point.
     pub keyframe: bool,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
+/// Error returned when extracting packet payload bytes.
 pub enum PacketExtractError {
+    /// The requested range start is greater than its end.
     #[error("packet range start is after range end")]
     InvalidRange,
+    /// The requested packet range is outside the packet index.
     #[error("packet range is outside the packet index")]
     RangeOutOfBounds,
+    /// A packet byte range points outside the source buffer.
     #[error("packet byte range is outside the source")]
     SourceOutOfBounds,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+/// Half-open packet range `[start, end)`.
 pub struct PacketRange {
+    /// First packet index included.
     pub start: u32,
+    /// First packet index excluded.
     pub end: u32,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "camelCase")]
+/// Absolute media timestamp in a declared time scale.
 pub struct TimePoint {
+    /// Timestamp units in `scale`.
     pub units: u64,
+    /// Units-per-second time scale.
     pub scale: TimeScale,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "camelCase")]
+/// Relative media duration in a declared time scale.
 pub struct TimeDelta {
+    /// Duration units in `scale`.
     pub units: u64,
+    /// Units-per-second time scale.
     pub scale: TimeScale,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "camelCase")]
+/// Rational media time scale represented as units per second.
 pub struct TimeScale {
+    /// Number of timestamp units in one second.
     pub units_per_second: u32,
 }
 
 impl TimeScale {
+    /// Millisecond time scale.
     pub const MILLIS: Self = Self {
         units_per_second: 1000,
     };
 
+    /// Converts `units` in this scale to milliseconds.
     pub fn to_millis(self, units: u64) -> u64 {
         if self.units_per_second == 0 {
             return 0;
@@ -102,10 +149,12 @@ impl TimeScale {
 }
 
 impl TimePoint {
+    /// Returns a zero timestamp in `scale`.
     pub fn zero(scale: TimeScale) -> Self {
         Self { units: 0, scale }
     }
 
+    /// Builds a timestamp from milliseconds.
     pub fn millis(ms: u64) -> Self {
         Self {
             units: ms,
@@ -113,12 +162,14 @@ impl TimePoint {
         }
     }
 
+    /// Converts the timestamp to milliseconds.
     pub fn as_millis(self) -> u64 {
         self.scale.to_millis(self.units)
     }
 }
 
 impl TimeDelta {
+    /// Builds a duration from milliseconds.
     pub fn millis(ms: u64) -> Self {
         Self {
             units: ms,
@@ -126,15 +177,18 @@ impl TimeDelta {
         }
     }
 
+    /// Converts the duration to milliseconds.
     pub fn as_millis(self) -> u64 {
         self.scale.to_millis(self.units)
     }
 }
 
+/// Builds fixed-duration chunks for an anonymous track.
 pub fn plan_fixed_chunks(packets: &[PacketRef], target_ms: u64) -> ChunkPlan {
     plan_track_chunks("", packets, target_ms)
 }
 
+/// Builds fixed-duration chunks for a named track.
 pub fn plan_track_chunks(track_id: &str, packets: &[PacketRef], target_ms: u64) -> ChunkPlan {
     if packets.is_empty() || target_ms == 0 {
         return ChunkPlan {
@@ -193,6 +247,7 @@ pub fn plan_track_chunks(track_id: &str, packets: &[PacketRef], target_ms: u64) 
     ChunkPlan { track_ids, chunks }
 }
 
+/// Copies packet payload bytes for a range into a contiguous buffer.
 pub fn extract_packet_payload(
     source: &[u8],
     packets: &[PacketRef],
@@ -229,6 +284,7 @@ pub fn extract_packet_payload(
     Ok(out)
 }
 
+/// Builds sample metadata for packets in a range.
 pub fn packet_samples_for_range(
     packets: &[PacketRef],
     range: PacketRange,

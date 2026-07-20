@@ -3,48 +3,73 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+/// Result of probing the host for encoding capabilities.
 pub struct EncoderProbe {
+    /// RFC 3339 timestamp for when the probe was collected.
     pub collected_at: String,
+    /// Preferred encoder profile for new work.
     pub profile: EncoderProfile,
+    /// Additional compatible encoder profiles.
     pub alternatives: Vec<EncoderProfile>,
+    /// Encoder candidates considered during probing.
     pub considered_encoders: Vec<String>,
+    /// Reasons candidate encoders were rejected or unavailable.
     pub failure_notes: Vec<EncoderFailureNote>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+/// Concrete encoder profile selected for output.
 pub struct EncoderProfile {
+    /// Hardware acceleration family.
     pub kind: HardwareKind,
+    /// Backend-specific encoder name.
     pub video_encoder: String,
+    /// Output video codec.
     pub codec: VideoOutputCodec,
+    /// Optional hardware acceleration device or mode.
     pub hwaccel: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+/// Diagnostic note for an encoder candidate that could not be used.
 pub struct EncoderFailureNote {
+    /// Candidate encoder name.
     pub encoder: String,
+    /// Rejection or failure reason.
     pub reason: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+/// Hardware encoder family.
 pub enum HardwareKind {
+    /// Apple VideoToolbox.
     VideoToolbox,
+    /// NVIDIA NVENC.
     Nvenc,
+    /// Intel Quick Sync Video.
     Qsv,
+    /// AMD Advanced Media Framework.
     Amf,
+    /// Linux VA-API.
     Vaapi,
+    /// CPU encoder fallback.
     Cpu,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+/// Video output codec family.
 pub enum VideoOutputCodec {
+    /// H.264/AVC output.
     H264,
+    /// H.265/HEVC output.
     Hevc,
 }
 
+/// Probes host encoder support and returns the preferred profile.
 pub fn encoder_probe() -> EncoderProbe {
     EncoderProbe {
         collected_at: now_iso8601(),
@@ -58,6 +83,7 @@ pub fn encoder_probe() -> EncoderProbe {
     }
 }
 
+/// Performs lightweight encoder startup work before serving playback.
 pub fn warmup() -> Result<()> {
     Ok(())
 }

@@ -4,85 +4,133 @@ use crate::probe::{CodecFamily, MediaProbe, MediaTrack, SubtitleFormat, TrackKin
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+/// Playback pipeline plan for a probed media source.
 pub struct PlaybackPlan {
+    /// Playback plan schema version.
     pub schema_version: u32,
+    /// Source path being planned.
     pub source_path: String,
+    /// Source duration in milliseconds when known.
     pub duration_ms: Option<u64>,
+    /// Track identifiers selected for playback.
     pub selected_tracks: Vec<String>,
+    /// Ordered processing stages.
     pub stages: Vec<PipelineStage>,
+    /// Output transports exposed by the plan.
     pub transports: Vec<TransportPlan>,
+    /// Constraints used to produce the plan.
     pub constraints: PlaybackConstraints,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+/// Constraints provided by a playback client or server policy.
 pub struct PlaybackConstraints {
+    /// Playback target type.
     pub target: PlaybackTarget,
+    /// Optional maximum decoded video pixel count.
     pub max_video_pixels: Option<u64>,
+    /// Whether packet-copy paths should be preferred.
     pub prefer_copy: bool,
+    /// Audio track selection policy.
     pub audio_selection: AudioSelection,
+    /// Whether subtitles should be included.
     pub include_subtitles: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+/// Playback target family.
 pub enum PlaybackTarget {
+    /// Chroma-native client transport.
     NativeChroma,
+    /// Browser playback target.
     Browser,
+    /// Apple-native player target.
     AppleNative,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+/// Audio track selection policy.
 pub enum AudioSelection {
+    /// Select the primary compatible audio track.
     Primary,
+    /// Select every compatible audio track.
     All,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+/// One stage in a playback pipeline.
 pub struct PipelineStage {
+    /// Stable stage identifier.
     pub id: String,
+    /// Stage responsibility.
     pub kind: StageKind,
+    /// Track ids handled by the stage.
     pub track_ids: Vec<String>,
+    /// Stage execution mode.
     pub mode: StageMode,
+    /// Diagnostic explanation for why the stage exists.
     pub reason: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+/// Playback pipeline stage kind.
 pub enum StageKind {
+    /// Container demux.
     Demux,
+    /// Compressed packet filtering or copying.
     PacketFilter,
+    /// Decode to raw media frames.
     Decode,
+    /// Encode raw frames to target codecs.
     Encode,
+    /// Subtitle normalization or segmentation.
     SubtitleTransform,
+    /// Multiplex selected tracks into transport output.
     Mux,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+/// Execution mode for a pipeline stage.
 pub enum StageMode {
+    /// Shared stage for multiple tracks.
     Shared,
+    /// Packet-copy stage.
     Copy,
+    /// Metadata or subtitle transform stage.
     Transform,
+    /// Decode stage.
     Decode,
+    /// Encode stage.
     Encode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+/// Transport emitted by a playback plan.
 pub struct TransportPlan {
+    /// Stable transport identifier.
     pub id: String,
+    /// Transport family.
     pub kind: TransportKind,
+    /// Stage id that feeds this transport.
     pub source_stage_id: String,
+    /// Diagnostic notes for client/server selection.
     pub notes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+/// Output transport family.
 pub enum TransportKind {
+    /// Chroma-native frame transport.
     ChromaFrames,
+    /// Chroma-native segment transport.
     ChromaSegments,
 }
 
@@ -98,6 +146,7 @@ impl Default for PlaybackConstraints {
     }
 }
 
+/// Plans a playback graph from probe metadata and client constraints.
 pub fn plan_playback(probe: &MediaProbe, constraints: PlaybackConstraints) -> PlaybackPlan {
     let selected = select_tracks(probe, &constraints);
     let selected_ids = selected

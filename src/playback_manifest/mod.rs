@@ -14,41 +14,67 @@ use crate::{
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+/// Native playback manifest produced during media analysis.
 pub struct NativePlaybackManifest {
+    /// Manifest schema version.
     pub schema_version: u32,
+    /// Source path represented by the manifest.
     pub source_path: String,
+    /// Source duration in milliseconds when known.
     pub duration_ms: Option<u64>,
+    /// Target chunk duration used to build track chunk plans.
     pub chunk_target_ms: u64,
+    /// Tracks available for native playback.
     pub tracks: Vec<ManifestTrack>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+/// Track-level playback metadata and packet chunk plan.
 pub struct ManifestTrack {
+    /// Stable semantic track identifier such as `v0` or `a1`.
     pub id: String,
+    /// Track kind, for example `video` or `audio`.
     pub kind: String,
+    /// Normalized codec family identifier.
     pub codec: String,
+    /// Browser or platform codec string when available.
     pub codec_string: Option<String>,
+    /// ISO language tag when available.
     pub language: Option<String>,
+    /// Track title from the container when available.
     pub title: Option<String>,
+    /// Audio channel count for audio tracks.
     pub channels: Option<u32>,
+    /// Audio sample rate for audio tracks.
     pub sample_rate: Option<u32>,
+    /// Whether the container marks this track as default.
     pub default: bool,
+    /// Whether the container marks this subtitle track as forced.
     pub forced: bool,
+    /// Codec configuration box name when one is available.
     pub config_box: Option<String>,
+    /// Hex-encoded decoder configuration bytes.
     pub decoder_config_hex: Option<String>,
+    /// Keyframe-aligned chunks for this track.
     pub chunks: Vec<NativeChunk>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Options for building an MP4 native playback manifest.
 pub struct Mp4ManifestOptions {
+    /// Target chunk duration in milliseconds.
     pub chunk_target_ms: u64,
+    /// Whether audio tracks should be included.
     pub include_audio: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Options for building a Matroska native playback manifest.
 pub struct MatroskaManifestOptions {
+    /// Target chunk duration in milliseconds.
     pub chunk_target_ms: u64,
+    /// Whether audio tracks should be included.
     pub include_audio: bool,
 }
 
@@ -70,6 +96,7 @@ impl Default for Mp4ManifestOptions {
     }
 }
 
+/// Builds a native playback manifest for an MP4/MOV source.
 pub fn build_mp4_playback_manifest(
     bytes: &[u8],
     source_path: &Path,
@@ -103,6 +130,7 @@ pub fn build_mp4_playback_manifest(
     })
 }
 
+/// Builds a native playback manifest for a Matroska/WebM source.
 pub fn build_matroska_playback_manifest(
     bytes: &[u8],
     source_path: &Path,

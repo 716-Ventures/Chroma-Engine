@@ -1,3 +1,13 @@
+//! Native media primitives for Chroma playback.
+//!
+//! Chroma Engine exposes a narrow Rust-first API for probing media sources,
+//! planning playback pipelines, segmenting packet indexes, generating HLS
+//! output, and describing native playback manifests. Internal parser and muxer
+//! modules stay crate-private so the public contract can evolve deliberately.
+
+#![warn(missing_docs)]
+
+/// Command-line entrypoint support for the `chroma-engine` binary.
 pub mod cli;
 pub(crate) mod codec;
 pub(crate) mod container;

@@ -11,181 +11,283 @@ use crate::{
 };
 
 #[derive(Debug, Error)]
+/// Error returned while probing a media source.
 pub enum ProbeError {
+    /// The requested path does not exist.
     #[error("file_not_found")]
     FileNotFound,
+    /// The source file could not be opened.
     #[error("open_failed: {0}")]
     OpenFailed(String),
+    /// The source header could not be read.
     #[error("read_failed: {0}")]
     ReadFailed(String),
+    /// The source file could not be memory mapped.
     #[error("map_failed: {0}")]
     MapFailed(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+/// Media probe document used by Chroma analysis and playback planning.
 pub struct MediaProbe {
+    /// Probe schema version.
     pub schema_version: u32,
+    /// Engine identity that produced the probe.
     pub engine: ProbeEngine,
+    /// Source file and container descriptor.
     pub source: MediaSource,
+    /// Media duration in milliseconds when known.
     pub duration_ms: Option<u64>,
+    /// Tracks discovered in the source.
     pub tracks: Vec<MediaTrack>,
+    /// Attachment summary for container-level attachments.
     pub attachments: AttachmentSummary,
+    /// Capability summary derived from the tracks.
     pub capabilities: MediaCapabilities,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+/// Engine identity embedded in probe output.
 pub struct ProbeEngine {
+    /// Engine name.
     pub name: String,
+    /// Engine package version.
     pub version: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+/// Source-level file metadata.
 pub struct MediaSource {
+    /// Source path.
     pub path: PathBuf,
+    /// Source size in bytes.
     pub size_bytes: u64,
+    /// Detected container descriptor.
     pub container: ContainerDescriptor,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+/// Human-readable container descriptor.
 pub struct ContainerDescriptor {
+    /// Container family.
     pub family: ContainerFamily,
+    /// Container brand or stable public name.
     pub brand: String,
+    /// Extension hint derived from the source path.
     pub extension_hint: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+/// Supported high-level container families.
 pub enum ContainerFamily {
+    /// ISO Base Media File Format, including MP4 and MOV.
     IsoBmff,
+    /// Matroska/WebM container family.
     Matroska,
+    /// Unknown or unsupported container family.
     Unknown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+/// One media track discovered in a source.
 pub struct MediaTrack {
+    /// Stable semantic track identifier.
     pub id: String,
+    /// Zero-based track index in the source.
     pub index: u32,
+    /// Track media kind.
     pub kind: TrackKind,
+    /// Normalized codec descriptor.
     pub codec: CodecDescriptor,
+    /// Track duration in milliseconds when known.
     pub duration_ms: Option<u64>,
+    /// Track language when available.
     pub language: Option<String>,
+    /// Track title when available.
     pub title: Option<String>,
+    /// Container-level track flags.
     pub flags: TrackFlags,
+    /// Video metadata for video tracks.
     pub video: Option<VideoDescriptor>,
+    /// Audio metadata for audio tracks.
     pub audio: Option<AudioDescriptor>,
+    /// Subtitle metadata for subtitle tracks.
     pub subtitle: Option<SubtitleDescriptor>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+/// Media kind for a track.
 pub enum TrackKind {
+    /// Video track.
     Video,
+    /// Audio track.
     Audio,
+    /// Subtitle track.
     Subtitle,
+    /// Unknown or unsupported track kind.
     Unknown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+/// Normalized codec information for a track.
 pub struct CodecDescriptor {
+    /// Container codec identifier.
     pub id: String,
+    /// Normalized codec family.
     pub family: CodecFamily,
+    /// Optional codec profile.
     pub profile: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+/// Codec families understood by Chroma Engine.
 pub enum CodecFamily {
+    /// H.264/AVC video.
     H264,
+    /// H.265/HEVC video.
     Hevc,
+    /// AV1 video.
     Av1,
+    /// VP9 video.
     Vp9,
+    /// AAC audio.
     Aac,
+    /// Dolby Digital AC-3 audio.
     Ac3,
+    /// Dolby Digital Plus E-AC-3 audio.
     Eac3,
+    /// DTS audio.
     Dts,
+    /// Dolby TrueHD audio.
     TrueHd,
+    /// FLAC audio.
     Flac,
+    /// ALAC audio.
     Alac,
+    /// Opus audio.
     Opus,
+    /// MPEG Layer III audio.
     Mp3,
+    /// Text subtitle codec.
     TextSubtitle,
+    /// Bitmap subtitle codec.
     BitmapSubtitle,
+    /// Unknown or unsupported codec.
     Unknown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+/// Container-level flags attached to a track.
 pub struct TrackFlags {
+    /// Whether this is the default track for its kind.
     pub default: bool,
+    /// Whether this subtitle track is forced.
     pub forced: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+/// Video-specific track metadata.
 pub struct VideoDescriptor {
+    /// Encoded width in pixels.
     pub width: Option<u32>,
+    /// Encoded height in pixels.
     pub height: Option<u32>,
+    /// Average or declared frame rate.
     pub frame_rate: Option<f64>,
+    /// Pixel format when known.
     pub pixel_format: Option<String>,
+    /// Dynamic range classification.
     pub dynamic_range: DynamicRange,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+/// Video dynamic range classification.
 pub enum DynamicRange {
+    /// Standard dynamic range.
     Sdr,
+    /// HDR10.
     Hdr10,
+    /// HDR10+.
     Hdr10Plus,
+    /// Hybrid Log-Gamma.
     Hlg,
+    /// Dolby Vision.
     DolbyVision,
+    /// Unknown dynamic range.
     Unknown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+/// Audio-specific track metadata.
 pub struct AudioDescriptor {
+    /// Channel count.
     pub channels: Option<u32>,
+    /// Sample rate in hertz.
     pub sample_rate: Option<u32>,
+    /// Whether the track carries Dolby Atmos metadata.
     pub atmos: bool,
+    /// Whether the codec is lossless.
     pub lossless: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+/// Subtitle-specific track metadata.
 pub struct SubtitleDescriptor {
+    /// Subtitle representation family.
     pub format: SubtitleFormat,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+/// Subtitle representation family.
 pub enum SubtitleFormat {
+    /// Text subtitle format.
     Text,
+    /// Bitmap subtitle format.
     Bitmap,
+    /// Unknown subtitle format.
     Unknown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+/// Summary of non-track attachments in the source.
 pub struct AttachmentSummary {
+    /// Number of attachments discovered.
     pub count: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+/// Capability summary used to choose direct playback, remux, or transcode.
 pub struct MediaCapabilities {
+    /// Whether all selected tracks can be remuxed without decoding.
     pub can_remux_without_decode: bool,
+    /// Whether the source can be segmented without decoding.
     pub can_segment_without_decode: bool,
+    /// Whether video decode is required for compatible playback.
     pub requires_video_decode: bool,
+    /// Whether audio decode is required for compatible playback.
     pub requires_audio_decode: bool,
+    /// Track ids that Chroma Engine cannot currently carry.
     pub unsupported_track_ids: Vec<String>,
 }
 
+/// Probes a media source and returns normalized metadata for planning.
 pub fn probe_media_source(path: &Path) -> Result<MediaProbe, ProbeError> {
     if !path.exists() {
         return Err(ProbeError::FileNotFound);

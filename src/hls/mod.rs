@@ -35,8 +35,11 @@ const TS_CLOCK: u64 = 90_000;
 const MIN_SEGMENT_MS: u64 = 1_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Options for native HLS generation.
 pub struct HlsOptions {
+    /// Target segment duration in milliseconds.
     pub segment_target_ms: u64,
+    /// Optional semantic audio track id to select.
     pub audio_track_id: Option<String>,
 }
 
@@ -51,29 +54,46 @@ impl Default for HlsOptions {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+/// Files and stream metadata produced by an HLS write.
 pub struct HlsOutput {
+    /// Path to the master playlist.
     pub master_playlist: PathBuf,
+    /// Path to the selected variant media playlist.
     pub media_playlist: PathBuf,
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// Path to the fMP4 init segment when fMP4 output is used.
     pub init_segment: Option<PathBuf>,
+    /// Number of media segments written.
     pub segment_count: usize,
+    /// HLS target duration in seconds.
     pub target_duration_seconds: u64,
+    /// Selected video track id.
     pub video_track_id: String,
+    /// Selected audio track id.
     pub audio_track_id: String,
+    /// Estimated stream bandwidth in bits per second.
     pub bandwidth_bits_per_second: u64,
+    /// Video codec string advertised in the playlist.
     pub video_codec: String,
+    /// Audio codec string advertised in the playlist.
     pub audio_codec: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+/// Metadata for a generated HLS media segment.
 pub struct HlsSegmentInfo {
+    /// Zero-based segment index.
     pub index: usize,
+    /// Segment start timestamp in milliseconds.
     pub start_ms: u64,
+    /// Segment duration in milliseconds.
     pub duration_ms: u64,
+    /// Segment URI relative to its media playlist.
     pub uri: String,
 }
 
+/// Open VOD plan that can mux MPEG-TS or fMP4 segments on demand.
 pub struct HlsVodPlan {
     source: MappedMediaFile,
     tracks: HlsTrackSet,
@@ -82,6 +102,7 @@ pub struct HlsVodPlan {
     bandwidth_bits_per_second: u64,
 }
 
+/// Lightweight HLS playlist plan that does not retain source bytes.
 pub struct HlsVodPlaylistPlan {
     video_track_id: String,
     audio_track_id: String,
@@ -93,6 +114,7 @@ pub struct HlsVodPlaylistPlan {
 }
 
 impl HlsVodPlaylistPlan {
+    /// Opens a source and builds playlist metadata without writing segments.
     pub fn open(input: &Path, options: HlsOptions) -> Result<Self> {
         let source = MappedMediaFile::open(input)?;
         let source_len = source.len();
@@ -118,38 +140,47 @@ impl HlsVodPlaylistPlan {
         }
     }
 
+    /// Returns the number of planned segments.
     pub fn segment_count(&self) -> usize {
         self.windows.len()
     }
 
+    /// Returns the target duration advertised in playlists.
     pub fn target_duration_seconds(&self) -> u64 {
         self.target_duration_seconds
     }
 
+    /// Returns the estimated stream bandwidth in bits per second.
     pub fn bandwidth_bits_per_second(&self) -> u64 {
         self.bandwidth_bits_per_second
     }
 
+    /// Returns the selected video codec string.
     pub fn video_codec(&self) -> &str {
         &self.video_codec
     }
 
+    /// Returns the selected audio codec string.
     pub fn audio_codec(&self) -> &str {
         &self.audio_codec
     }
 
+    /// Returns the selected video track id.
     pub fn video_track_id(&self) -> &str {
         &self.video_track_id
     }
 
+    /// Returns the selected audio track id.
     pub fn audio_track_id(&self) -> &str {
         &self.audio_track_id
     }
 
+    /// Returns metadata for every planned MPEG-TS segment.
     pub fn segments(&self) -> Vec<HlsSegmentInfo> {
         segment_infos(&self.windows)
     }
 
+    /// Returns the master playlist body.
     pub fn master_playlist(&self) -> String {
         master_playlist_body(
             self.video_codec(),
@@ -158,16 +189,19 @@ impl HlsVodPlaylistPlan {
         )
     }
 
+    /// Returns the MPEG-TS media playlist body.
     pub fn media_playlist(&self) -> String {
         media_playlist_for_windows(self.target_duration_seconds, &self.windows)
     }
 
+    /// Returns the fragmented MP4 media playlist body.
     pub fn fmp4_media_playlist(&self) -> String {
         fmp4_media_playlist_for_windows(self.target_duration_seconds, &self.windows)
     }
 }
 
 impl HlsVodPlan {
+    /// Opens a source and builds a segment muxing plan.
     pub fn open(input: &Path, options: HlsOptions) -> Result<Self> {
         let source = MappedMediaFile::open(input)?;
         let bytes = source.as_ref();
@@ -202,38 +236,47 @@ impl HlsVodPlan {
         })
     }
 
+    /// Returns the number of planned segments.
     pub fn segment_count(&self) -> usize {
         self.windows.len()
     }
 
+    /// Returns the target duration advertised in playlists.
     pub fn target_duration_seconds(&self) -> u64 {
         self.target_duration_seconds
     }
 
+    /// Returns the estimated stream bandwidth in bits per second.
     pub fn bandwidth_bits_per_second(&self) -> u64 {
         self.bandwidth_bits_per_second
     }
 
+    /// Returns the selected video codec string.
     pub fn video_codec(&self) -> &str {
         &self.tracks.video.codec_string
     }
 
+    /// Returns the selected audio codec string.
     pub fn audio_codec(&self) -> &str {
         &self.tracks.audio.codec_string
     }
 
+    /// Returns the selected video track id.
     pub fn video_track_id(&self) -> &str {
         &self.tracks.video.id
     }
 
+    /// Returns the selected audio track id.
     pub fn audio_track_id(&self) -> &str {
         &self.tracks.audio.id
     }
 
+    /// Returns metadata for every planned MPEG-TS segment.
     pub fn segments(&self) -> Vec<HlsSegmentInfo> {
         segment_infos(&self.windows)
     }
 
+    /// Returns the master playlist body.
     pub fn master_playlist(&self) -> String {
         master_playlist_body(
             self.video_codec(),
@@ -242,14 +285,17 @@ impl HlsVodPlan {
         )
     }
 
+    /// Returns the MPEG-TS media playlist body.
     pub fn media_playlist(&self) -> String {
         media_playlist_for_windows(self.target_duration_seconds, &self.windows)
     }
 
+    /// Returns the fragmented MP4 media playlist body.
     pub fn fmp4_media_playlist(&self) -> String {
         fmp4_media_playlist_for_windows(self.target_duration_seconds, &self.windows)
     }
 
+    /// Muxes one MPEG-TS segment into memory.
     pub fn mux_segment(&self, index: usize) -> Result<Vec<u8>> {
         let window = self
             .windows
@@ -259,6 +305,7 @@ impl HlsVodPlan {
         mux_segment(self.source.as_ref(), &self.tracks, window)
     }
 
+    /// Writes one MPEG-TS segment to disk.
     pub fn write_segment(&self, index: usize, output: &Path) -> Result<HlsSegmentInfo> {
         let window = self
             .windows
@@ -278,6 +325,7 @@ impl HlsVodPlan {
         })
     }
 
+    /// Writes a range of MPEG-TS segments to `output_dir`.
     pub fn write_segments(
         &self,
         start_index: usize,
@@ -308,10 +356,12 @@ impl HlsVodPlan {
         Ok(written)
     }
 
+    /// Builds the fragmented MP4 init segment.
     pub fn fmp4_init_segment(&self) -> Result<Vec<u8>> {
         fmp4_init_segment_for_tracks(&self.tracks)
     }
 
+    /// Muxes one fragmented MP4 media segment into memory.
     pub fn mux_fmp4_segment(&self, index: usize) -> Result<Vec<u8>> {
         let window = self
             .windows
@@ -321,6 +371,7 @@ impl HlsVodPlan {
         mux_fmp4_segment(self.source.as_ref(), &self.tracks, window)
     }
 
+    /// Writes one fragmented MP4 media segment to disk.
     pub fn write_fmp4_segment(&self, index: usize, output: &Path) -> Result<HlsSegmentInfo> {
         let window = self
             .windows
@@ -340,6 +391,7 @@ impl HlsVodPlan {
         })
     }
 
+    /// Writes a range of fragmented MP4 media segments to `output_dir`.
     pub fn write_fmp4_segments(
         &self,
         start_index: usize,
@@ -442,6 +494,7 @@ struct TimedPayload {
     bytes: Vec<u8>,
 }
 
+/// Writes a complete MPEG-TS HLS VOD package.
 pub fn write_hls_vod(input: &Path, output_dir: &Path, options: HlsOptions) -> Result<HlsOutput> {
     let plan = HlsVodPlan::open(input, options)?;
 
@@ -473,6 +526,7 @@ pub fn write_hls_vod(input: &Path, output_dir: &Path, options: HlsOptions) -> Re
     })
 }
 
+/// Writes a complete fragmented MP4 HLS VOD package.
 pub fn write_hls_fmp4_vod(
     input: &Path,
     output_dir: &Path,
@@ -519,6 +573,7 @@ pub fn write_hls_fmp4_vod(
     })
 }
 
+/// Writes only the fragmented MP4 init segment for a source.
 pub fn write_hls_fmp4_init(input: &Path, output: &Path, options: HlsOptions) -> Result<()> {
     let source = map_input(input)?;
     let bytes = source.as_ref();
@@ -537,6 +592,7 @@ pub fn write_hls_fmp4_init(input: &Path, output: &Path, options: HlsOptions) -> 
     Ok(())
 }
 
+/// Writes one fragmented MP4 media segment for a source.
 pub fn write_hls_fmp4_segment(
     input: &Path,
     index: usize,
@@ -556,6 +612,7 @@ pub fn write_hls_fmp4_segment(
     plan.write_fmp4_segment(index, output)
 }
 
+/// Writes a range of fragmented MP4 media segments for a source.
 pub fn write_hls_fmp4_segments(
     input: &Path,
     output_dir: &Path,
@@ -583,6 +640,7 @@ fn map_input(input: &Path) -> Result<MappedMediaFile> {
     MappedMediaFile::open(input)
 }
 
+/// Writes one MPEG-TS media segment for a source.
 pub fn write_hls_segment(
     input: &Path,
     index: usize,
@@ -599,6 +657,7 @@ pub fn write_hls_segment(
     plan.write_segment(index, output)
 }
 
+/// Writes a range of MPEG-TS media segments for a source.
 pub fn write_hls_segments(
     input: &Path,
     output_dir: &Path,

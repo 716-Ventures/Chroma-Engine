@@ -1,10 +1,15 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// A normalized text subtitle cue using millisecond timing.
 pub struct TextSubtitleCue {
+    /// Inclusive cue start timestamp in milliseconds.
     pub start_ms: u64,
+    /// Exclusive cue end timestamp in milliseconds.
     pub end_ms: u64,
+    /// Cue text with original line breaks preserved.
     pub text: String,
 }
 
+/// Parses SubRip text into normalized subtitle cues.
 pub fn parse_subrip(input: &str) -> Vec<TextSubtitleCue> {
     let normalized = input.replace("\r\n", "\n").replace('\r', "\n");
     normalized
@@ -13,6 +18,7 @@ pub fn parse_subrip(input: &str) -> Vec<TextSubtitleCue> {
         .collect()
 }
 
+/// Renders normalized subtitle cues as a complete WebVTT document.
 pub fn render_webvtt(cues: &[TextSubtitleCue]) -> String {
     let mut out = String::from("WEBVTT\n\n");
     for cue in cues {
@@ -26,6 +32,7 @@ pub fn render_webvtt(cues: &[TextSubtitleCue]) -> String {
     out
 }
 
+/// Splits cues into fixed-duration WebVTT segment documents.
 pub fn segment_webvtt(
     cues: &[TextSubtitleCue],
     segment_ms: u64,
@@ -62,11 +69,17 @@ pub fn segment_webvtt(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// A generated WebVTT media segment.
 pub struct WebVttSegment {
+    /// Zero-based segment index.
     pub index: u32,
+    /// Segment start timestamp in milliseconds.
     pub start_ms: u64,
+    /// Segment duration in milliseconds.
     pub duration_ms: u64,
+    /// Relative URI for the segment body.
     pub uri: String,
+    /// Complete WebVTT body for this segment.
     pub body: String,
 }
 
