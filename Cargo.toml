@@ -1,8 +1,8 @@
 [package]
 name = "chroma-engine"
 version = "0.1.0"
-edition = "2021"
-rust-version = "1.76"
+edition = "2024"
+rust-version = "1.90"
 license = "Proprietary"
 description = "Native Rust media engine for Chroma playback, probing, packet planning, remuxing, and transcoding."
 
@@ -31,3 +31,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 assert_cmd = "2.0"
 insta = { version = "1.40", features = ["json"] }
 tempfile = "3.12"
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }

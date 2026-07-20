@@ -1,9 +1,9 @@
 use crate::{
     container::ContainerKind,
     packet::{
-        extract_packet_payload, packet_samples_for_range, plan_track_chunks, ChunkPlan,
-        ExtractedChunk, NativeChunk, PacketExtractError, PacketRange, PacketRef, TimeDelta,
-        TimePoint, TimeScale,
+        ChunkPlan, ExtractedChunk, NativeChunk, PacketExtractError, PacketRange, PacketRef,
+        TimeDelta, TimePoint, TimeScale, extract_packet_payload, packet_samples_for_range,
+        plan_track_chunks,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -705,7 +705,7 @@ fn parse_stts(payload: &[u8], sample_count: usize) -> Option<Vec<u64>> {
         }
         let count = read_u32(&payload[offset..offset + 4])? as usize;
         let delta = u64::from(read_u32(&payload[offset + 4..offset + 8])?);
-        durations.extend(std::iter::repeat(delta).take(count));
+        durations.extend(std::iter::repeat_n(delta, count));
         offset += 8;
     }
     durations.truncate(sample_count);
@@ -734,7 +734,7 @@ fn parse_ctts(payload: &[u8], sample_count: usize) -> Option<Vec<i64>> {
             1 => i64::from(read_i32(&payload[offset + 4..offset + 8])?),
             _ => return None,
         };
-        offsets.extend(std::iter::repeat(sample_offset).take(count));
+        offsets.extend(std::iter::repeat_n(sample_offset, count));
         offset += 8;
     }
     offsets.truncate(sample_count);
@@ -782,11 +782,7 @@ fn parse_stsc(payload: &[u8]) -> Option<Vec<SampleToChunk>> {
         });
         offset += 12;
     }
-    if out.is_empty() {
-        None
-    } else {
-        Some(out)
-    }
+    if out.is_empty() { None } else { Some(out) }
 }
 
 fn parse_stsz(payload: &[u8]) -> Option<Vec<u32>> {
@@ -1601,6 +1597,7 @@ mod tests {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn trak_with_samples_and_ctts(
         handler: &[u8; 4],
         sample_entry: &[u8; 4],

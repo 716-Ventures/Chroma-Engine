@@ -2,11 +2,13 @@ use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use memmap2::Mmap;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::container::{matroska, mp4, sniff_container, ContainerKind};
+use crate::{
+    container::{ContainerKind, matroska, mp4, sniff_container},
+    source::MappedMediaFile,
+};
 
 #[derive(Debug, Error)]
 pub enum ProbeError {
@@ -201,18 +203,18 @@ pub fn probe_media_source(path: &Path) -> Result<MediaProbe, ProbeError> {
 
     let container = sniff_container(&head[..n]);
     let mapped =
-        unsafe { Mmap::map(&file) }.map_err(|err| ProbeError::MapFailed(err.to_string()))?;
+        MappedMediaFile::open(path).map_err(|err| ProbeError::MapFailed(err.to_string()))?;
 
     let mut duration_ms = None;
     let mut tracks = Vec::new();
     let mut attachment_count = 0;
 
     if matches!(container, ContainerKind::Mp4 | ContainerKind::Mov) {
-        let meta = mp4::parse_basic_metadata(&mapped);
+        let meta = mp4::parse_basic_metadata(mapped.as_ref());
         duration_ms = meta.duration_ms;
         tracks = tracks_from_mp4(&meta);
     } else if matches!(container, ContainerKind::Matroska | ContainerKind::Webm) {
-        let meta = matroska::parse_basic_metadata(&mapped);
+        let meta = matroska::parse_basic_metadata(mapped.as_ref());
         duration_ms = meta.duration_ms;
         attachment_count = meta.attachment_count;
         tracks = tracks_from_matroska(&meta);

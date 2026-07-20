@@ -8,6 +8,7 @@ pub mod playback_manifest;
 pub mod probe;
 pub mod remux;
 pub mod session;
+pub mod source;
 pub mod transcode;
 
-pub use probe::{probe_media_source, MediaProbe, ProbeError};
+pub use probe::{MediaProbe, ProbeError, probe_media_source};

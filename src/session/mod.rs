@@ -252,7 +252,7 @@ fn target_can_use_track(track: &MediaTrack, target: PlaybackTarget) -> bool {
         (TrackKind::Subtitle, PlaybackTarget::Browser | PlaybackTarget::AppleNative) => track
             .subtitle
             .as_ref()
-            .map_or(true, |subtitle| subtitle.format != SubtitleFormat::Bitmap),
+            .is_none_or(|subtitle| subtitle.format != SubtitleFormat::Bitmap),
         _ => true,
     }
 }
@@ -386,10 +386,11 @@ mod tests {
             .find(|stage| stage.id == "decode0")
             .unwrap();
         assert_eq!(decode.track_ids, vec!["v0".to_string(), "a0".to_string()]);
-        assert!(plan
-            .transports
-            .iter()
-            .any(|transport| transport.kind == TransportKind::ChromaSegments));
+        assert!(
+            plan.transports
+                .iter()
+                .any(|transport| transport.kind == TransportKind::ChromaSegments)
+        );
     }
 
     #[test]

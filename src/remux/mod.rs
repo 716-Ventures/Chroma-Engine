@@ -1,8 +1,8 @@
 use std::path::Path;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
-use crate::container::{sniff_container, ContainerKind};
+use crate::container::{ContainerKind, sniff_container};
 
 pub fn remux_mp4(input: &Path, _output: &Path) -> Result<()> {
     let mut file = std::fs::File::open(input)?;

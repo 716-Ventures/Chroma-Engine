@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 use crate::packet::PacketRef;
 
@@ -697,9 +697,11 @@ mod tests {
 
         assert_eq!(top_level_boxes(&fragment), vec![*b"moof", *b"mdat"]);
         let mdat_offset = find_top_level_box(&fragment, b"mdat").expect("mdat") + 8;
-        assert!(fragment
-            .windows(4)
-            .any(|w| w == &(mdat_offset as i32).to_be_bytes()));
+        assert!(
+            fragment
+                .windows(4)
+                .any(|w| w == (mdat_offset as i32).to_be_bytes())
+        );
         assert!(fragment.ends_with(b"test"));
     }
 
@@ -736,12 +738,16 @@ mod tests {
 
         let mdat_payload = find_top_level_box(&fragment, b"mdat").expect("mdat") + 8;
         let audio_payload = mdat_payload + 5;
-        assert!(fragment
-            .windows(4)
-            .any(|w| w == &(mdat_payload as i32).to_be_bytes()));
-        assert!(fragment
-            .windows(4)
-            .any(|w| w == &(audio_payload as i32).to_be_bytes()));
+        assert!(
+            fragment
+                .windows(4)
+                .any(|w| w == (mdat_payload as i32).to_be_bytes())
+        );
+        assert!(
+            fragment
+                .windows(4)
+                .any(|w| w == (audio_payload as i32).to_be_bytes())
+        );
         assert!(fragment.ends_with(b"videoaudio"));
     }
 

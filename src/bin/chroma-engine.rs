@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use chroma_engine::codec::aac::{aac_chunk_to_adts, parse_audio_specific_config};
 use chroma_engine::codec::h264::{avc_chunk_to_annex_b, parse_avc_chunk_nalus};
 use chroma_engine::container::{
@@ -11,18 +11,18 @@ use chroma_engine::container::{
     },
 };
 use chroma_engine::hls::{
-    write_hls_fmp4_init, write_hls_fmp4_segment, write_hls_fmp4_segments, write_hls_fmp4_vod,
-    write_hls_segment, write_hls_segments, write_hls_vod, HlsOptions, HlsSegmentInfo,
-    HlsVodPlaylistPlan,
+    HlsOptions, HlsSegmentInfo, HlsVodPlaylistPlan, write_hls_fmp4_init, write_hls_fmp4_segment,
+    write_hls_fmp4_segments, write_hls_fmp4_vod, write_hls_segment, write_hls_segments,
+    write_hls_vod,
 };
 use chroma_engine::playback_manifest::{
-    build_matroska_playback_manifest, build_mp4_playback_manifest, MatroskaManifestOptions,
-    Mp4ManifestOptions,
+    MatroskaManifestOptions, Mp4ManifestOptions, build_matroska_playback_manifest,
+    build_mp4_playback_manifest,
 };
 use chroma_engine::probe::probe_media_source;
-use chroma_engine::session::{plan_playback, AudioSelection, PlaybackConstraints, PlaybackTarget};
+use chroma_engine::session::{AudioSelection, PlaybackConstraints, PlaybackTarget, plan_playback};
+use chroma_engine::source::MappedMediaFile;
 use clap::{Parser, Subcommand};
-use memmap2::Mmap;
 use serde::Serialize;
 
 #[derive(Debug, Parser)]
@@ -279,12 +279,12 @@ fn main() -> Result<()> {
             track,
             target_ms,
         } => {
-            let source = std::fs::File::open(&file)?;
-            let bytes = unsafe { Mmap::map(&source)? };
-            let plan = if looks_like_mp4(&bytes) {
-                parse_mp4_chunk_plan(&bytes, track.as_deref(), target_ms)
-            } else if looks_like_ebml(&bytes) {
-                parse_matroska_chunk_plan(&bytes, track.as_deref(), target_ms)
+            let source = MappedMediaFile::open(&file)?;
+            let bytes = source.as_ref();
+            let plan = if looks_like_mp4(bytes) {
+                parse_mp4_chunk_plan(bytes, track.as_deref(), target_ms)
+            } else if looks_like_ebml(bytes) {
+                parse_matroska_chunk_plan(bytes, track.as_deref(), target_ms)
             } else {
                 bail!("native packet chunking currently supports MP4/MOV and Matroska/WebM");
             }
@@ -292,12 +292,12 @@ fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&plan)?);
         }
         Command::CodecConfig { file, track } => {
-            let source = std::fs::File::open(&file)?;
-            let bytes = unsafe { Mmap::map(&source)? };
-            if !looks_like_mp4(&bytes) {
+            let source = MappedMediaFile::open(&file)?;
+            let bytes = source.as_ref();
+            if !looks_like_mp4(bytes) {
                 bail!("codec-config currently supports MP4/MOV sample descriptions");
             }
-            let config = parse_mp4_codec_config(&bytes, track.as_deref())
+            let config = parse_mp4_codec_config(bytes, track.as_deref())
                 .ok_or_else(|| anyhow::anyhow!("no matching MP4 codec config found"))?;
             println!("{}", serde_json::to_string_pretty(&config)?);
         }
@@ -306,20 +306,20 @@ fn main() -> Result<()> {
             target_ms,
             include_audio,
         } => {
-            let source = std::fs::File::open(&file)?;
-            let bytes = unsafe { Mmap::map(&source)? };
-            let manifest = if looks_like_mp4(&bytes) {
+            let source = MappedMediaFile::open(&file)?;
+            let bytes = source.as_ref();
+            let manifest = if looks_like_mp4(bytes) {
                 build_mp4_playback_manifest(
-                    &bytes,
+                    bytes,
                     &file,
                     Mp4ManifestOptions {
                         chunk_target_ms: target_ms,
                         include_audio,
                     },
                 )
-            } else if looks_like_ebml(&bytes) {
+            } else if looks_like_ebml(bytes) {
                 build_matroska_playback_manifest(
-                    &bytes,
+                    bytes,
                     &file,
                     MatroskaManifestOptions {
                         chunk_target_ms: target_ms,
@@ -339,19 +339,21 @@ fn main() -> Result<()> {
             chunk_index,
             target_ms,
         } => {
-            let source = std::fs::File::open(&input)?;
-            let bytes = unsafe { Mmap::map(&source)? };
-            let (manifest, payload) = if looks_like_mp4(&bytes) {
-                extract_mp4_chunk(&bytes, track.as_deref(), target_ms, chunk_index)?
-            } else if looks_like_ebml(&bytes) {
+            let source = MappedMediaFile::open(&input)?;
+            let bytes = source.as_ref();
+            let (manifest, payload) = if looks_like_mp4(bytes) {
+                extract_mp4_chunk(bytes, track.as_deref(), target_ms, chunk_index)?
+            } else if looks_like_ebml(bytes) {
                 chroma_engine::container::matroska::extract_chunk(
-                    &bytes,
+                    bytes,
                     track.as_deref(),
                     target_ms,
                     chunk_index,
                 )?
             } else {
-                bail!("native chunk extraction currently supports MP4/MOV and Matroska/WebM packet tables");
+                bail!(
+                    "native chunk extraction currently supports MP4/MOV and Matroska/WebM packet tables"
+                );
             };
             std::fs::write(output, payload)?;
             println!("{}", serde_json::to_string_pretty(&manifest)?);
@@ -364,20 +366,20 @@ fn main() -> Result<()> {
             chunk_count,
             target_ms,
         } => {
-            let source = std::fs::File::open(&input)?;
-            let bytes = unsafe { Mmap::map(&source)? };
-            let written = if looks_like_mp4(&bytes) {
+            let source = MappedMediaFile::open(&input)?;
+            let bytes = source.as_ref();
+            let written = if looks_like_mp4(bytes) {
                 extract_mp4_window(
-                    &bytes,
+                    bytes,
                     &output_dir,
                     track.as_deref(),
                     start_chunk,
                     chunk_count,
                     target_ms,
                 )?
-            } else if looks_like_ebml(&bytes) {
+            } else if looks_like_ebml(bytes) {
                 extract_matroska_window(
-                    &bytes,
+                    bytes,
                     &output_dir,
                     track.as_deref(),
                     start_chunk,
@@ -385,7 +387,9 @@ fn main() -> Result<()> {
                     target_ms,
                 )?
             } else {
-                bail!("native chunk window extraction currently supports MP4/MOV and Matroska/WebM packet tables");
+                bail!(
+                    "native chunk window extraction currently supports MP4/MOV and Matroska/WebM packet tables"
+                );
             };
             println!("{}", serde_json::to_string_pretty(&written)?);
         }
@@ -395,12 +399,12 @@ fn main() -> Result<()> {
             chunk_index,
             target_ms,
         } => {
-            let source = std::fs::File::open(&input)?;
-            let bytes = unsafe { Mmap::map(&source)? };
-            if !looks_like_mp4(&bytes) {
+            let source = MappedMediaFile::open(&input)?;
+            let bytes = source.as_ref();
+            if !looks_like_mp4(bytes) {
                 bail!("h264-nalus currently supports MP4/MOV packet tables");
             }
-            let config = parse_mp4_codec_config(&bytes, track.as_deref())
+            let config = parse_mp4_codec_config(bytes, track.as_deref())
                 .ok_or_else(|| anyhow::anyhow!("no matching MP4 codec config found"))?;
             if config.codec != "h264" {
                 bail!("selected track is {}, not h264", config.codec);
@@ -409,7 +413,7 @@ fn main() -> Result<()> {
                 .nalu_length_size
                 .ok_or_else(|| anyhow::anyhow!("missing AVC NAL length size"))?;
             let (manifest, payload) =
-                extract_mp4_chunk(&bytes, Some(&config.track_id), target_ms, chunk_index)?;
+                extract_mp4_chunk(bytes, Some(&config.track_id), target_ms, chunk_index)?;
             let nalus = parse_avc_chunk_nalus(&payload, &manifest.samples, nalu_length_size)?;
             println!(
                 "{}",
@@ -428,12 +432,12 @@ fn main() -> Result<()> {
             chunk_index,
             target_ms,
         } => {
-            let source = std::fs::File::open(&input)?;
-            let bytes = unsafe { Mmap::map(&source)? };
-            if !looks_like_mp4(&bytes) {
+            let source = MappedMediaFile::open(&input)?;
+            let bytes = source.as_ref();
+            if !looks_like_mp4(bytes) {
                 bail!("h264-annex-b currently supports MP4/MOV packet tables");
             }
-            let config = parse_mp4_codec_config(&bytes, track.as_deref())
+            let config = parse_mp4_codec_config(bytes, track.as_deref())
                 .ok_or_else(|| anyhow::anyhow!("no matching MP4 codec config found"))?;
             if config.codec != "h264" {
                 bail!("selected track is {}, not h264", config.codec);
@@ -442,7 +446,7 @@ fn main() -> Result<()> {
                 .nalu_length_size
                 .ok_or_else(|| anyhow::anyhow!("missing AVC NAL length size"))?;
             let (manifest, payload) =
-                extract_mp4_chunk(&bytes, Some(&config.track_id), target_ms, chunk_index)?;
+                extract_mp4_chunk(bytes, Some(&config.track_id), target_ms, chunk_index)?;
             let annex_b = avc_chunk_to_annex_b(&payload, &manifest.samples, nalu_length_size)?;
             let byte_count = annex_b.len() as u64;
             std::fs::write(output, annex_b)?;
@@ -463,12 +467,12 @@ fn main() -> Result<()> {
             chunk_index,
             target_ms,
         } => {
-            let source = std::fs::File::open(&input)?;
-            let bytes = unsafe { Mmap::map(&source)? };
-            if !looks_like_mp4(&bytes) {
+            let source = MappedMediaFile::open(&input)?;
+            let bytes = source.as_ref();
+            if !looks_like_mp4(bytes) {
                 bail!("aac-adts currently supports MP4/MOV packet tables");
             }
-            let config = parse_mp4_codec_config(&bytes, track.as_deref())
+            let config = parse_mp4_codec_config(bytes, track.as_deref())
                 .ok_or_else(|| anyhow::anyhow!("no matching MP4 codec config found"))?;
             if config.codec != "aac" {
                 bail!("selected track is {}, not aac", config.codec);
@@ -480,7 +484,7 @@ fn main() -> Result<()> {
             let asc = hex_to_bytes(asc_hex)?;
             let aac_config = parse_audio_specific_config(&asc)?;
             let (manifest, payload) =
-                extract_mp4_chunk(&bytes, Some(&config.track_id), target_ms, chunk_index)?;
+                extract_mp4_chunk(bytes, Some(&config.track_id), target_ms, chunk_index)?;
             let adts = aac_chunk_to_adts(&payload, &manifest.samples, aac_config)?;
             let byte_count = adts.len() as u64;
             std::fs::write(output, adts)?;
@@ -725,7 +729,7 @@ struct AacAdtsOutput {
 
 fn hex_to_bytes(hex: &str) -> Result<Vec<u8>> {
     let clean = hex.trim();
-    if clean.len() % 2 != 0 {
+    if !clean.len().is_multiple_of(2) {
         bail!("hex string has odd length");
     }
     let mut out = Vec::with_capacity(clean.len() / 2);

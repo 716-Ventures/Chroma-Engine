@@ -5,10 +5,10 @@ use serde::{Deserialize, Serialize};
 use crate::{
     codec::aac::parse_audio_specific_config,
     container::matroska::{
-        parse_basic_metadata as parse_matroska_basic_metadata,
-        parse_chunk_plan as parse_matroska_chunk_plan, MatroskaTrack, MatroskaTrackKind,
+        MatroskaTrack, MatroskaTrackKind, parse_basic_metadata as parse_matroska_basic_metadata,
+        parse_chunk_plan as parse_matroska_chunk_plan,
     },
-    container::mp4::{parse_basic_metadata, parse_chunk_plan, parse_codec_config, Mp4TrackKind},
+    container::mp4::{Mp4TrackKind, parse_basic_metadata, parse_chunk_plan, parse_codec_config},
     packet::NativeChunk,
 };
 
@@ -477,6 +477,7 @@ mod tests {
         data
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn trak(
         handler: &[u8; 4],
         sample_entry: &[u8; 4],

@@ -1,29 +1,28 @@
 use std::{
-    fs::{create_dir_all, write, File},
+    fs::{create_dir_all, write},
     path::{Path, PathBuf},
 };
 
-use anyhow::{anyhow, bail, Context, Result};
-use memmap2::Mmap;
+use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     codec::{
-        aac::{adts_header, parse_audio_specific_config, AacAudioSpecificConfig},
+        aac::{AacAudioSpecificConfig, adts_header, parse_audio_specific_config},
         ac3::{parse_ac3_specific_box, parse_eac3_specific_box},
-        h264::{avc_sample_to_annex_b, parse_avc_decoder_config, AvcParameterSets},
-        hevc::{hevc_sample_to_annex_b, parse_hevc_decoder_config, HevcDecoderConfig},
+        h264::{AvcParameterSets, avc_sample_to_annex_b, parse_avc_decoder_config},
+        hevc::{HevcDecoderConfig, hevc_sample_to_annex_b, parse_hevc_decoder_config},
     },
     container::{
         matroska::{self, MatroskaTrackKind},
         mp4::{self, Mp4TrackKind},
     },
     fmp4::{
-        decode_time_for_timescale, init_segment, media_fragment,
-        samples_from_packets_with_timescale, Fmp4FragmentTrack, Fmp4SampleEntry, Fmp4Track,
-        Fmp4TrackKind,
+        Fmp4FragmentTrack, Fmp4SampleEntry, Fmp4Track, Fmp4TrackKind, decode_time_for_timescale,
+        init_segment, media_fragment, samples_from_packets_with_timescale,
     },
     packet::{ChunkPlan, PacketRef},
+    source::MappedMediaFile,
 };
 
 const VIDEO_PID: u16 = 0x0100;
@@ -76,7 +75,7 @@ pub struct HlsSegmentInfo {
 }
 
 pub struct HlsVodPlan {
-    source: Mmap,
+    source: MappedMediaFile,
     tracks: HlsTrackSet,
     windows: Vec<SegmentWindow>,
     target_duration_seconds: u64,
@@ -95,13 +94,8 @@ pub struct HlsVodPlaylistPlan {
 
 impl HlsVodPlaylistPlan {
     pub fn open(input: &Path, options: HlsOptions) -> Result<Self> {
-        let file = File::open(input).with_context(|| format!("open {}", input.display()))?;
-        let source_len = file
-            .metadata()
-            .with_context(|| format!("stat {}", input.display()))?
-            .len();
-        let source =
-            unsafe { Mmap::map(&file) }.with_context(|| format!("map {}", input.display()))?;
+        let source = MappedMediaFile::open(input)?;
+        let source_len = source.len();
         let bytes = source.as_ref();
         let segment_target_ms = options.segment_target_ms.max(500);
 
@@ -175,9 +169,7 @@ impl HlsVodPlaylistPlan {
 
 impl HlsVodPlan {
     pub fn open(input: &Path, options: HlsOptions) -> Result<Self> {
-        let file = File::open(input).with_context(|| format!("open {}", input.display()))?;
-        let source =
-            unsafe { Mmap::map(&file) }.with_context(|| format!("map {}", input.display()))?;
+        let source = MappedMediaFile::open(input)?;
         let bytes = source.as_ref();
         let tracks = if mp4::looks_like_mp4(bytes) {
             hls_tracks_from_mp4(bytes, options.audio_track_id.as_deref())?
@@ -587,9 +579,8 @@ pub fn write_hls_fmp4_segments(
     plan.write_fmp4_segments(start_index, count, output_dir)
 }
 
-fn map_input(input: &Path) -> Result<Mmap> {
-    let file = File::open(input).with_context(|| format!("open {}", input.display()))?;
-    unsafe { Mmap::map(&file) }.with_context(|| format!("map {}", input.display()))
+fn map_input(input: &Path) -> Result<MappedMediaFile> {
+    MappedMediaFile::open(input)
 }
 
 pub fn write_hls_segment(
@@ -598,8 +589,7 @@ pub fn write_hls_segment(
     output: &Path,
     options: HlsOptions,
 ) -> Result<HlsSegmentInfo> {
-    let file = File::open(input).with_context(|| format!("open {}", input.display()))?;
-    let source = unsafe { Mmap::map(&file) }.with_context(|| format!("map {}", input.display()))?;
+    let source = MappedMediaFile::open(input)?;
     let bytes = source.as_ref();
     if matroska::looks_like_ebml(bytes) {
         return write_matroska_hls_segment(bytes, index, output, options);
@@ -620,8 +610,7 @@ pub fn write_hls_segments(
         return Ok(Vec::new());
     }
 
-    let file = File::open(input).with_context(|| format!("open {}", input.display()))?;
-    let source = unsafe { Mmap::map(&file) }.with_context(|| format!("map {}", input.display()))?;
+    let source = MappedMediaFile::open(input)?;
     let bytes = source.as_ref();
     if matroska::looks_like_ebml(bytes) {
         let segment_target_ms = options.segment_target_ms.max(500);
@@ -727,11 +716,10 @@ fn is_supported_hls_codec<K>(kind: K, codec: &str) -> bool
 where
     K: Into<HlsTrackKind>,
 {
-    match (kind.into(), codec) {
-        (HlsTrackKind::Video, "h264" | "hevc") => true,
-        (HlsTrackKind::Audio, "aac" | "ac3" | "eac3") => true,
-        _ => false,
-    }
+    matches!(
+        (kind.into(), codec),
+        (HlsTrackKind::Video, "h264" | "hevc") | (HlsTrackKind::Audio, "aac" | "ac3" | "eac3")
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1541,13 +1529,13 @@ fn hls_playlist_plan_from_chunk_plan(
     if windows.is_empty() {
         bail!("native HLS could not build keyframe-aligned segment windows");
     }
-    if let Some(duration_ms) = duration_ms {
-        if let Some(last) = windows.last_mut() {
-            last.end_ms = last
-                .end_ms
-                .max(duration_ms)
-                .max(last.start_ms.saturating_add(1));
-        }
+    if let Some(duration_ms) = duration_ms
+        && let Some(last) = windows.last_mut()
+    {
+        last.end_ms = last
+            .end_ms
+            .max(duration_ms)
+            .max(last.start_ms.saturating_add(1));
     }
     let target_duration_seconds = target_duration_seconds_for_windows(&windows);
     let bandwidth_bits_per_second =
@@ -1644,11 +1632,11 @@ fn collapse_short_windows(windows: Vec<SegmentWindow>, min_duration_ms: u64) -> 
     let mut out: Vec<SegmentWindow> = Vec::with_capacity(windows.len());
     for window in windows {
         let duration = window.end_ms.saturating_sub(window.start_ms);
-        if duration < min_duration_ms {
-            if let Some(last) = out.last_mut() {
-                last.end_ms = window.end_ms;
-                continue;
-            }
+        if duration < min_duration_ms
+            && let Some(last) = out.last_mut()
+        {
+            last.end_ms = window.end_ms;
+            continue;
         }
         out.push(window);
     }
@@ -1949,7 +1937,7 @@ fn packet_to_payload(bytes: &[u8], packet: &PacketRef, kind: &PayloadKind) -> Re
             let mut out = Vec::new();
             if packet.keyframe {
                 for array in &parameter_sets.arrays {
-                    if !matches!(array.nal_unit_type, 32 | 33 | 34) {
+                    if !matches!(array.nal_unit_type, 32..=34) {
                         continue;
                     }
                     for unit in &array.units {
@@ -2356,7 +2344,7 @@ fn default_sample_duration(packets: &[PacketRef]) -> u32 {
 
 fn hex_to_bytes(hex: &str) -> Result<Vec<u8>> {
     let clean = hex.trim();
-    if clean.len() % 2 != 0 {
+    if !clean.len().is_multiple_of(2) {
         bail!("hex string has odd length");
     }
     let mut out = Vec::with_capacity(clean.len() / 2);
@@ -2383,9 +2371,9 @@ mod tests {
     use super::*;
 
     fn test_plan_with_one_window() -> HlsVodPlan {
-        let file = tempfile::tempfile().expect("tempfile");
-        file.set_len(1).expect("size temp file");
-        let source = unsafe { Mmap::map(&file).expect("map temp file") };
+        let file = tempfile::NamedTempFile::new().expect("tempfile");
+        std::fs::write(file.path(), [0_u8]).expect("seed temp file");
+        let source = MappedMediaFile::open(file.path()).expect("map temp file");
         let packet = PacketRef {
             source_offset: 0,
             size: 0,

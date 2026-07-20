@@ -1,8 +1,8 @@
 use thiserror::Error;
 
 use crate::packet::{
-    extract_packet_payload, packet_samples_for_range, ChunkPlan, ExtractedChunk, NativeChunk,
-    PacketExtractError, PacketRange, PacketRef, TimeDelta, TimePoint, TimeScale,
+    ChunkPlan, ExtractedChunk, NativeChunk, PacketExtractError, PacketRange, PacketRef, TimeDelta,
+    TimePoint, TimeScale, extract_packet_payload, packet_samples_for_range,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -405,13 +405,12 @@ fn parse_cue_chunk_plan(
 }
 
 fn find_cues_payload(segment: &[u8]) -> Option<&[u8]> {
-    if let Some(cue_position) = find_cue_position_from_seek_head(segment) {
-        if let Some(cues) = ElementIter::new(segment.get(cue_position..)?)
+    if let Some(cue_position) = find_cue_position_from_seek_head(segment)
+        && let Some(cues) = ElementIter::new(segment.get(cue_position..)?)
             .next()
             .filter(|element| element.id == 0x1c53_bb6b)
-        {
-            return Some(cues.payload);
-        }
+    {
+        return Some(cues.payload);
     }
 
     if segment.len() <= 512 * 1024 * 1024 {
@@ -611,7 +610,7 @@ fn parse_track_entry(payload: &[u8], index: u32) -> Option<MatroskaTrack> {
             0x536e => name = read_string(child.payload),
             0x88 => default = read_uint(child.payload).unwrap_or(0) != 0,
             0x55aa => forced = read_uint(child.payload).unwrap_or(0) != 0,
-            0x23e3_83 => default_duration_ns = read_uint(child.payload),
+            0x0023_e383 => default_duration_ns = read_uint(child.payload),
             0xe0 => {
                 let (w, h) = parse_video(child.payload);
                 width = w;
@@ -960,10 +959,10 @@ fn parse_track_packets(
                 cluster_timecode.saturating_add_signed(i64::from(block.relative_timecode)),
                 timecode_scale,
             );
-            if let Some(prev) = last_pts {
-                if let Some(previous) = packets.last_mut() {
-                    previous.duration = TimeDelta::millis(timestamp_ms.saturating_sub(prev));
-                }
+            if let Some(prev) = last_pts
+                && let Some(previous) = packets.last_mut()
+            {
+                previous.duration = TimeDelta::millis(timestamp_ms.saturating_sub(prev));
             }
             push_block_packets(&mut packets, &block, timestamp_ms, None);
             last_pts = Some(timestamp_ms);
@@ -1276,11 +1275,7 @@ fn read_string(bytes: &[u8]) -> Option<String> {
         .trim_matches(char::from(0))
         .trim()
         .to_string();
-    if s.is_empty() {
-        None
-    } else {
-        Some(s)
-    }
+    if s.is_empty() { None } else { Some(s) }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1496,7 +1491,7 @@ mod tests {
             1,
             1,
             "V_MPEG4/ISO/AVC",
-            &[elem(0x23e3_83, &40_000_000_u64.to_be_bytes()[4..])],
+            &[elem(0x0023_e383, &40_000_000_u64.to_be_bytes()[4..])],
         );
         let tracks = elem(0x1654_ae6b, &video);
         let cluster0 = cluster(

@@ -86,16 +86,20 @@ fn plan_cli_reports_browser_decode_for_mkv_hevc_truehd() {
     assert_eq!(json["constraints"]["target"], "browser");
     assert_eq!(json["selectedTracks"], serde_json::json!(["v0", "a0"]));
     assert_eq!(json["stages"][0]["kind"], "demux");
-    assert!(json["stages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|stage| stage["id"] == "decode0"));
-    assert!(json["transports"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|transport| transport["kind"] == "chromaSegments"));
+    assert!(
+        json["stages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|stage| stage["id"] == "decode0")
+    );
+    assert!(
+        json["transports"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|transport| transport["kind"] == "chromaSegments")
+    );
 }
 
 fn minimal_mp4() -> Vec<u8> {
