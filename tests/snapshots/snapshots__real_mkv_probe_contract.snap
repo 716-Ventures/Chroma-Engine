@@ -39,6 +39,7 @@ expression: probe
         "width": 3840,
         "height": 2160,
         "frameRate": null,
+        "bitrateBps": null,
         "pixelFormat": null,
         "dynamicRange": "unknown"
       },
@@ -65,6 +66,7 @@ expression: probe
       "audio": {
         "channels": 6,
         "sampleRate": 48000,
+        "bitrateBps": null,
         "atmos": false,
         "lossless": false
       },
@@ -90,6 +92,7 @@ expression: probe
       "audio": {
         "channels": 6,
         "sampleRate": 48000,
+        "bitrateBps": null,
         "atmos": false,
         "lossless": false
       },
@@ -115,6 +118,7 @@ expression: probe
       "audio": {
         "channels": 6,
         "sampleRate": 48000,
+        "bitrateBps": null,
         "atmos": false,
         "lossless": false
       },
@@ -140,6 +144,7 @@ expression: probe
       "audio": {
         "channels": 6,
         "sampleRate": 48000,
+        "bitrateBps": null,
         "atmos": false,
         "lossless": false
       },
@@ -165,6 +170,7 @@ expression: probe
       "audio": {
         "channels": 6,
         "sampleRate": 48000,
+        "bitrateBps": null,
         "atmos": false,
         "lossless": false
       },
@@ -190,6 +196,7 @@ expression: probe
       "audio": {
         "channels": 2,
         "sampleRate": 48000,
+        "bitrateBps": null,
         "atmos": false,
         "lossless": false
       },
@@ -215,6 +222,7 @@ expression: probe
       "audio": {
         "channels": 2,
         "sampleRate": 48000,
+        "bitrateBps": null,
         "atmos": false,
         "lossless": false
       },
@@ -240,6 +248,7 @@ expression: probe
       "audio": {
         "channels": 2,
         "sampleRate": 48000,
+        "bitrateBps": null,
         "atmos": false,
         "lossless": false
       },
@@ -265,6 +274,7 @@ expression: probe
       "audio": {
         "channels": 6,
         "sampleRate": 48000,
+        "bitrateBps": null,
         "atmos": false,
         "lossless": false
       },
@@ -290,6 +300,7 @@ expression: probe
       "audio": {
         "channels": 2,
         "sampleRate": 48000,
+        "bitrateBps": null,
         "atmos": false,
         "lossless": false
       },
@@ -315,6 +326,7 @@ expression: probe
       "audio": {
         "channels": 2,
         "sampleRate": 48000,
+        "bitrateBps": null,
         "atmos": false,
         "lossless": false
       },

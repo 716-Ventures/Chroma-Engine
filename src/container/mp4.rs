@@ -28,6 +28,7 @@ pub struct Mp4Track {
     pub duration_ms: Option<u64>,
     pub language: Option<String>,
     pub frame_rate: Option<f64>,
+    pub bitrate_bps: Option<u64>,
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub channels: Option<u32>,
@@ -348,6 +349,7 @@ fn parse_trak(payload: &[u8], index: u32) -> Option<Mp4Track> {
         duration_ms: mdia.duration_ms,
         language: mdia.language,
         frame_rate: mdia.frame_rate,
+        bitrate_bps: mdia.bitrate_bps,
         width,
         height,
         channels: stsd.channels,
@@ -361,6 +363,7 @@ struct MdiaInfo {
     duration_ms: Option<u64>,
     language: Option<String>,
     frame_rate: Option<f64>,
+    bitrate_bps: Option<u64>,
     sample_entry: Option<SampleEntryInfo>,
 }
 
@@ -400,6 +403,7 @@ fn parse_mdia(payload: &[u8]) -> Option<MdiaInfo> {
         duration_ms,
         language,
         frame_rate: frame_rate_from_sample_timing(timescale, sample_timing),
+        bitrate_bps: bitrate_from_sample_timing(timescale, sample_timing),
         sample_entry,
     })
 }
@@ -672,14 +676,16 @@ fn parse_sample_table(stbl: &[u8]) -> Option<SampleTable> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SampleTiming {
     sample_count: u64,
+    total_size_bytes: u64,
     total_duration_units: u64,
 }
 
 fn parse_sample_timing(stbl: &[u8]) -> Option<SampleTiming> {
-    let sample_count = find_atom(stbl, b"stsz").and_then(parse_stsz_sample_count)?;
+    let (sample_count, total_size_bytes) = find_atom(stbl, b"stsz").and_then(parse_stsz_totals)?;
     let total_duration_units = find_atom(stbl, b"stts").and_then(parse_stts_total_duration)?;
     Some(SampleTiming {
         sample_count,
+        total_size_bytes,
         total_duration_units,
     })
 }
@@ -694,6 +700,17 @@ fn frame_rate_from_sample_timing(
         return None;
     }
     Some((timing.sample_count as f64 * timescale as f64) / timing.total_duration_units as f64)
+}
+
+fn bitrate_from_sample_timing(timescale: Option<u32>, timing: Option<SampleTiming>) -> Option<u64> {
+    let timescale = u128::from(timescale?);
+    let timing = timing?;
+    if timescale == 0 || timing.total_size_bytes == 0 || timing.total_duration_units == 0 {
+        return None;
+    }
+    let bits = u128::from(timing.total_size_bytes).saturating_mul(8);
+    let bps = bits.saturating_mul(timescale) / u128::from(timing.total_duration_units);
+    Some(bps.min(u128::from(u64::MAX)) as u64)
 }
 
 fn composition_time(dts: u64, offset: i64) -> u64 {
@@ -864,11 +881,26 @@ fn parse_stsz(payload: &[u8]) -> Option<Vec<u32>> {
     Some(out)
 }
 
-fn parse_stsz_sample_count(payload: &[u8]) -> Option<u64> {
+fn parse_stsz_totals(payload: &[u8]) -> Option<(u64, u64)> {
     if payload.len() < 12 {
         return None;
     }
-    Some(u64::from(read_u32(&payload[8..12])?))
+    let fixed_size = u64::from(read_u32(&payload[4..8])?);
+    let sample_count = u64::from(read_u32(&payload[8..12])?);
+    if fixed_size != 0 {
+        return Some((sample_count, fixed_size.saturating_mul(sample_count)));
+    }
+    let mut offset = 12;
+    let mut total_size_bytes = 0_u64;
+    for _ in 0..sample_count {
+        if offset + 4 > payload.len() {
+            return None;
+        }
+        total_size_bytes =
+            total_size_bytes.saturating_add(u64::from(read_u32(&payload[offset..offset + 4])?));
+        offset += 4;
+    }
+    Some((sample_count, total_size_bytes))
 }
 
 fn parse_stco(payload: &[u8]) -> Option<Vec<u64>> {
@@ -1414,6 +1446,7 @@ mod tests {
         let meta = parse_basic_metadata(&data);
         assert_eq!(meta.tracks.len(), 1);
         assert_eq!(meta.tracks[0].frame_rate, Some(1.0));
+        assert_eq!(meta.tracks[0].bitrate_bps, Some(80));
     }
 
     #[test]

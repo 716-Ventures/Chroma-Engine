@@ -39,6 +39,7 @@ expression: probe
         "width": 1920,
         "height": 1040,
         "frameRate": null,
+        "bitrateBps": null,
         "pixelFormat": null,
         "dynamicRange": "unknown"
       },
@@ -65,6 +66,7 @@ expression: probe
       "audio": {
         "channels": 6,
         "sampleRate": 48000,
+        "bitrateBps": null,
         "atmos": false,
         "lossless": false
       },

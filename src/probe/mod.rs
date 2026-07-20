@@ -207,6 +207,8 @@ pub struct VideoDescriptor {
     pub height: Option<u32>,
     /// Average or declared frame rate.
     pub frame_rate: Option<f64>,
+    /// Average encoded bitrate in bits per second when known.
+    pub bitrate_bps: Option<u64>,
     /// Pixel format when known.
     pub pixel_format: Option<String>,
     /// Dynamic range classification.
@@ -239,6 +241,8 @@ pub struct AudioDescriptor {
     pub channels: Option<u32>,
     /// Sample rate in hertz.
     pub sample_rate: Option<u32>,
+    /// Average encoded bitrate in bits per second when known.
+    pub bitrate_bps: Option<u64>,
     /// Whether the track carries Dolby Atmos metadata.
     pub atmos: bool,
     /// Whether the codec is lossless.
@@ -401,6 +405,7 @@ fn tracks_from_mp4(meta: &mp4::Mp4BasicMetadata) -> Vec<MediaTrack> {
                     width: track.width,
                     height: track.height,
                     frame_rate: track.frame_rate,
+                    bitrate_bps: track.bitrate_bps,
                     channels: track.channels,
                     sample_rate: track.sample_rate,
                 },
@@ -446,6 +451,7 @@ fn tracks_from_matroska(meta: &matroska::MatroskaBasicMetadata) -> Vec<MediaTrac
                     width: track.width,
                     height: track.height,
                     frame_rate: frame_rate_from_default_duration(track.default_duration_ns),
+                    bitrate_bps: None,
                     channels: track.channels,
                     sample_rate: track.sample_rate,
                 },
@@ -472,6 +478,7 @@ struct TrackShape {
     width: Option<u32>,
     height: Option<u32>,
     frame_rate: Option<f64>,
+    bitrate_bps: Option<u64>,
     channels: Option<u32>,
     sample_rate: Option<u32>,
 }
@@ -508,12 +515,14 @@ fn media_track(input: TrackInput) -> MediaTrack {
             width: input.shape.width,
             height: input.shape.height,
             frame_rate: input.shape.frame_rate,
+            bitrate_bps: input.shape.bitrate_bps,
             pixel_format: None,
             dynamic_range: DynamicRange::Unknown,
         }),
         audio: (input.kind == TrackKind::Audio).then_some(AudioDescriptor {
             channels: input.shape.channels,
             sample_rate: input.shape.sample_rate,
+            bitrate_bps: input.shape.bitrate_bps,
             atmos: family == CodecFamily::Eac3,
             lossless: matches!(
                 family,
