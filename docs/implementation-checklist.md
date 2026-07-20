@@ -128,9 +128,9 @@
 - [x] Emit browser-playable or WebCodecs-ready H.264/AAC output for one real MP4. Covered by `scripts/smoke-web-player-output.sh`.
 - [x] Add a GenusServer env-flagged route that serves the Chroma-native manifest and chunks. GenusServer now proxies `/v1/chroma/{sessionId}/...` and the stream sidecar serves Chroma Engine manifests, fMP4 HLS playlists, `init.mp4`, and `.m4s` fragments; smoke-covered by `npm run smoke:chroma-hls --workspace @chroma-server/admin-web -- "/Volumes/TVShows/Big Fat Quiz/Season 2026/Big.Fat.Quiz.S2026E01.The.Big.Fat.Quiz.of.Telly.1080p.ALL4.WEB-DL.AAC2.0.H.264-RAWR.mp4"`.
 - [ ] Run one end-to-end web player test using Chroma Engine output.
-- [ ] Replace host-server playback/probe contracts with Chroma Engine contracts.
+- [x] Replace host-server playback/probe contracts with Chroma Engine contracts. GenusServer analyzer version `5` stores Chroma Engine manifest/facts, exposes targeted per-file refresh, and invalidates stale rows after the corrected `mp4a` codec classification.
 - [x] Run Chroma Engine behind an env flag. GenusServer gates playback selection through `CHROMA_ENGINE_PLAYBACK`; the stream/analyzer binary path is overridable with `CHROMA_ENGINE_BIN`.
 - [x] Add side-by-side diagnostics for Chroma Engine vs legacy media path during migration. GenusServer diagnostics now show FFmpeg/ffprobe, Chroma Engine binary/enabled state, analyzer version, analysis ready/stale/failed/missing counts, and active Chroma playback sessions.
-- [ ] Switch playback sessions to Chroma Engine.
+- [x] Switch playback sessions to Chroma Engine. Verified `media_c75bb70a81774a35964021aacb41f675` starts as `directStream`/`hls-fmp4` with `transcodeReasons=["chroma-engine-hls"]`; DTS-in-`mp4a` movie `media_5995bdbc01e74246be61afcf6a986ed6` no longer receives a fake Chroma-native HLS path.
 - [ ] Switch offline MKV remux to Rust engine.
 - [ ] Remove vendored legacy media binaries once Chroma Engine covers the required native paths.
