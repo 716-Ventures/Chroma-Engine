@@ -1,6 +1,7 @@
 use anyhow::{Result, bail};
 
 use crate::packet::PacketRef;
+use crate::transcode::EncodedAudioFrame;
 
 const MOVIE_TIMESCALE: u32 = 1_000;
 
@@ -186,6 +187,51 @@ pub fn samples_from_packets_with_timescale(
             }
         })
         .collect()
+}
+
+/// Builds one fMP4 fragment track from contiguous encoded audio frames.
+#[allow(
+    dead_code,
+    reason = "native audio encoder backends will use this mux adapter once implemented"
+)]
+pub fn fragment_track_from_encoded_audio_frames(
+    track_id: u32,
+    frames: &[EncodedAudioFrame],
+) -> Result<Fmp4FragmentTrack> {
+    let first = frames
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("fMP4 audio fragment requires at least one frame"))?;
+    let timescale = first.timing.pts.scale;
+    let mut expected_sample = first.timing.start_sample;
+    let mut payload = Vec::new();
+    let mut samples = Vec::with_capacity(frames.len());
+
+    for frame in frames {
+        if frame.timing.pts.scale != timescale || frame.timing.duration.scale != timescale {
+            bail!("encoded audio frame time scales must match inside one fMP4 fragment");
+        }
+        if frame.timing.start_sample != expected_sample || frame.timing.pts.units != expected_sample
+        {
+            bail!("encoded audio frames must be contiguous inside one fMP4 fragment");
+        }
+        let duration = frame.timing.duration.units.max(1).min(u64::from(u32::MAX)) as u32;
+        let size = frame.payload.len().min(u32::MAX as usize) as u32;
+        payload.extend_from_slice(&frame.payload);
+        samples.push(Fmp4Sample {
+            duration,
+            size,
+            flags: 0x0200_0000,
+            composition_time_offset: 0,
+        });
+        expected_sample = expected_sample.saturating_add(u64::from(frame.timing.sample_count));
+    }
+
+    Ok(Fmp4FragmentTrack {
+        track_id,
+        base_decode_time: first.timing.start_sample,
+        samples,
+        payload,
+    })
 }
 
 pub fn decode_time_for_timescale(packet: &PacketRef, timescale: u32) -> u64 {
@@ -941,6 +987,45 @@ mod tests {
     }
 
     #[test]
+    fn builds_fragment_track_from_encoded_audio_frames() {
+        let frames =
+            encoded_audio_frames(&[(48_000, 1_024, b"one".as_slice()), (49_024, 1_024, b"two")]);
+
+        let track =
+            fragment_track_from_encoded_audio_frames(2, &frames).expect("audio fragment track");
+
+        assert_eq!(track.track_id, 2);
+        assert_eq!(track.base_decode_time, 48_000);
+        assert_eq!(track.payload, b"onetwo");
+        assert_eq!(
+            track.samples,
+            vec![
+                Fmp4Sample {
+                    duration: 1_024,
+                    size: 3,
+                    flags: 0x0200_0000,
+                    composition_time_offset: 0,
+                },
+                Fmp4Sample {
+                    duration: 1_024,
+                    size: 3,
+                    flags: 0x0200_0000,
+                    composition_time_offset: 0,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_non_contiguous_encoded_audio_frames() {
+        let frames = encoded_audio_frames(&[(0, 1_024, b"one".as_slice()), (2_048, 1_024, b"gap")]);
+
+        let err = fragment_track_from_encoded_audio_frames(2, &frames).expect_err("reject gap");
+
+        assert!(err.to_string().contains("contiguous"));
+    }
+
+    #[test]
     fn media_fragment_rejects_payload_size_mismatch() {
         let err = media_fragment(
             1,
@@ -1068,5 +1153,32 @@ mod tests {
 
     fn contains_box(bytes: &[u8], name: &[u8; 4]) -> bool {
         bytes.windows(4).any(|w| w == name)
+    }
+
+    fn encoded_audio_frames(frames: &[(u64, u32, &[u8])]) -> Vec<EncodedAudioFrame> {
+        frames
+            .iter()
+            .map(|(start_sample, sample_count, payload)| EncodedAudioFrame {
+                timing: crate::transcode::AudioFrameTiming {
+                    pts: TimePoint {
+                        units: *start_sample,
+                        scale: crate::packet::TimeScale {
+                            units_per_second: 48_000,
+                        },
+                    },
+                    duration: TimeDelta {
+                        units: u64::from(*sample_count),
+                        scale: crate::packet::TimeScale {
+                            units_per_second: 48_000,
+                        },
+                    },
+                    start_sample: *start_sample,
+                    sample_count: *sample_count,
+                    reanchored: false,
+                },
+                payload: payload.to_vec(),
+                discontinuity: false,
+            })
+            .collect()
     }
 }
