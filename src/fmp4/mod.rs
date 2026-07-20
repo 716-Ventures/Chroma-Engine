@@ -395,7 +395,7 @@ fn write_stsd(out: &mut Vec<u8>, track: &Fmp4Track) {
                 codec_config,
                 width,
                 height,
-            } => write_video_sample_entry(out, *b"hvc1", *width, *height, *b"hvcC", codec_config),
+            } => write_hevc_sample_entry(out, *width, *height, codec_config),
             Fmp4SampleEntry::Aac {
                 decoder_config,
                 channel_count,
@@ -467,6 +467,59 @@ fn write_video_sample_entry(
         be_u16(out, 0x0018);
         be_u16(out, 0xffff);
         write_box(out, config_name, |out| out.extend_from_slice(codec_config));
+    });
+}
+
+fn write_hevc_sample_entry(out: &mut Vec<u8>, width: u16, height: u16, codec_config: &[u8]) {
+    write_box(out, *b"hev1", |out| {
+        out.extend_from_slice(&[0; 6]);
+        be_u16(out, 1);
+        be_u16(out, 0);
+        be_u16(out, 0);
+        be_u32(out, 0);
+        be_u32(out, 0);
+        be_u32(out, 0);
+        be_u16(out, width);
+        be_u16(out, height);
+        be_u32(out, 0x0048_0000);
+        be_u32(out, 0x0048_0000);
+        be_u32(out, 0);
+        be_u16(out, 1);
+        out.extend_from_slice(&[0; 32]);
+        be_u16(out, 0x0018);
+        be_u16(out, 0xffff);
+        write_box(out, *b"hvcC", |out| out.extend_from_slice(codec_config));
+        if hevc_config_is_ten_bit_or_higher(codec_config) {
+            write_nclx_colr(out, 9, 16, 9, false);
+        }
+        write_pasp(out, 1, 1);
+    });
+}
+
+fn hevc_config_is_ten_bit_or_higher(codec_config: &[u8]) -> bool {
+    codec_config.get(17).is_some_and(|byte| (byte & 0x07) >= 2)
+}
+
+fn write_nclx_colr(
+    out: &mut Vec<u8>,
+    primaries: u16,
+    transfer_characteristics: u16,
+    matrix_coefficients: u16,
+    full_range: bool,
+) {
+    write_box(out, *b"colr", |out| {
+        out.extend_from_slice(b"nclx");
+        be_u16(out, primaries);
+        be_u16(out, transfer_characteristics);
+        be_u16(out, matrix_coefficients);
+        out.push(if full_range { 0x80 } else { 0x00 });
+    });
+}
+
+fn write_pasp(out: &mut Vec<u8>, h_spacing: u32, v_spacing: u32) {
+    write_box(out, *b"pasp", |out| {
+        be_u32(out, h_spacing.max(1));
+        be_u32(out, v_spacing.max(1));
     });
 }
 
@@ -711,7 +764,7 @@ mod tests {
             default_sample_flags: 0x0101_0000,
             sample_entry: Fmp4SampleEntry::Hevc {
                 codec_config: vec![
-                    1, 1, 0x60, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xf3, 0,
+                    1, 1, 0x60, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xfa, 0, 0, 0, 0xf3, 0,
                 ],
                 width: 3_840,
                 height: 2_160,
@@ -719,11 +772,14 @@ mod tests {
         }])
         .expect("init segment");
 
-        assert!(init.windows(4).any(|w| w == b"hvc1"));
+        assert!(init.windows(4).any(|w| w == b"hev1"));
+        assert!(!init.windows(4).any(|w| w == b"hvc1"));
         assert!(init.windows(4).any(|w| w == b"hvcC"));
+        assert!(init.windows(4).any(|w| w == b"colr"));
+        assert!(init.windows(4).any(|w| w == b"pasp"));
         assert!(init.windows(23).any(|w| {
             w == [
-                1, 1, 0x60, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xf3, 0,
+                1, 1, 0x60, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xfa, 0, 0, 0, 0xf3, 0,
             ]
         }));
     }

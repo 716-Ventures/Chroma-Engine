@@ -414,7 +414,7 @@ fn hevc_codec_string(config: &[u8]) -> Option<String> {
     let compatibility = u32::from_be_bytes(config[2..6].try_into().ok()?);
     let level_idc = config[12];
     Some(format!(
-        "hvc1.{profile_space}{profile_idc}.{:X}.{tier}{level_idc}",
+        "hev1.{profile_space}{profile_idc}.{:X}.{tier}{level_idc}",
         compatibility.reverse_bits()
     ))
 }
@@ -486,7 +486,7 @@ mod tests {
         config[2..6].copy_from_slice(&0x2000_0000_u32.to_be_bytes());
         config[12] = 153;
 
-        assert_eq!(hevc_codec_string(&config).as_deref(), Some("hvc1.2.4.H153"));
+        assert_eq!(hevc_codec_string(&config).as_deref(), Some("hev1.2.4.H153"));
     }
 
     fn fixture_mp4() -> Vec<u8> {

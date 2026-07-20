@@ -2583,7 +2583,7 @@ impl To90Khz for crate::packet::TimeScale {
 
 fn fallback_video_codec_string(codec: &str) -> String {
     match codec {
-        "hevc" => "hvc1.1.6.L120".to_string(),
+        "hevc" => "hev1.1.6.L120".to_string(),
         _ => "avc1.640028".to_string(),
     }
 }
@@ -2637,7 +2637,7 @@ fn matroska_hevc_codec_string(config: &[u8]) -> Option<String> {
     let compatibility = u32::from_be_bytes(config[2..6].try_into().ok()?);
     let level_idc = config[12];
     Some(format!(
-        "hvc1.{profile_space}{profile_idc}.{:X}.{tier}{level_idc}",
+        "hev1.{profile_space}{profile_idc}.{:X}.{tier}{level_idc}",
         compatibility.reverse_bits()
     ))
 }
@@ -2735,7 +2735,7 @@ mod tests {
 
         assert_eq!(
             matroska_hevc_codec_string(&config).as_deref(),
-            Some("hvc1.2.4.H153")
+            Some("hev1.2.4.H153")
         );
     }
 
