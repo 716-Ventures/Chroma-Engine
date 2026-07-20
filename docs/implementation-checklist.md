@@ -130,7 +130,7 @@
 - [ ] Run one end-to-end web player test using Chroma Engine output.
 - [ ] Replace host-server playback/probe contracts with Chroma Engine contracts.
 - [x] Run Chroma Engine behind an env flag. GenusServer gates playback selection through `CHROMA_ENGINE_PLAYBACK`; the stream/analyzer binary path is overridable with `CHROMA_ENGINE_BIN`.
-- [ ] Add side-by-side diagnostics for Chroma Engine vs legacy media path during migration.
+- [x] Add side-by-side diagnostics for Chroma Engine vs legacy media path during migration. GenusServer diagnostics now show FFmpeg/ffprobe, Chroma Engine binary/enabled state, analyzer version, analysis ready/stale/failed/missing counts, and active Chroma playback sessions.
 - [ ] Switch playback sessions to Chroma Engine.
 - [ ] Switch offline MKV remux to Rust engine.
 - [ ] Remove vendored legacy media binaries once Chroma Engine covers the required native paths.
