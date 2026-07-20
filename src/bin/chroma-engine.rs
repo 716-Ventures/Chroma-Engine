@@ -488,6 +488,8 @@ fn main() -> Result<()> {
             let output = HlsPlanOutput {
                 segment_count: plan.segment_count(),
                 target_duration_seconds: plan.target_duration_seconds(),
+                video_track_id: plan.video_track_id().to_string(),
+                audio_track_id: plan.audio_track_id().to_string(),
                 video_codec: plan.video_codec().to_string(),
                 audio_codec: plan.audio_codec().to_string(),
                 master_playlist: plan.master_playlist(),
@@ -550,6 +552,8 @@ fn main() -> Result<()> {
 struct HlsPlanOutput {
     segment_count: usize,
     target_duration_seconds: u64,
+    video_track_id: String,
+    audio_track_id: String,
     video_codec: String,
     audio_codec: String,
     master_playlist: String,

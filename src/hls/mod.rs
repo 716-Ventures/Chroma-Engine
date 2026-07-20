@@ -51,6 +51,8 @@ pub struct HlsOutput {
     pub media_playlist: PathBuf,
     pub segment_count: usize,
     pub target_duration_seconds: u64,
+    pub video_track_id: String,
+    pub audio_track_id: String,
     pub video_codec: String,
     pub audio_codec: String,
 }
@@ -132,6 +134,14 @@ impl HlsVodPlan {
 
     pub fn audio_codec(&self) -> &str {
         &self.tracks.audio.codec_string
+    }
+
+    pub fn video_track_id(&self) -> &str {
+        &self.tracks.video.id
+    }
+
+    pub fn audio_track_id(&self) -> &str {
+        &self.tracks.audio.id
     }
 
     pub fn segments(&self) -> Vec<HlsSegmentInfo> {
@@ -226,6 +236,7 @@ struct HlsTrackSet {
 
 #[derive(Debug, Clone)]
 struct HlsTrack {
+    id: String,
     codec_string: String,
     packets: Vec<PacketRef>,
     payload: PayloadKind,
@@ -284,6 +295,8 @@ pub fn write_hls_vod(input: &Path, output_dir: &Path, options: HlsOptions) -> Re
         media_playlist,
         segment_count: plan.segment_count(),
         target_duration_seconds: plan.target_duration_seconds(),
+        video_track_id: plan.video_track_id().to_string(),
+        audio_track_id: plan.audio_track_id().to_string(),
         video_codec: plan.video_codec().to_string(),
         audio_codec: plan.audio_codec().to_string(),
     })
@@ -479,6 +492,7 @@ fn hls_tracks_from_mp4(
 
     Ok(HlsTrackSet {
         video: HlsTrack {
+            id: video_track_id,
             codec_string: video_config
                 .codec_string
                 .unwrap_or_else(|| fallback_video_codec_string(video_meta.codec.as_str())),
@@ -486,6 +500,7 @@ fn hls_tracks_from_mp4(
             payload: video_payload,
         },
         audio: HlsTrack {
+            id: audio_track_id,
             codec_string: audio_config
                 .codec_string
                 .unwrap_or_else(|| fallback_audio_codec_string(audio_meta.codec.as_str())),
@@ -565,11 +580,13 @@ fn hls_tracks_from_matroska(
 
     Ok(HlsTrackSet {
         video: HlsTrack {
+            id: video_track_id,
             codec_string: matroska_video_codec_string(video),
             packets: video_packets,
             payload: video_payload,
         },
         audio: HlsTrack {
+            id: audio_track_id,
             codec_string: matroska_audio_codec_string(audio),
             packets: audio_packets,
             payload: audio_payload,
@@ -1184,6 +1201,7 @@ mod tests {
             source,
             tracks: HlsTrackSet {
                 video: HlsTrack {
+                    id: "v0".to_string(),
                     codec_string: "avc1.640028".to_string(),
                     packets: vec![packet],
                     payload: PayloadKind::Avc {
@@ -1196,6 +1214,7 @@ mod tests {
                     },
                 },
                 audio: HlsTrack {
+                    id: "a0".to_string(),
                     codec_string: "mp4a.40.2".to_string(),
                     packets: Vec::new(),
                     payload: PayloadKind::Aac {
