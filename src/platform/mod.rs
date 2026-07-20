@@ -165,7 +165,8 @@ pub fn encoder_probe() -> EncoderProbe {
             .iter()
             .map(|encoder| EncoderFailureNote {
                 encoder: encoder.clone(),
-                reason: "native backend not implemented for this OS target".to_string(),
+                reason: "native encode backend is planned but not executable in this build"
+                    .to_string(),
             })
             .collect()
     } else {
@@ -227,46 +228,23 @@ fn default_cpu_profile() -> EncoderProfile {
 }
 
 fn native_encoder_profiles() -> Vec<EncoderProfile> {
-    match std::env::consts::OS {
-        "macos" => vec![
-            EncoderProfile {
-                kind: HardwareKind::VideoToolbox,
-                video_encoder: "chroma-videotoolbox-h264".to_string(),
-                codec: VideoOutputCodec::H264,
-                hwaccel: Some("videotoolbox".to_string()),
-            },
-            EncoderProfile {
-                kind: HardwareKind::VideoToolbox,
-                video_encoder: "chroma-videotoolbox-hevc".to_string(),
-                codec: VideoOutputCodec::Hevc,
-                hwaccel: Some("videotoolbox".to_string()),
-            },
-        ],
-        _ => Vec::new(),
-    }
+    Vec::new()
 }
 
 fn video_backend_matrix() -> Vec<EncoderBackend> {
     match std::env::consts::OS {
         "macos" => vec![
-            available_video_backend(
+            planned_video_backend(
                 HardwareKind::VideoToolbox,
                 VideoOutputCodec::H264,
                 "chroma-videotoolbox-h264",
-                Some("videotoolbox"),
             ),
-            available_video_backend(
+            planned_video_backend(
                 HardwareKind::VideoToolbox,
                 VideoOutputCodec::Hevc,
                 "chroma-videotoolbox-hevc",
-                Some("videotoolbox"),
             ),
-            available_video_backend(
-                HardwareKind::Cpu,
-                VideoOutputCodec::H264,
-                "chroma-cpu-h264",
-                None,
-            ),
+            planned_video_backend(HardwareKind::Cpu, VideoOutputCodec::H264, "chroma-cpu-h264"),
         ],
         "linux" => vec![
             planned_video_backend(
@@ -291,12 +269,7 @@ fn video_backend_matrix() -> Vec<EncoderBackend> {
             ),
             planned_video_backend(HardwareKind::Qsv, VideoOutputCodec::H264, "chroma-qsv-h264"),
             planned_video_backend(HardwareKind::Qsv, VideoOutputCodec::Hevc, "chroma-qsv-hevc"),
-            available_video_backend(
-                HardwareKind::Cpu,
-                VideoOutputCodec::H264,
-                "chroma-cpu-h264",
-                None,
-            ),
+            planned_video_backend(HardwareKind::Cpu, VideoOutputCodec::H264, "chroma-cpu-h264"),
         ],
         "windows" => vec![
             planned_video_backend(
@@ -313,18 +286,12 @@ fn video_backend_matrix() -> Vec<EncoderBackend> {
             planned_video_backend(HardwareKind::Qsv, VideoOutputCodec::Hevc, "chroma-qsv-hevc"),
             planned_video_backend(HardwareKind::Amf, VideoOutputCodec::H264, "chroma-amf-h264"),
             planned_video_backend(HardwareKind::Amf, VideoOutputCodec::Hevc, "chroma-amf-hevc"),
-            available_video_backend(
-                HardwareKind::Cpu,
-                VideoOutputCodec::H264,
-                "chroma-cpu-h264",
-                None,
-            ),
+            planned_video_backend(HardwareKind::Cpu, VideoOutputCodec::H264, "chroma-cpu-h264"),
         ],
-        _ => vec![available_video_backend(
+        _ => vec![planned_video_backend(
             HardwareKind::Cpu,
             VideoOutputCodec::H264,
             "chroma-cpu-h264",
-            None,
         )],
     }
 }
@@ -339,26 +306,12 @@ fn audio_backend_matrix() -> Vec<AudioEncoderBackend> {
     .map(|(codec, encoder)| AudioEncoderBackend {
         codec,
         encoder: encoder.to_string(),
-        available: true,
-        unavailable_reason: None,
+        available: false,
+        unavailable_reason: Some(
+            "native audio encode backend is planned but not executable in this build".to_string(),
+        ),
     })
     .collect()
-}
-
-fn available_video_backend(
-    kind: HardwareKind,
-    codec: VideoOutputCodec,
-    video_encoder: &str,
-    hwaccel: Option<&str>,
-) -> EncoderBackend {
-    EncoderBackend {
-        kind,
-        codec,
-        video_encoder: video_encoder.to_string(),
-        hwaccel: hwaccel.map(ToOwned::to_owned),
-        available: true,
-        unavailable_reason: None,
-    }
 }
 
 fn planned_video_backend(
@@ -370,10 +323,10 @@ fn planned_video_backend(
         kind,
         codec,
         video_encoder: video_encoder.to_string(),
-        hwaccel: Some(format!("{kind:?}").to_lowercase()),
+        hwaccel: (kind != HardwareKind::Cpu).then(|| format!("{kind:?}").to_lowercase()),
         available: false,
         unavailable_reason: Some(
-            "backend planned for this OS family but not wired in this build".to_string(),
+            "native video encode backend is planned but not executable in this build".to_string(),
         ),
     }
 }
@@ -415,24 +368,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn encoder_probe_uses_native_profiles_when_available() {
+    fn encoder_probe_reports_only_executable_profiles() {
         let probe = encoder_probe();
         assert_eq!(probe.considered_encoders, native_candidate_names());
-        if std::env::consts::OS == "macos" {
-            assert_eq!(probe.profile.kind, HardwareKind::VideoToolbox);
-            assert_eq!(probe.profile.codec, VideoOutputCodec::H264);
-            assert!(
-                probe
-                    .alternatives
-                    .iter()
-                    .any(|profile| profile.codec == VideoOutputCodec::Hevc)
-            );
-            assert!(probe.failure_notes.is_empty());
-        } else {
-            assert_eq!(probe.profile.kind, HardwareKind::Cpu);
-            assert!(probe.alternatives.is_empty());
-            assert_eq!(probe.failure_notes.len(), probe.considered_encoders.len());
-        }
+        assert_eq!(probe.profile.kind, HardwareKind::Cpu);
+        assert_eq!(probe.profile.codec, VideoOutputCodec::H264);
+        assert!(probe.alternatives.is_empty());
+        assert_eq!(probe.failure_notes.len(), probe.considered_encoders.len());
     }
 
     #[test]
@@ -443,24 +385,24 @@ mod tests {
     }
 
     #[test]
-    fn backend_plan_includes_audio_bridges_and_cpu_fallback() {
+    fn backend_plan_includes_planned_audio_bridges_and_cpu_fallback() {
         let plan = encoder_backend_plan();
 
         assert_eq!(plan.cpu_fallback.kind, HardwareKind::Cpu);
         assert!(
             plan.audio_backends
                 .iter()
-                .any(|backend| backend.codec == AudioCodec::Aac && backend.available)
+                .any(|backend| backend.codec == AudioCodec::Aac && !backend.available)
         );
         assert!(
             plan.audio_backends
                 .iter()
-                .any(|backend| backend.codec == AudioCodec::Ac3 && backend.available)
+                .any(|backend| backend.codec == AudioCodec::Ac3 && !backend.available)
         );
         assert!(
             plan.audio_backends
                 .iter()
-                .any(|backend| backend.codec == AudioCodec::Eac3 && backend.available)
+                .any(|backend| backend.codec == AudioCodec::Eac3 && !backend.available)
         );
     }
 
@@ -472,19 +414,19 @@ mod tests {
             assert!(plan.video_backends.iter().any(|backend| {
                 backend.kind == HardwareKind::VideoToolbox
                     && backend.codec == VideoOutputCodec::H264
-                    && backend.available
+                    && !backend.available
             }));
             assert!(plan.video_backends.iter().any(|backend| {
                 backend.kind == HardwareKind::VideoToolbox
                     && backend.codec == VideoOutputCodec::Hevc
-                    && backend.available
+                    && !backend.available
             }));
-            assert_eq!(plan.warmup_tasks.len(), 2);
+            assert!(plan.warmup_tasks.is_empty());
         } else {
             assert!(
                 plan.video_backends
                     .iter()
-                    .any(|backend| backend.kind == HardwareKind::Cpu && backend.available)
+                    .any(|backend| backend.kind == HardwareKind::Cpu && !backend.available)
             );
         }
     }

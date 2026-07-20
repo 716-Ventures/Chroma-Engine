@@ -112,14 +112,14 @@
 ## Transcode
 
 - [x] Platform capability probe without shelling out to FFmpeg.
-- [x] macOS VideoToolbox H.264 encode.
-- [x] macOS VideoToolbox HEVC encode.
-- [x] AAC audio encode.
-- [x] AC-3/E-AC-3 bridge encode.
+- [ ] macOS VideoToolbox H.264 encode. Planned in the backend matrix, but not reported as executable until Chroma Engine owns a real native encode path.
+- [ ] macOS VideoToolbox HEVC encode. Planned in the backend matrix, but not reported as executable until Chroma Engine owns a real native encode path.
+- [ ] AAC audio encode. Planned in the backend matrix, but not reported as executable until Chroma Engine owns a real native audio encode path.
+- [ ] AC-3/E-AC-3 bridge encode. Planned in the backend matrix, but not reported as executable until Chroma Engine owns the decode/bridge/encode path.
 - [x] CPU fallback decision.
 - [x] Linux VAAPI/NVENC/QSV path.
 - [x] Windows NVENC/QSV/AMF path.
-- [x] Warm encoder session initialization.
+- [ ] Warm encoder session initialization. `warmup` is intentionally a no-op while native encode backends are planned but not executable.
 
 ## Integration
 
