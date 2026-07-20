@@ -6,6 +6,7 @@ use thiserror::Error;
 use crate::{
     container::{ContainerKind, matroska, mp4, sniff_container},
     error::EngineErrorCode,
+    hls::{HlsOptions, HlsVodPlan},
     packet::{PacketExtractError, PacketPayloadSpan, PacketRange, packet_payload_spans},
 };
 
@@ -114,6 +115,9 @@ pub enum RemuxError {
     /// Packet payload extraction failed.
     #[error("packet extraction failed: {0}")]
     Packet(#[from] PacketExtractError),
+    /// fMP4 remux planning or muxing failed.
+    #[error("fragmented MP4 remux failed: {0}")]
+    Fmp4(String),
 }
 
 impl RemuxError {
@@ -127,6 +131,7 @@ impl RemuxError {
             Self::NotImplemented(_) => EngineErrorCode::OperationNotImplemented,
             Self::NoTrack => EngineErrorCode::NoMatchingTrack,
             Self::Packet(_) => EngineErrorCode::SourceReadFailed,
+            Self::Fmp4(_) => EngineErrorCode::HlsUnsupported,
         }
     }
 }
@@ -201,18 +206,39 @@ pub fn write_faststart_mp4<W: Write>(
     Ok(())
 }
 
-/// Remuxes a supported source into MP4 without decoding.
-pub fn remux_mp4(input: &Path, _output: &Path) -> Result<(), RemuxError> {
+/// Remuxes a supported source into fragmented MP4 without decoding.
+pub fn remux_mp4(input: &Path, output: &Path) -> Result<(), RemuxError> {
     let mut file = std::fs::File::open(input)?;
     let mut head = [0_u8; 4096];
     let n = std::io::Read::read(&mut file, &mut head)?;
     let kind = sniff_container(&head[..n]);
     match kind {
         ContainerKind::Matroska | ContainerKind::Webm | ContainerKind::Mp4 | ContainerKind::Mov => {
-            Err(RemuxError::NotImplemented(kind.public_name()))
+            write_fragmented_mp4(input, output)
         }
         ContainerKind::Unknown => Err(RemuxError::UnsupportedContainer(kind.public_name())),
     }
+}
+
+fn write_fragmented_mp4(input: &Path, output: &Path) -> Result<(), RemuxError> {
+    let plan = HlsVodPlan::open(input, HlsOptions::default())
+        .map_err(|err| RemuxError::Fmp4(err.to_string()))?;
+    if let Some(parent) = output.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut writer = std::io::BufWriter::new(std::fs::File::create(output)?);
+    let init = plan
+        .fmp4_init_segment()
+        .map_err(|err| RemuxError::Fmp4(err.to_string()))?;
+    writer.write_all(&init)?;
+    for index in 0..plan.segment_count() {
+        let segment = plan
+            .mux_fmp4_segment(index)
+            .map_err(|err| RemuxError::Fmp4(err.to_string()))?;
+        writer.write_all(&segment)?;
+    }
+    writer.flush()?;
+    Ok(())
 }
 
 fn metadata_from_mp4(container: ContainerKind, meta: &mp4::Mp4BasicMetadata) -> RemuxMetadata {
