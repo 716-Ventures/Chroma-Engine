@@ -32,7 +32,8 @@ pub use codec::subtitles::{
 pub use container::{ContainerKind, sniff_container};
 pub use error::EngineErrorCode;
 pub use hls::{
-    HlsError, HlsOptions, HlsOutput, HlsSegmentInfo, HlsVodPlan, HlsVodPlaylistPlan,
+    HlsAudioRendition, HlsAudioRenditionInput, HlsError, HlsMultiAudioOutputPlan, HlsOptions,
+    HlsOutput, HlsSegmentInfo, HlsVodPlan, HlsVodPlaylistPlan, plan_multi_audio_hls_outputs,
     write_hls_fmp4_init, write_hls_fmp4_segment, write_hls_fmp4_segments, write_hls_fmp4_vod,
     write_hls_segment, write_hls_segments, write_hls_vod,
 };

@@ -142,6 +142,62 @@ pub struct HlsOutput {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+/// Input metadata for one HLS audio rendition.
+pub struct HlsAudioRenditionInput {
+    /// Stable source audio track id.
+    pub track_id: String,
+    /// RFC 6381 codec string for this audio rendition.
+    pub codec: String,
+    /// Audio language when available.
+    pub language: Option<String>,
+    /// Human-readable audio rendition name when available.
+    pub name: Option<String>,
+    /// Whether this rendition should be marked as default.
+    pub default: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+/// One audio rendition emitted in a multi-audio HLS plan.
+pub struct HlsAudioRendition {
+    /// Stable source audio track id.
+    pub track_id: String,
+    /// RFC 6381 codec string for this audio rendition.
+    pub codec: String,
+    /// Audio language when available.
+    pub language: Option<String>,
+    /// Human-readable audio rendition name.
+    pub name: String,
+    /// Whether this rendition is the default selection.
+    pub default: bool,
+    /// Relative URI for this rendition's media playlist.
+    pub playlist_uri: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+/// Multi-audio HLS output plan with one shared video playlist.
+pub struct HlsMultiAudioOutputPlan {
+    /// Selected video track id.
+    pub video_track_id: String,
+    /// RFC 6381 video codec string.
+    pub video_codec: String,
+    /// Relative URI for the shared video media playlist.
+    pub video_playlist_uri: String,
+    /// HLS audio group id referenced by the variant stream.
+    pub audio_group_id: String,
+    /// One audio rendition per selected audio track.
+    pub audio_renditions: Vec<HlsAudioRendition>,
+    /// Estimated variant bandwidth in bits per second.
+    pub bandwidth_bits_per_second: u64,
+    /// Complete HLS master playlist body.
+    pub master_playlist: String,
+    /// Whether this plan duplicates video work per audio rendition.
+    pub duplicates_video_work: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 /// Metadata for a generated HLS media segment.
 pub struct HlsSegmentInfo {
     /// Zero-based segment index.
@@ -161,6 +217,53 @@ pub struct HlsVodPlan {
     windows: Vec<SegmentWindow>,
     target_duration_seconds: u64,
     bandwidth_bits_per_second: u64,
+}
+
+/// Builds a multi-audio HLS master playlist plan around one shared video playlist.
+pub fn plan_multi_audio_hls_outputs(
+    video_track_id: &str,
+    video_codec: &str,
+    bandwidth_bits_per_second: u64,
+    audio_inputs: &[HlsAudioRenditionInput],
+) -> HlsMultiAudioOutputPlan {
+    let audio_group_id = "audio".to_string();
+    let video_playlist_uri = "video/playlist.m3u8".to_string();
+    let audio_renditions = audio_inputs
+        .iter()
+        .enumerate()
+        .map(|(index, input)| {
+            let safe_id = safe_hls_path_component(&input.track_id);
+            HlsAudioRendition {
+                track_id: input.track_id.clone(),
+                codec: input.codec.clone(),
+                language: input.language.clone(),
+                name: input
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| format!("Audio {}", index + 1)),
+                default: input.default,
+                playlist_uri: format!("audio/{safe_id}/playlist.m3u8"),
+            }
+        })
+        .collect::<Vec<_>>();
+    let master_playlist = multi_audio_master_playlist_body(
+        video_codec,
+        bandwidth_bits_per_second,
+        &audio_group_id,
+        &video_playlist_uri,
+        &audio_renditions,
+    );
+
+    HlsMultiAudioOutputPlan {
+        video_track_id: video_track_id.to_string(),
+        video_codec: video_codec.to_string(),
+        video_playlist_uri,
+        audio_group_id,
+        audio_renditions,
+        bandwidth_bits_per_second,
+        master_playlist,
+        duplicates_video_work: false,
+    }
 }
 
 /// Lightweight HLS playlist plan that does not retain source bytes.
@@ -506,6 +609,74 @@ fn fmp4_media_playlist_for_windows(
         .map(|window| window.end_ms.saturating_sub(window.start_ms).max(1))
         .collect();
     fmp4_media_playlist_body(target_duration_seconds, &durations)
+}
+
+fn multi_audio_master_playlist_body(
+    video_codec: &str,
+    bandwidth_bits_per_second: u64,
+    audio_group_id: &str,
+    video_playlist_uri: &str,
+    audio_renditions: &[HlsAudioRendition],
+) -> String {
+    let mut out = String::from("#EXTM3U\n#EXT-X-VERSION:7\n");
+    for rendition in audio_renditions {
+        let default = if rendition.default { "YES" } else { "NO" };
+        let autoselect = if rendition.language.is_some() {
+            "YES"
+        } else {
+            "NO"
+        };
+        let language = rendition
+            .language
+            .as_ref()
+            .map(|value| format!(",LANGUAGE=\"{}\"", escape_hls_attr(value)))
+            .unwrap_or_default();
+        out.push_str(&format!(
+            "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"{}\",NAME=\"{}\"{language},DEFAULT={default},AUTOSELECT={autoselect},URI=\"{}\"\n",
+            escape_hls_attr(audio_group_id),
+            escape_hls_attr(&rendition.name),
+            escape_hls_attr(&rendition.playlist_uri),
+        ));
+    }
+
+    let codecs = hls_variant_codecs(video_codec, audio_renditions);
+    out.push_str(&format!(
+        "#EXT-X-STREAM-INF:BANDWIDTH={bandwidth_bits_per_second},CODECS=\"{codecs}\",AUDIO=\"{}\"\n{video_playlist_uri}\n",
+        escape_hls_attr(audio_group_id)
+    ));
+    out
+}
+
+fn hls_variant_codecs(video_codec: &str, audio_renditions: &[HlsAudioRendition]) -> String {
+    let mut codecs = vec![video_codec.to_string()];
+    for rendition in audio_renditions {
+        if !codecs.iter().any(|codec| codec == &rendition.codec) {
+            codecs.push(rendition.codec.clone());
+        }
+    }
+    codecs.join(",")
+}
+
+fn escape_hls_attr(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn safe_hls_path_component(value: &str) -> String {
+    let safe = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if safe.is_empty() {
+        "audio".to_string()
+    } else {
+        safe
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -2510,6 +2681,47 @@ mod tests {
         assert_eq!(
             HlsError::Unsupported("unsupported".to_string()).code(),
             EngineErrorCode::HlsUnsupported
+        );
+    }
+
+    #[test]
+    fn multi_audio_hls_plan_uses_one_shared_video_playlist() {
+        let plan = plan_multi_audio_hls_outputs(
+            "v0",
+            "avc1.640028",
+            8_000_000,
+            &[
+                HlsAudioRenditionInput {
+                    track_id: "a0".to_string(),
+                    codec: "mp4a.40.2".to_string(),
+                    language: Some("eng".to_string()),
+                    name: Some("English 5.1".to_string()),
+                    default: true,
+                },
+                HlsAudioRenditionInput {
+                    track_id: "director/commentary".to_string(),
+                    codec: "ac-3".to_string(),
+                    language: Some("eng".to_string()),
+                    name: Some("Commentary".to_string()),
+                    default: false,
+                },
+            ],
+        );
+
+        assert_eq!(plan.video_track_id, "v0");
+        assert_eq!(plan.video_playlist_uri, "video/playlist.m3u8");
+        assert!(!plan.duplicates_video_work);
+        assert_eq!(plan.audio_renditions.len(), 2);
+        assert_eq!(
+            plan.audio_renditions[1].playlist_uri,
+            "audio/director_commentary/playlist.m3u8"
+        );
+        assert!(plan.master_playlist.contains("#EXT-X-MEDIA:TYPE=AUDIO"));
+        assert!(plan.master_playlist.contains("AUDIO=\"audio\""));
+        assert!(plan.master_playlist.contains("video/playlist.m3u8"));
+        assert!(
+            plan.master_playlist
+                .contains("CODECS=\"avc1.640028,mp4a.40.2,ac-3\"")
         );
     }
 
