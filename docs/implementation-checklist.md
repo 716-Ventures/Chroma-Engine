@@ -10,7 +10,7 @@
 - [x] Define native playback `plan` command with target-specific pipeline stages.
 - [x] Add real-library smoke script for mounted media under `/Volumes/Movies`, `/Volumes/TV Shows`, or `/Volumes/TVShows`.
 - [x] Add sanitized real-library probe fixtures from `/Volumes/Movies` and `/Volumes/TVShows`.
-- [ ] Add Chroma-native snapshot tests for representative MP4/MKV/HDR/audio/subtitle combinations.
+- [x] Add Chroma-native snapshot tests for representative MP4/MKV/HDR/audio/subtitle combinations.
 
 ## Engineering Quality
 

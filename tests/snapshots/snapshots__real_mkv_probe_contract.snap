@@ -1,0 +1,752 @@
+---
+source: tests/snapshots.rs
+expression: probe
+---
+{
+  "schemaVersion": 1,
+  "engine": {
+    "name": "chroma-engine",
+    "version": "<crate-version>"
+  },
+  "source": {
+    "path": "fixtures://movies/gremlins.mkv",
+    "sizeBytes": 0,
+    "container": {
+      "family": "matroska",
+      "brand": "matroska",
+      "extensionHint": "mkv"
+    }
+  },
+  "durationMs": 6372715,
+  "tracks": [
+    {
+      "id": "v0",
+      "index": 0,
+      "kind": "video",
+      "codec": {
+        "id": "hevc",
+        "family": "hevc",
+        "profile": null
+      },
+      "durationMs": 6372715,
+      "language": null,
+      "title": null,
+      "flags": {
+        "default": false,
+        "forced": false
+      },
+      "video": {
+        "width": 3840,
+        "height": 2160,
+        "frameRate": null,
+        "pixelFormat": null,
+        "dynamicRange": "unknown"
+      },
+      "audio": null,
+      "subtitle": null
+    },
+    {
+      "id": "a0",
+      "index": 1,
+      "kind": "audio",
+      "codec": {
+        "id": "dts",
+        "family": "dts",
+        "profile": null
+      },
+      "durationMs": 6372715,
+      "language": null,
+      "title": null,
+      "flags": {
+        "default": false,
+        "forced": false
+      },
+      "video": null,
+      "audio": {
+        "channels": 6,
+        "sampleRate": 48000,
+        "atmos": false,
+        "lossless": false
+      },
+      "subtitle": null
+    },
+    {
+      "id": "a1",
+      "index": 2,
+      "kind": "audio",
+      "codec": {
+        "id": "ac3",
+        "family": "ac3",
+        "profile": null
+      },
+      "durationMs": 6372715,
+      "language": "fre",
+      "title": null,
+      "flags": {
+        "default": false,
+        "forced": false
+      },
+      "video": null,
+      "audio": {
+        "channels": 6,
+        "sampleRate": 48000,
+        "atmos": false,
+        "lossless": false
+      },
+      "subtitle": null
+    },
+    {
+      "id": "a2",
+      "index": 3,
+      "kind": "audio",
+      "codec": {
+        "id": "ac3",
+        "family": "ac3",
+        "profile": null
+      },
+      "durationMs": 6372715,
+      "language": "ger",
+      "title": null,
+      "flags": {
+        "default": false,
+        "forced": false
+      },
+      "video": null,
+      "audio": {
+        "channels": 6,
+        "sampleRate": 48000,
+        "atmos": false,
+        "lossless": false
+      },
+      "subtitle": null
+    },
+    {
+      "id": "a3",
+      "index": 4,
+      "kind": "audio",
+      "codec": {
+        "id": "ac3",
+        "family": "ac3",
+        "profile": null
+      },
+      "durationMs": 6372715,
+      "language": "ita",
+      "title": null,
+      "flags": {
+        "default": false,
+        "forced": false
+      },
+      "video": null,
+      "audio": {
+        "channels": 6,
+        "sampleRate": 48000,
+        "atmos": false,
+        "lossless": false
+      },
+      "subtitle": null
+    },
+    {
+      "id": "a4",
+      "index": 5,
+      "kind": "audio",
+      "codec": {
+        "id": "ac3",
+        "family": "ac3",
+        "profile": null
+      },
+      "durationMs": 6372715,
+      "language": "spa",
+      "title": null,
+      "flags": {
+        "default": false,
+        "forced": false
+      },
+      "video": null,
+      "audio": {
+        "channels": 6,
+        "sampleRate": 48000,
+        "atmos": false,
+        "lossless": false
+      },
+      "subtitle": null
+    },
+    {
+      "id": "a5",
+      "index": 6,
+      "kind": "audio",
+      "codec": {
+        "id": "ac3",
+        "family": "ac3",
+        "profile": null
+      },
+      "durationMs": 6372715,
+      "language": "spa",
+      "title": null,
+      "flags": {
+        "default": false,
+        "forced": false
+      },
+      "video": null,
+      "audio": {
+        "channels": 2,
+        "sampleRate": 48000,
+        "atmos": false,
+        "lossless": false
+      },
+      "subtitle": null
+    },
+    {
+      "id": "a6",
+      "index": 7,
+      "kind": "audio",
+      "codec": {
+        "id": "ac3",
+        "family": "ac3",
+        "profile": null
+      },
+      "durationMs": 6372715,
+      "language": "cze",
+      "title": null,
+      "flags": {
+        "default": false,
+        "forced": false
+      },
+      "video": null,
+      "audio": {
+        "channels": 2,
+        "sampleRate": 48000,
+        "atmos": false,
+        "lossless": false
+      },
+      "subtitle": null
+    },
+    {
+      "id": "a7",
+      "index": 8,
+      "kind": "audio",
+      "codec": {
+        "id": "ac3",
+        "family": "ac3",
+        "profile": null
+      },
+      "durationMs": 6372715,
+      "language": "hun",
+      "title": null,
+      "flags": {
+        "default": false,
+        "forced": false
+      },
+      "video": null,
+      "audio": {
+        "channels": 2,
+        "sampleRate": 48000,
+        "atmos": false,
+        "lossless": false
+      },
+      "subtitle": null
+    },
+    {
+      "id": "a8",
+      "index": 9,
+      "kind": "audio",
+      "codec": {
+        "id": "ac3",
+        "family": "ac3",
+        "profile": null
+      },
+      "durationMs": 6372715,
+      "language": "rus",
+      "title": null,
+      "flags": {
+        "default": false,
+        "forced": false
+      },
+      "video": null,
+      "audio": {
+        "channels": 6,
+        "sampleRate": 48000,
+        "atmos": false,
+        "lossless": false
+      },
+      "subtitle": null
+    },
+    {
+      "id": "a9",
+      "index": 10,
+      "kind": "audio",
+      "codec": {
+        "id": "ac3",
+        "family": "ac3",
+        "profile": null
+      },
+      "durationMs": 6372715,
+      "language": null,
+      "title": null,
+      "flags": {
+        "default": false,
+        "forced": false
+      },
+      "video": null,
+      "audio": {
+        "channels": 2,
+        "sampleRate": 48000,
+        "atmos": false,
+        "lossless": false
+      },
+      "subtitle": null
+    },
+    {
+      "id": "a10",
+      "index": 11,
+      "kind": "audio",
+      "codec": {
+        "id": "ac3",
+        "family": "ac3",
+        "profile": null
+      },
+      "durationMs": 6372715,
+      "language": null,
+      "title": null,
+      "flags": {
+        "default": false,
+        "forced": false
+      },
+      "video": null,
+      "audio": {
+        "channels": 2,
+        "sampleRate": 48000,
+        "atmos": false,
+        "lossless": false
+      },
+      "subtitle": null
+    },
+    {
+      "id": "s0",
+      "index": 12,
+      "kind": "subtitle",
+      "codec": {
+        "id": "subrip",
+        "family": "textSubtitle",
+        "profile": null
+      },
+      "durationMs": 6372715,
+      "language": null,
+      "title": null,
+      "flags": {
+        "default": false,
+        "forced": false
+      },
+      "video": null,
+      "audio": null,
+      "subtitle": {
+        "format": "text"
+      }
+    },
+    {
+      "id": "s1",
+      "index": 13,
+      "kind": "subtitle",
+      "codec": {
+        "id": "hdmv_pgs_subtitle",
+        "family": "bitmapSubtitle",
+        "profile": null
+      },
+      "durationMs": 6372715,
+      "language": null,
+      "title": null,
+      "flags": {
+        "default": false,
+        "forced": false
+      },
+      "video": null,
+      "audio": null,
+      "subtitle": {
+        "format": "bitmap"
+      }
+    },
+    {
+      "id": "s2",
+      "index": 14,
+      "kind": "subtitle",
+      "codec": {
+        "id": "hdmv_pgs_subtitle",
+        "family": "bitmapSubtitle",
+        "profile": null
+      },
+      "durationMs": 6372715,
+      "language": "fre",
+      "title": null,
+      "flags": {
+        "default": false,
+        "forced": false
+      },
+      "video": null,
+      "audio": null,
+      "subtitle": {
+        "format": "bitmap"
+      }
+    },
+    {
+      "id": "s3",
+      "index": 15,
+      "kind": "subtitle",
+      "codec": {
+        "id": "hdmv_pgs_subtitle",
+        "family": "bitmapSubtitle",
+        "profile": null
+      },
+      "durationMs": 6372715,
+      "language": "ger",
+      "title": null,
+      "flags": {
+        "default": false,
+        "forced": false
+      },
+      "video": null,
+      "audio": null,
+      "subtitle": {
+        "format": "bitmap"
+      }
+    },
+    {
+      "id": "s4",
+      "index": 16,
+      "kind": "subtitle",
+      "codec": {
+        "id": "hdmv_pgs_subtitle",
+        "family": "bitmapSubtitle",
+        "profile": null
+      },
+      "durationMs": 6372715,
+      "language": "ita",
+      "title": null,
+      "flags": {
+        "default": false,
+        "forced": false
+      },
+      "video": null,
+      "audio": null,
+      "subtitle": {
+        "format": "bitmap"
+      }
+    },
+    {
+      "id": "s5",
+      "index": 17,
+      "kind": "subtitle",
+      "codec": {
+        "id": "hdmv_pgs_subtitle",
+        "family": "bitmapSubtitle",
+        "profile": null
+      },
+      "durationMs": 6372715,
+      "language": "spa",
+      "title": null,
+      "flags": {
+        "default": false,
+        "forced": false
+      },
+      "video": null,
+      "audio": null,
+      "subtitle": {
+        "format": "bitmap"
+      }
+    },
+    {
+      "id": "s6",
+      "index": 18,
+      "kind": "subtitle",
+      "codec": {
+        "id": "hdmv_pgs_subtitle",
+        "family": "bitmapSubtitle",
+        "profile": null
+      },
+      "durationMs": 6372715,
+      "language": "dut",
+      "title": null,
+      "flags": {
+        "default": false,
+        "forced": false
+      },
+      "video": null,
+      "audio": null,
+      "subtitle": {
+        "format": "bitmap"
+      }
+    },
+    {
+      "id": "s7",
+      "index": 19,
+      "kind": "subtitle",
+      "codec": {
+        "id": "hdmv_pgs_subtitle",
+        "family": "bitmapSubtitle",
+        "profile": null
+      },
+      "durationMs": 6372715,
+      "language": "chi",
+      "title": null,
+      "flags": {
+        "default": false,
+        "forced": false
+      },
+      "video": null,
+      "audio": null,
+      "subtitle": {
+        "format": "bitmap"
+      }
+    },
+    {
+      "id": "s8",
+      "index": 20,
+      "kind": "subtitle",
+      "codec": {
+        "id": "hdmv_pgs_subtitle",
+        "family": "bitmapSubtitle",
+        "profile": null
+      },
+      "durationMs": 6372715,
+      "language": "spa",
+      "title": null,
+      "flags": {
+        "default": false,
+        "forced": false
+      },
+      "video": null,
+      "audio": null,
+      "subtitle": {
+        "format": "bitmap"
+      }
+    },
+    {
+      "id": "s9",
+      "index": 21,
+      "kind": "subtitle",
+      "codec": {
+        "id": "hdmv_pgs_subtitle",
+        "family": "bitmapSubtitle",
+        "profile": null
+      },
+      "durationMs": 6372715,
+      "language": "cze",
+      "title": null,
+      "flags": {
+        "default": false,
+        "forced": false
+      },
+      "video": null,
+      "audio": null,
+      "subtitle": {
+        "format": "bitmap"
+      }
+    },
+    {
+      "id": "s10",
+      "index": 22,
+      "kind": "subtitle",
+      "codec": {
+        "id": "hdmv_pgs_subtitle",
+        "family": "bitmapSubtitle",
+        "profile": null
+      },
+      "durationMs": 6372715,
+      "language": "dan",
+      "title": null,
+      "flags": {
+        "default": false,
+        "forced": false
+      },
+      "video": null,
+      "audio": null,
+      "subtitle": {
+        "format": "bitmap"
+      }
+    },
+    {
+      "id": "s11",
+      "index": 23,
+      "kind": "subtitle",
+      "codec": {
+        "id": "hdmv_pgs_subtitle",
+        "family": "bitmapSubtitle",
+        "profile": null
+      },
+      "durationMs": 6372715,
+      "language": "fin",
+      "title": null,
+      "flags": {
+        "default": false,
+        "forced": false
+      },
+      "video": null,
+      "audio": null,
+      "subtitle": {
+        "format": "bitmap"
+      }
+    },
+    {
+      "id": "s12",
+      "index": 24,
+      "kind": "subtitle",
+      "codec": {
+        "id": "hdmv_pgs_subtitle",
+        "family": "bitmapSubtitle",
+        "profile": null
+      },
+      "durationMs": 6372715,
+      "language": "hun",
+      "title": null,
+      "flags": {
+        "default": false,
+        "forced": false
+      },
+      "video": null,
+      "audio": null,
+      "subtitle": {
+        "format": "bitmap"
+      }
+    },
+    {
+      "id": "s13",
+      "index": 25,
+      "kind": "subtitle",
+      "codec": {
+        "id": "hdmv_pgs_subtitle",
+        "family": "bitmapSubtitle",
+        "profile": null
+      },
+      "durationMs": 6372715,
+      "language": "nor",
+      "title": null,
+      "flags": {
+        "default": false,
+        "forced": false
+      },
+      "video": null,
+      "audio": null,
+      "subtitle": {
+        "format": "bitmap"
+      }
+    },
+    {
+      "id": "s14",
+      "index": 26,
+      "kind": "subtitle",
+      "codec": {
+        "id": "hdmv_pgs_subtitle",
+        "family": "bitmapSubtitle",
+        "profile": null
+      },
+      "durationMs": 6372715,
+      "language": "rus",
+      "title": null,
+      "flags": {
+        "default": false,
+        "forced": false
+      },
+      "video": null,
+      "audio": null,
+      "subtitle": {
+        "format": "bitmap"
+      }
+    },
+    {
+      "id": "s15",
+      "index": 27,
+      "kind": "subtitle",
+      "codec": {
+        "id": "hdmv_pgs_subtitle",
+        "family": "bitmapSubtitle",
+        "profile": null
+      },
+      "durationMs": 6372715,
+      "language": "swe",
+      "title": null,
+      "flags": {
+        "default": false,
+        "forced": false
+      },
+      "video": null,
+      "audio": null,
+      "subtitle": {
+        "format": "bitmap"
+      }
+    },
+    {
+      "id": "s16",
+      "index": 28,
+      "kind": "subtitle",
+      "codec": {
+        "id": "hdmv_pgs_subtitle",
+        "family": "bitmapSubtitle",
+        "profile": null
+      },
+      "durationMs": 6372715,
+      "language": "tha",
+      "title": null,
+      "flags": {
+        "default": false,
+        "forced": false
+      },
+      "video": null,
+      "audio": null,
+      "subtitle": {
+        "format": "bitmap"
+      }
+    },
+    {
+      "id": "s17",
+      "index": 29,
+      "kind": "subtitle",
+      "codec": {
+        "id": "hdmv_pgs_subtitle",
+        "family": "bitmapSubtitle",
+        "profile": null
+      },
+      "durationMs": 6372715,
+      "language": "chi",
+      "title": null,
+      "flags": {
+        "default": false,
+        "forced": false
+      },
+      "video": null,
+      "audio": null,
+      "subtitle": {
+        "format": "bitmap"
+      }
+    },
+    {
+      "id": "s18",
+      "index": 30,
+      "kind": "subtitle",
+      "codec": {
+        "id": "hdmv_pgs_subtitle",
+        "family": "bitmapSubtitle",
+        "profile": null
+      },
+      "durationMs": 6372715,
+      "language": "chi",
+      "title": null,
+      "flags": {
+        "default": false,
+        "forced": false
+      },
+      "video": null,
+      "audio": null,
+      "subtitle": {
+        "format": "bitmap"
+      }
+    }
+  ],
+  "attachments": {
+    "count": 4
+  },
+  "capabilities": {
+    "canRemuxWithoutDecode": true,
+    "canSegmentWithoutDecode": true,
+    "requiresVideoDecode": false,
+    "requiresAudioDecode": false,
+    "unsupportedTrackIds": []
+  }
+}

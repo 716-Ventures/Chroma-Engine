@@ -1,0 +1,101 @@
+---
+source: tests/snapshots.rs
+expression: plan
+---
+{
+  "schemaVersion": 1,
+  "sourcePath": "fixtures://movies/gremlins.mkv",
+  "durationMs": 6372715,
+  "selectedTracks": [
+    "v0",
+    "a0",
+    "s0"
+  ],
+  "stages": [
+    {
+      "id": "demux0",
+      "kind": "demux",
+      "trackIds": [
+        "v0",
+        "a0",
+        "s0"
+      ],
+      "mode": "shared",
+      "reason": "one shared demux stage feeds every selected track"
+    },
+    {
+      "id": "packet-copy0",
+      "kind": "packetFilter",
+      "trackIds": [
+        "s0"
+      ],
+      "mode": "copy",
+      "reason": "copy-compatible tracks stay compressed and bypass decode"
+    },
+    {
+      "id": "decode0",
+      "kind": "decode",
+      "trackIds": [
+        "v0",
+        "a0"
+      ],
+      "mode": "decode",
+      "reason": "target cannot consume these compressed track families directly"
+    },
+    {
+      "id": "encode0",
+      "kind": "encode",
+      "trackIds": [
+        "v0",
+        "a0"
+      ],
+      "mode": "encode",
+      "reason": "decoded tracks need a target-native compressed representation"
+    },
+    {
+      "id": "subtitle-text0",
+      "kind": "subtitleTransform",
+      "trackIds": [
+        "s0"
+      ],
+      "mode": "transform",
+      "reason": "text subtitles are normalized once and can feed multiple transports"
+    },
+    {
+      "id": "mux0",
+      "kind": "mux",
+      "trackIds": [
+        "v0",
+        "a0",
+        "s0"
+      ],
+      "mode": "shared",
+      "reason": "one mux graph owns timing, interleaving, and transport fanout"
+    }
+  ],
+  "transports": [
+    {
+      "id": "chroma-segments0",
+      "kind": "chromaSegments",
+      "sourceStageId": "mux0",
+      "notes": [
+        "compressed timed chunks for copy-first playback"
+      ]
+    },
+    {
+      "id": "chroma-frames0",
+      "kind": "chromaFrames",
+      "sourceStageId": "decode0",
+      "notes": [
+        "available only when a plan contains decode stages"
+      ]
+    }
+  ],
+  "constraints": {
+    "target": "browser",
+    "maxVideoPixels": null,
+    "preferCopy": true,
+    "audioSelection": "primary",
+    "includeSubtitles": true
+  }
+}

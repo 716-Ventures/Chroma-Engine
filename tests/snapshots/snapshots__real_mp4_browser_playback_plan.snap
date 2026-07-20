@@ -1,0 +1,80 @@
+---
+source: tests/snapshots.rs
+expression: plan
+---
+{
+  "schemaVersion": 1,
+  "sourcePath": "fixtures://movies/renoir.mp4",
+  "durationMs": 6698275,
+  "selectedTracks": [
+    "v0",
+    "a0",
+    "s0",
+    "s1"
+  ],
+  "stages": [
+    {
+      "id": "demux0",
+      "kind": "demux",
+      "trackIds": [
+        "v0",
+        "a0",
+        "s0",
+        "s1"
+      ],
+      "mode": "shared",
+      "reason": "one shared demux stage feeds every selected track"
+    },
+    {
+      "id": "packet-copy0",
+      "kind": "packetFilter",
+      "trackIds": [
+        "v0",
+        "a0",
+        "s0",
+        "s1"
+      ],
+      "mode": "copy",
+      "reason": "copy-compatible tracks stay compressed and bypass decode"
+    },
+    {
+      "id": "subtitle-text0",
+      "kind": "subtitleTransform",
+      "trackIds": [
+        "s0",
+        "s1"
+      ],
+      "mode": "transform",
+      "reason": "text subtitles are normalized once and can feed multiple transports"
+    },
+    {
+      "id": "mux0",
+      "kind": "mux",
+      "trackIds": [
+        "v0",
+        "a0",
+        "s0",
+        "s1"
+      ],
+      "mode": "shared",
+      "reason": "one mux graph owns timing, interleaving, and transport fanout"
+    }
+  ],
+  "transports": [
+    {
+      "id": "chroma-segments0",
+      "kind": "chromaSegments",
+      "sourceStageId": "mux0",
+      "notes": [
+        "compressed timed chunks for copy-first playback"
+      ]
+    }
+  ],
+  "constraints": {
+    "target": "browser",
+    "maxVideoPixels": null,
+    "preferCopy": true,
+    "audioSelection": "primary",
+    "includeSubtitles": true
+  }
+}
