@@ -38,6 +38,10 @@ pub enum Fmp4SampleEntry {
         channel_count: u16,
         sample_rate: u32,
     },
+    Mp3 {
+        channel_count: u16,
+        sample_rate: u32,
+    },
     Ac3 {
         dac3: [u8; 3],
         channel_count: u16,
@@ -45,6 +49,16 @@ pub enum Fmp4SampleEntry {
     },
     Eac3 {
         dec3: Vec<u8>,
+        channel_count: u16,
+        sample_rate: u32,
+    },
+    Flac {
+        stream_info: Vec<u8>,
+        channel_count: u16,
+        sample_rate: u32,
+    },
+    Alac {
+        codec_config: Vec<u8>,
         channel_count: u16,
         sample_rate: u32,
     },
@@ -247,8 +261,11 @@ fn write_tkhd(out: &mut Vec<u8>, track: &Fmp4Track) {
                 be_u32(out, u32::from(*height) << 16);
             }
             Fmp4SampleEntry::Aac { .. }
+            | Fmp4SampleEntry::Mp3 { .. }
             | Fmp4SampleEntry::Ac3 { .. }
-            | Fmp4SampleEntry::Eac3 { .. } => {
+            | Fmp4SampleEntry::Eac3 { .. }
+            | Fmp4SampleEntry::Flac { .. }
+            | Fmp4SampleEntry::Alac { .. } => {
                 be_u32(out, 0);
                 be_u32(out, 0);
             }
@@ -338,7 +355,13 @@ fn write_stsd(out: &mut Vec<u8>, track: &Fmp4Track) {
                 channel_count,
                 sample_rate,
             } => write_audio_sample_entry(out, *b"mp4a", *channel_count, *sample_rate, |out| {
-                write_esds(out, decoder_config)
+                write_esds(out, 0x40, decoder_config)
+            }),
+            Fmp4SampleEntry::Mp3 {
+                channel_count,
+                sample_rate,
+            } => write_audio_sample_entry(out, *b"mp4a", *channel_count, *sample_rate, |out| {
+                write_esds(out, 0x6b, &[])
             }),
             Fmp4SampleEntry::Ac3 {
                 dac3,
@@ -353,6 +376,20 @@ fn write_stsd(out: &mut Vec<u8>, track: &Fmp4Track) {
                 sample_rate,
             } => write_audio_sample_entry(out, *b"ec-3", *channel_count, *sample_rate, |out| {
                 write_box(out, *b"dec3", |out| out.extend_from_slice(dec3));
+            }),
+            Fmp4SampleEntry::Flac {
+                stream_info,
+                channel_count,
+                sample_rate,
+            } => write_audio_sample_entry(out, *b"fLaC", *channel_count, *sample_rate, |out| {
+                write_dfla(out, stream_info);
+            }),
+            Fmp4SampleEntry::Alac {
+                codec_config,
+                channel_count,
+                sample_rate,
+            } => write_audio_sample_entry(out, *b"alac", *channel_count, *sample_rate, |out| {
+                write_box(out, *b"alac", |out| out.extend_from_slice(codec_config));
             }),
         }
     });
@@ -411,21 +448,31 @@ fn write_audio_sample_entry<F>(
     });
 }
 
-fn write_esds(out: &mut Vec<u8>, decoder_config: &[u8]) {
+fn write_esds(out: &mut Vec<u8>, object_type: u8, decoder_config: &[u8]) {
     write_full_box(out, *b"esds", 0, 0, |out| {
         write_descriptor(out, 0x03, |out| {
             be_u16(out, 0);
             out.push(0);
             write_descriptor(out, 0x04, |out| {
-                out.push(0x40);
+                out.push(object_type);
                 out.push(0x15);
                 out.extend_from_slice(&[0, 0, 0]);
                 be_u32(out, 0);
                 be_u32(out, 0);
-                write_descriptor(out, 0x05, |out| out.extend_from_slice(decoder_config));
+                if !decoder_config.is_empty() {
+                    write_descriptor(out, 0x05, |out| out.extend_from_slice(decoder_config));
+                }
             });
             write_descriptor(out, 0x06, |out| out.push(2));
         });
+    });
+}
+
+fn write_dfla(out: &mut Vec<u8>, stream_info: &[u8]) {
+    write_full_box(out, *b"dfLa", 0, 0, |out| {
+        out.push(0x80);
+        be_u24(out, stream_info.len() as u32);
+        out.extend_from_slice(stream_info);
     });
 }
 
@@ -533,6 +580,14 @@ where
 
 fn be_u16(out: &mut Vec<u8>, v: u16) {
     out.extend_from_slice(&v.to_be_bytes());
+}
+
+fn be_u24(out: &mut Vec<u8>, v: u32) {
+    out.extend_from_slice(&[
+        ((v >> 16) & 0xff) as u8,
+        ((v >> 8) & 0xff) as u8,
+        (v & 0xff) as u8,
+    ]);
 }
 
 fn be_u32(out: &mut Vec<u8>, v: u32) {
@@ -669,6 +724,73 @@ mod tests {
         assert!(init.windows(4).any(|w| w == b"ec-3"));
         assert!(init.windows(4).any(|w| w == b"dec3"));
         assert!(init.windows(5).any(|w| w == [0x00, 0x10, 0x20, 0x0f, 0x00]));
+    }
+
+    #[test]
+    fn init_segment_writes_mp3_sample_description() {
+        let init = init_segment(&[Fmp4Track {
+            id: 2,
+            kind: Fmp4TrackKind::Audio,
+            timescale: 48_000,
+            default_sample_duration: 1_152,
+            default_sample_size: 0,
+            default_sample_flags: 0x0200_0000,
+            sample_entry: Fmp4SampleEntry::Mp3 {
+                channel_count: 2,
+                sample_rate: 48_000,
+            },
+        }])
+        .expect("init segment");
+
+        assert!(init.windows(4).any(|w| w == b"mp4a"));
+        assert!(init.windows(4).any(|w| w == b"esds"));
+        assert!(init.windows(1).any(|w| w == [0x6b]));
+    }
+
+    #[test]
+    fn init_segment_writes_flac_sample_description() {
+        let stream_info = vec![0x11; 34];
+        let init = init_segment(&[Fmp4Track {
+            id: 2,
+            kind: Fmp4TrackKind::Audio,
+            timescale: 48_000,
+            default_sample_duration: 4_096,
+            default_sample_size: 0,
+            default_sample_flags: 0x0200_0000,
+            sample_entry: Fmp4SampleEntry::Flac {
+                stream_info: stream_info.clone(),
+                channel_count: 2,
+                sample_rate: 48_000,
+            },
+        }])
+        .expect("init segment");
+
+        assert!(init.windows(4).any(|w| w == b"fLaC"));
+        assert!(init.windows(4).any(|w| w == b"dfLa"));
+        assert!(init.windows(4).any(|w| w == [0x80, 0, 0, 34]));
+        assert!(init.windows(34).any(|w| w == stream_info));
+    }
+
+    #[test]
+    fn init_segment_writes_alac_sample_description() {
+        let config = vec![0; 24];
+        let init = init_segment(&[Fmp4Track {
+            id: 2,
+            kind: Fmp4TrackKind::Audio,
+            timescale: 48_000,
+            default_sample_duration: 4_096,
+            default_sample_size: 0,
+            default_sample_flags: 0x0200_0000,
+            sample_entry: Fmp4SampleEntry::Alac {
+                codec_config: config.clone(),
+                channel_count: 2,
+                sample_rate: 48_000,
+            },
+        }])
+        .expect("init segment");
+
+        assert!(init.windows(4).filter(|w| *w == b"alac").count() >= 2);
+        assert!(init.windows(24).any(|w| w == config));
     }
 
     #[test]

@@ -539,6 +539,7 @@ enum PayloadKind {
     },
     Ac3,
     Eac3,
+    RawAudio,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -968,6 +969,7 @@ fn hls_tracks_from_mp4(
         }
         "ac3" => PayloadKind::Ac3,
         "eac3" => PayloadKind::Eac3,
+        "mp3" | "flac" | "alac" => PayloadKind::RawAudio,
         other => bail!("native HLS MP4 audio codec {other} is not supported"),
     };
     let audio_fmp4_sample_entry = match audio_meta.codec.as_str() {
@@ -1003,6 +1005,30 @@ fn hls_tracks_from_mp4(
                 sample_rate: audio_meta.sample_rate.unwrap_or(48_000),
             })
         }
+        "mp3" => Some(Fmp4SampleEntry::Mp3 {
+            channel_count: clamped_u16(audio_meta.channels.unwrap_or(2)),
+            sample_rate: audio_meta.sample_rate.unwrap_or(48_000),
+        }),
+        "flac" => Some(Fmp4SampleEntry::Flac {
+            stream_info: hex_to_bytes(
+                audio_config
+                    .description_hex
+                    .as_deref()
+                    .ok_or_else(|| anyhow!("missing FLAC STREAMINFO"))?,
+            )?,
+            channel_count: clamped_u16(audio_meta.channels.unwrap_or(2)),
+            sample_rate: audio_meta.sample_rate.unwrap_or(48_000),
+        }),
+        "alac" => Some(Fmp4SampleEntry::Alac {
+            codec_config: hex_to_bytes(
+                audio_config
+                    .description_hex
+                    .as_deref()
+                    .ok_or_else(|| anyhow!("missing ALAC codec config"))?,
+            )?,
+            channel_count: clamped_u16(audio_meta.channels.unwrap_or(2)),
+            sample_rate: audio_meta.sample_rate.unwrap_or(48_000),
+        }),
         _ => None,
     };
     let video_timescale = video_packets
@@ -1123,6 +1149,7 @@ fn hls_tracks_from_matroska(
         }
         "ac3" => PayloadKind::Ac3,
         "eac3" => PayloadKind::Eac3,
+        "mp3" | "flac" | "alac" => PayloadKind::RawAudio,
         other => bail!("native HLS Matroska audio codec {other} is not supported"),
     };
     let audio_fmp4_sample_entry = match audio.codec.as_str() {
@@ -1156,6 +1183,26 @@ fn hls_tracks_from_matroska(
                 sample_rate: audio.sample_rate.unwrap_or(48_000),
             })
         }
+        "mp3" => Some(Fmp4SampleEntry::Mp3 {
+            channel_count: clamped_u16(audio.channels.unwrap_or(2)),
+            sample_rate: audio.sample_rate.unwrap_or(48_000),
+        }),
+        "flac" => Some(Fmp4SampleEntry::Flac {
+            stream_info: audio
+                .codec_private
+                .clone()
+                .ok_or_else(|| anyhow!("missing Matroska FLAC STREAMINFO"))?,
+            channel_count: clamped_u16(audio.channels.unwrap_or(2)),
+            sample_rate: audio.sample_rate.unwrap_or(48_000),
+        }),
+        "alac" => Some(Fmp4SampleEntry::Alac {
+            codec_config: audio
+                .codec_private
+                .clone()
+                .ok_or_else(|| anyhow!("missing Matroska ALAC codec config"))?,
+            channel_count: clamped_u16(audio.channels.unwrap_or(2)),
+            sample_rate: audio.sample_rate.unwrap_or(48_000),
+        }),
         _ => None,
     };
 
@@ -1226,6 +1273,7 @@ fn matroska_audio_payload_kind(track: &matroska::MatroskaTrack) -> Result<Payloa
         }
         "ac3" => Ok(PayloadKind::Ac3),
         "eac3" => Ok(PayloadKind::Eac3),
+        "mp3" | "flac" | "alac" => Ok(PayloadKind::RawAudio),
         other => bail!("native HLS Matroska audio codec {other} is not supported"),
     }
 }
@@ -1290,6 +1338,26 @@ fn matroska_audio_fmp4_sample_entry(
                 sample_rate: track.sample_rate.unwrap_or(48_000),
             }))
         }
+        "mp3" => Ok(Some(Fmp4SampleEntry::Mp3 {
+            channel_count: clamped_u16(track.channels.unwrap_or(2)),
+            sample_rate: track.sample_rate.unwrap_or(48_000),
+        })),
+        "flac" => Ok(Some(Fmp4SampleEntry::Flac {
+            stream_info: track
+                .codec_private
+                .clone()
+                .ok_or_else(|| anyhow!("missing Matroska FLAC STREAMINFO"))?,
+            channel_count: clamped_u16(track.channels.unwrap_or(2)),
+            sample_rate: track.sample_rate.unwrap_or(48_000),
+        })),
+        "alac" => Ok(Some(Fmp4SampleEntry::Alac {
+            codec_config: track
+                .codec_private
+                .clone()
+                .ok_or_else(|| anyhow!("missing Matroska ALAC codec config"))?,
+            channel_count: clamped_u16(track.channels.unwrap_or(2)),
+            sample_rate: track.sample_rate.unwrap_or(48_000),
+        })),
         _ => Ok(None),
     }
 }
@@ -2064,7 +2132,9 @@ fn packet_to_payload(bytes: &[u8], packet: &PacketRef, kind: &PayloadKind) -> Re
             )?);
             Ok(out)
         }
-        PayloadKind::Ac3 | PayloadKind::Eac3 => Ok(bytes[start..end].to_vec()),
+        PayloadKind::Ac3 | PayloadKind::Eac3 | PayloadKind::RawAudio => {
+            Ok(bytes[start..end].to_vec())
+        }
     }
 }
 
@@ -2247,12 +2317,13 @@ fn ts_stream_type(payload: &PayloadKind) -> u8 {
         PayloadKind::Aac { .. } => 0x0f,
         PayloadKind::Ac3 => 0x81,
         PayloadKind::Eac3 => 0x87,
+        PayloadKind::RawAudio => 0x06,
     }
 }
 
 fn audio_stream_id(payload: &PayloadKind) -> u8 {
     match payload {
-        PayloadKind::Ac3 | PayloadKind::Eac3 => PRIVATE_STREAM_ID,
+        PayloadKind::Ac3 | PayloadKind::Eac3 | PayloadKind::RawAudio => PRIVATE_STREAM_ID,
         _ => AUDIO_STREAM_ID,
     }
 }
@@ -2260,7 +2331,7 @@ fn audio_stream_id(payload: &PayloadKind) -> u8 {
 fn supports_fmp4_audio(payload: &PayloadKind) -> bool {
     matches!(
         payload,
-        PayloadKind::Aac { .. } | PayloadKind::Ac3 | PayloadKind::Eac3
+        PayloadKind::Aac { .. } | PayloadKind::Ac3 | PayloadKind::Eac3 | PayloadKind::RawAudio
     )
 }
 

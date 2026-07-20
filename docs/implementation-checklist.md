@@ -57,7 +57,7 @@
 - [x] H.264 AVC configuration parsing and Annex-B conversion.
 - [x] HEVC configuration conversion.
 - [x] Extract MP4/MOV H.264, HEVC, and AAC codec configuration records.
-- [ ] AAC/AC-3/E-AC-3/MP3/FLAC/ALAC sample entries.
+- [x] AAC/AC-3/E-AC-3/MP3/FLAC/ALAC sample entries.
 - [ ] Text subtitle to `mov_text`.
 - [ ] Metadata and chapter copy.
 

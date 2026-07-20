@@ -1060,6 +1060,23 @@ fn codec_config_from_sample_entry(
                     description: asc.map_or_else(|| atom.payload.to_vec(), |config| config.bytes),
                 });
             }
+            kind if kind == *b"dfLa" => {
+                return Some(SampleEntryCodecConfig {
+                    box_type: atom.kind,
+                    codec_string: Some("fLaC".to_string()),
+                    nalu_length_size: None,
+                    description: flac_stream_info_from_dfla(atom.payload)
+                        .map_or_else(|| atom.payload.to_vec(), |stream_info| stream_info.to_vec()),
+                });
+            }
+            kind if kind == *b"alac" => {
+                return Some(SampleEntryCodecConfig {
+                    box_type: atom.kind,
+                    codec_string: Some("alac".to_string()),
+                    nalu_length_size: None,
+                    description: atom.payload.to_vec(),
+                });
+            }
             _ => {}
         }
     }
@@ -1125,6 +1142,19 @@ fn hevc_codec_string(payload: &[u8], sample_entry: &[u8; 4]) -> Option<String> {
 
 fn hevc_nalu_length_size(payload: &[u8]) -> Option<u8> {
     payload.get(21).map(|byte| (byte & 0x03) + 1)
+}
+
+fn flac_stream_info_from_dfla(payload: &[u8]) -> Option<&[u8]> {
+    let metadata = payload.get(4..)?;
+    let block_header = metadata.first()?;
+    let block_type = block_header & 0x7f;
+    if block_type != 0 {
+        return None;
+    }
+    let len = ((usize::from(*metadata.get(1)?)) << 16)
+        | ((usize::from(*metadata.get(2)?)) << 8)
+        | usize::from(*metadata.get(3)?);
+    metadata.get(4..4 + len)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
