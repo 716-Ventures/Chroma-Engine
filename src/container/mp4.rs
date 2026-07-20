@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use atom::{AtomIter, read_i32, read_u16, read_u32, read_u64};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Mp4BasicMetadata {
     pub major_brand: Option<String>,
     pub compatible_brands: Vec<String>,
@@ -20,13 +20,14 @@ pub struct Mp4BasicMetadata {
     pub tracks: Vec<Mp4Track>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Mp4Track {
     pub index: u32,
     pub kind: Mp4TrackKind,
     pub codec: String,
     pub duration_ms: Option<u64>,
     pub language: Option<String>,
+    pub frame_rate: Option<f64>,
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub channels: Option<u32>,
@@ -346,6 +347,7 @@ fn parse_trak(payload: &[u8], index: u32) -> Option<Mp4Track> {
         codec,
         duration_ms: mdia.duration_ms,
         language: mdia.language,
+        frame_rate: mdia.frame_rate,
         width,
         height,
         channels: stsd.channels,
@@ -358,6 +360,7 @@ struct MdiaInfo {
     handler: Option<String>,
     duration_ms: Option<u64>,
     language: Option<String>,
+    frame_rate: Option<f64>,
     sample_entry: Option<SampleEntryInfo>,
 }
 
@@ -374,7 +377,9 @@ fn parse_mdia(payload: &[u8]) -> Option<MdiaInfo> {
     let mut handler = None;
     let mut duration_ms = None;
     let mut language = None;
+    let mut timescale = None;
     let mut sample_entry = None;
+    let mut sample_timing = None;
 
     for atom in AtomIter::new(payload) {
         if atom.kind == *b"hdlr" {
@@ -382,8 +387,11 @@ fn parse_mdia(payload: &[u8]) -> Option<MdiaInfo> {
         } else if atom.kind == *b"mdhd" {
             duration_ms = parse_mdhd_duration_ms(atom.payload);
             language = parse_mdhd_language(atom.payload);
+            timescale = parse_mdhd_timescale(atom.payload);
         } else if atom.kind == *b"minf" {
-            sample_entry = parse_minf(atom.payload);
+            let stbl = find_atom(atom.payload, b"stbl");
+            sample_entry = stbl.and_then(parse_stbl);
+            sample_timing = stbl.and_then(parse_sample_timing);
         }
     }
 
@@ -391,17 +399,9 @@ fn parse_mdia(payload: &[u8]) -> Option<MdiaInfo> {
         handler,
         duration_ms,
         language,
+        frame_rate: frame_rate_from_sample_timing(timescale, sample_timing),
         sample_entry,
     })
-}
-
-fn parse_minf(payload: &[u8]) -> Option<SampleEntryInfo> {
-    for atom in AtomIter::new(payload) {
-        if atom.kind == *b"stbl" {
-            return parse_stbl(atom.payload);
-        }
-    }
-    None
 }
 
 fn parse_stbl(payload: &[u8]) -> Option<SampleEntryInfo> {
@@ -669,6 +669,33 @@ fn parse_sample_table(stbl: &[u8]) -> Option<SampleTable> {
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SampleTiming {
+    sample_count: u64,
+    total_duration_units: u64,
+}
+
+fn parse_sample_timing(stbl: &[u8]) -> Option<SampleTiming> {
+    let sample_count = find_atom(stbl, b"stsz").and_then(parse_stsz_sample_count)?;
+    let total_duration_units = find_atom(stbl, b"stts").and_then(parse_stts_total_duration)?;
+    Some(SampleTiming {
+        sample_count,
+        total_duration_units,
+    })
+}
+
+fn frame_rate_from_sample_timing(
+    timescale: Option<u32>,
+    timing: Option<SampleTiming>,
+) -> Option<f64> {
+    let timescale = u64::from(timescale?);
+    let timing = timing?;
+    if timescale == 0 || timing.sample_count == 0 || timing.total_duration_units == 0 {
+        return None;
+    }
+    Some((timing.sample_count as f64 * timescale as f64) / timing.total_duration_units as f64)
+}
+
 fn composition_time(dts: u64, offset: i64) -> u64 {
     if offset >= 0 {
         dts.saturating_add(offset as u64)
@@ -726,6 +753,25 @@ fn parse_stts(payload: &[u8], sample_count: usize) -> Option<Vec<u64>> {
     } else {
         None
     }
+}
+
+fn parse_stts_total_duration(payload: &[u8]) -> Option<u64> {
+    if payload.len() < 8 {
+        return None;
+    }
+    let entry_count = read_u32(&payload[4..8])? as usize;
+    let mut offset = 8;
+    let mut total = 0_u64;
+    for _ in 0..entry_count {
+        if offset + 8 > payload.len() {
+            return None;
+        }
+        let count = u64::from(read_u32(&payload[offset..offset + 4])?);
+        let delta = u64::from(read_u32(&payload[offset + 4..offset + 8])?);
+        total = total.saturating_add(count.saturating_mul(delta));
+        offset += 8;
+    }
+    (total > 0).then_some(total)
 }
 
 fn parse_ctts(payload: &[u8], sample_count: usize) -> Option<Vec<i64>> {
@@ -816,6 +862,13 @@ fn parse_stsz(payload: &[u8]) -> Option<Vec<u32>> {
         offset += 4;
     }
     Some(out)
+}
+
+fn parse_stsz_sample_count(payload: &[u8]) -> Option<u64> {
+    if payload.len() < 12 {
+        return None;
+    }
+    Some(u64::from(read_u32(&payload[8..12])?))
 }
 
 fn parse_stco(payload: &[u8]) -> Option<Vec<u64>> {
@@ -1339,6 +1392,28 @@ mod tests {
         let meta = parse_basic_metadata(&data);
         assert_eq!(meta.tracks.len(), 1);
         assert_eq!(meta.tracks[0].language.as_deref(), Some("eng"));
+    }
+
+    #[test]
+    fn derives_mp4_video_frame_rate_from_sample_timing() {
+        let mut data = ftyp();
+        let moov = atom(
+            b"moov",
+            &trak_with_samples(
+                b"vide",
+                b"avc1",
+                &[10, 10, 10, 10],
+                &[1000, 1000, 1000, 1000],
+                &[1],
+                &[128],
+                &[(1, 4)],
+            ),
+        );
+        data.extend_from_slice(&moov);
+
+        let meta = parse_basic_metadata(&data);
+        assert_eq!(meta.tracks.len(), 1);
+        assert_eq!(meta.tracks[0].frame_rate, Some(1.0));
     }
 
     #[test]

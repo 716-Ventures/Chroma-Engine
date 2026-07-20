@@ -400,7 +400,7 @@ fn tracks_from_mp4(meta: &mp4::Mp4BasicMetadata) -> Vec<MediaTrack> {
                 shape: TrackShape {
                     width: track.width,
                     height: track.height,
-                    frame_rate: None,
+                    frame_rate: track.frame_rate,
                     channels: track.channels,
                     sample_rate: track.sample_rate,
                 },
