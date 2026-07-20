@@ -496,6 +496,7 @@ mod tests {
             },
             duration_ms: Some(1000),
             tracks,
+            chapters: Vec::new(),
             attachments: AttachmentSummary { count: 0 },
             capabilities: MediaCapabilities {
                 can_remux_without_decode: true,

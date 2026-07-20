@@ -10,6 +10,7 @@ fn sanitized_real_mp4_probe_fixture_preserves_playback_shape() {
     assert_eq!(probe["durationMs"], 6_698_275);
 
     let tracks = probe["tracks"].as_array().unwrap();
+    assert!(probe["chapters"].as_array().unwrap().is_empty());
     assert_eq!(tracks.len(), 4);
     assert_eq!(tracks[0]["kind"], "video");
     assert_eq!(tracks[0]["codec"]["family"], "h264");
@@ -47,6 +48,12 @@ fn sanitized_real_mkv_probe_fixture_preserves_multi_audio_shape() {
     assert!(audio_tracks.iter().any(|track| track["language"] == "fre"));
     assert!(audio_tracks.iter().any(|track| track["language"] == "spa"));
     assert!(all_titles_are_sanitized(tracks));
+
+    let chapters = probe["chapters"].as_array().unwrap();
+    assert_eq!(chapters.len(), 27);
+    assert_eq!(chapters[0]["startMs"], 0);
+    assert_eq!(chapters[0]["language"], "eng");
+    assert!(all_titles_are_sanitized(chapters));
 }
 
 fn fixture(name: &str) -> Value {

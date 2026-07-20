@@ -43,7 +43,7 @@ pub use playback_manifest::{
     ManifestTrack, MatroskaManifestOptions, Mp4ManifestOptions, NativePlaybackManifest,
     build_matroska_playback_manifest, build_mp4_playback_manifest,
 };
-pub use probe::{MediaProbe, ProbeError, probe_media_source};
+pub use probe::{Chapter, MediaProbe, ProbeError, probe_media_source};
 pub use remux::{RemuxError, remux_mp4};
 pub use session::{
     AudioSelection, PipelineStage, PlaybackConstraints, PlaybackPlan, PlaybackTarget, StageKind,

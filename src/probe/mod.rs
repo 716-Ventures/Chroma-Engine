@@ -41,6 +41,8 @@ pub struct MediaProbe {
     pub duration_ms: Option<u64>,
     /// Tracks discovered in the source.
     pub tracks: Vec<MediaTrack>,
+    /// Chapters discovered in the source.
+    pub chapters: Vec<Chapter>,
     /// Attachment summary for container-level attachments.
     pub attachments: AttachmentSummary,
     /// Capability summary derived from the tracks.
@@ -273,6 +275,22 @@ pub struct AttachmentSummary {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+/// Chapter marker normalized from the source container.
+pub struct Chapter {
+    /// Stable chapter identifier.
+    pub id: String,
+    /// Chapter start timestamp in milliseconds.
+    pub start_ms: u64,
+    /// Chapter end timestamp in milliseconds when available.
+    pub end_ms: Option<u64>,
+    /// Chapter title when available.
+    pub title: Option<String>,
+    /// Chapter language when available.
+    pub language: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 /// Capability summary used to choose direct playback, remux, or transcode.
 pub struct MediaCapabilities {
     /// Whether all selected tracks can be remuxed without decoding.
@@ -309,6 +327,7 @@ pub fn probe_media_source(path: &Path) -> Result<MediaProbe, ProbeError> {
 
     let mut duration_ms = None;
     let mut tracks = Vec::new();
+    let mut chapters = Vec::new();
     let mut attachment_count = 0;
 
     if matches!(container, ContainerKind::Mp4 | ContainerKind::Mov) {
@@ -319,6 +338,7 @@ pub fn probe_media_source(path: &Path) -> Result<MediaProbe, ProbeError> {
         let meta = matroska::parse_basic_metadata(mapped.as_ref());
         duration_ms = meta.duration_ms;
         attachment_count = meta.attachment_count;
+        chapters = chapters_from_matroska(&meta.chapters);
         tracks = tracks_from_matroska(&meta);
     }
 
@@ -336,6 +356,7 @@ pub fn probe_media_source(path: &Path) -> Result<MediaProbe, ProbeError> {
         },
         duration_ms,
         tracks,
+        chapters,
         attachments: AttachmentSummary {
             count: attachment_count,
         },
@@ -427,6 +448,19 @@ fn tracks_from_matroska(meta: &matroska::MatroskaBasicMetadata) -> Vec<MediaTrac
                     sample_rate: track.sample_rate,
                 },
             })
+        })
+        .collect()
+}
+
+fn chapters_from_matroska(chapters: &[matroska::MatroskaChapter]) -> Vec<Chapter> {
+    chapters
+        .iter()
+        .map(|chapter| Chapter {
+            id: chapter.id.clone(),
+            start_ms: chapter.start_ms,
+            end_ms: chapter.end_ms,
+            title: chapter.title.clone(),
+            language: chapter.language.clone(),
         })
         .collect()
 }

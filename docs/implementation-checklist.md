@@ -34,7 +34,7 @@
 - [x] File existence and basic container sniffing.
 - [x] MP4/MOV box parser: `ftyp`, `moov`, `trak`, `mdia`, `minf`, `stbl`, `stsd`, `mvhd`, `tkhd`, `mdhd`.
 - [x] Matroska/WebM EBML parser: Segment Info, Tracks, Attachments.
-- [ ] Matroska/WebM EBML parser: Chapters.
+- [x] Matroska/WebM EBML parser: Chapters.
 - [x] Extract video fields: codec, dimensions.
 - [ ] Extract video fields: frame rate, bitrate, pixel format, HDR/DV hints.
 - [x] Extract Matroska audio fields: codec, channels, language/title, default/forced disposition.

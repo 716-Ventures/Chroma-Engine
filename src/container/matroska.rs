@@ -16,7 +16,17 @@ use ebml::{
 pub struct MatroskaBasicMetadata {
     pub duration_ms: Option<u64>,
     pub tracks: Vec<MatroskaTrack>,
+    pub chapters: Vec<MatroskaChapter>,
     pub attachment_count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatroskaChapter {
+    pub id: String,
+    pub start_ms: u64,
+    pub end_ms: Option<u64>,
+    pub title: Option<String>,
+    pub language: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -240,6 +250,7 @@ pub fn parse_basic_metadata(bytes: &[u8]) -> MatroskaBasicMetadata {
     let mut meta = MatroskaBasicMetadata {
         duration_ms: None,
         tracks: Vec::new(),
+        chapters: Vec::new(),
         attachment_count: 0,
     };
 
@@ -251,6 +262,7 @@ pub fn parse_basic_metadata(bytes: &[u8]) -> MatroskaBasicMetadata {
         match child.id {
             0x1549_a966 => parse_info(child.payload, &mut meta),
             0x1654_ae6b => parse_tracks(child.payload, &mut meta),
+            0x1043_a770 => parse_chapters(child.payload, &mut meta),
             0x1941_a469 => meta.attachment_count = count_children(child.payload, 0x61a7),
             // Cluster is the media-data boundary for normal Matroska files. Probing should not
             // scan packet payloads once metadata sections have been collected.
@@ -590,6 +602,77 @@ fn parse_tracks(payload: &[u8], meta: &mut MatroskaBasicMetadata) {
             meta.tracks.push(track);
         }
     }
+}
+
+fn parse_chapters(payload: &[u8], meta: &mut MatroskaBasicMetadata) {
+    for edition in ElementIter::new(payload).filter(|element| element.id == 0x45b9) {
+        for atom in ElementIter::new(edition.payload).filter(|element| element.id == 0xb6) {
+            parse_chapter_atom(atom.payload, &mut meta.chapters);
+        }
+    }
+}
+
+fn parse_chapter_atom(payload: &[u8], chapters: &mut Vec<MatroskaChapter>) {
+    let mut uid = None;
+    let mut start_ms = None;
+    let mut end_ms = None;
+    let mut title = None;
+    let mut language = None;
+    let mut nested_atoms = Vec::new();
+
+    for child in ElementIter::new(payload) {
+        match child.id {
+            0x73c4 => uid = read_uint(child.payload),
+            0x91 => start_ms = read_uint(child.payload).map(nanoseconds_to_millis),
+            0x92 => end_ms = read_uint(child.payload).map(nanoseconds_to_millis),
+            0x80 => {
+                let display = parse_chapter_display(child.payload);
+                title = title.or(display.title);
+                language = language.or(display.language);
+            }
+            0xb6 => nested_atoms.push(child.payload),
+            _ => {}
+        }
+    }
+
+    if let Some(start_ms) = start_ms {
+        let index = chapters.len();
+        chapters.push(MatroskaChapter {
+            id: uid
+                .map(|uid| uid.to_string())
+                .unwrap_or_else(|| format!("ch{index}")),
+            start_ms,
+            end_ms,
+            title,
+            language,
+        });
+    }
+
+    for nested in nested_atoms {
+        parse_chapter_atom(nested, chapters);
+    }
+}
+
+#[derive(Debug, Default)]
+struct ChapterDisplay {
+    title: Option<String>,
+    language: Option<String>,
+}
+
+fn parse_chapter_display(payload: &[u8]) -> ChapterDisplay {
+    let mut display = ChapterDisplay::default();
+    for child in ElementIter::new(payload) {
+        match child.id {
+            0x85 => display.title = read_string(child.payload),
+            0x437c | 0x437d => display.language = read_string(child.payload),
+            _ => {}
+        }
+    }
+    display
+}
+
+fn nanoseconds_to_millis(value: u64) -> u64 {
+    value / 1_000_000
 }
 
 fn parse_track_entry(payload: &[u8], index: u32) -> Option<MatroskaTrack> {
@@ -1303,7 +1386,26 @@ mod tests {
             )],
         );
         let tracks = elem(0x1654_ae6b, &[video, audio].concat());
-        let segment = elem(0x1853_8067, &[info, tracks].concat());
+        let chapters = elem(
+            0x1043_a770,
+            &elem(
+                0x45b9,
+                &elem(
+                    0xb6,
+                    &[
+                        elem(0x73c4, &[0x2a]),
+                        elem(0x91, &5_000_000_000_u64.to_be_bytes()),
+                        elem(0x92, &10_000_000_000_u64.to_be_bytes()),
+                        elem(
+                            0x80,
+                            &[elem(0x85, b"Opening"), elem(0x437c, b"eng")].concat(),
+                        ),
+                    ]
+                    .concat(),
+                ),
+            ),
+        );
+        let segment = elem(0x1853_8067, &[info, tracks, chapters].concat());
         let mut bytes = elem(0x1a45_dfa3, &[]);
         bytes.extend_from_slice(&segment);
 
@@ -1316,6 +1418,12 @@ mod tests {
         assert_eq!(meta.tracks[1].codec, "aac");
         assert_eq!(meta.tracks[1].channels, Some(2));
         assert_eq!(meta.tracks[1].sample_rate, Some(48000));
+        assert_eq!(meta.chapters.len(), 1);
+        assert_eq!(meta.chapters[0].id, "42");
+        assert_eq!(meta.chapters[0].start_ms, 5_000);
+        assert_eq!(meta.chapters[0].end_ms, Some(10_000));
+        assert_eq!(meta.chapters[0].title.as_deref(), Some("Opening"));
+        assert_eq!(meta.chapters[0].language.as_deref(), Some("eng"));
     }
 
     #[test]
@@ -1575,7 +1683,12 @@ mod tests {
     }
 
     fn write_size(size: usize, out: &mut Vec<u8>) {
-        assert!(size < 0x7f);
-        out.push(0x80 | size as u8);
+        if size < 0x7f {
+            out.push(0x80 | size as u8);
+        } else {
+            assert!(size < 0x3fff);
+            out.push(0x40 | ((size >> 8) as u8));
+            out.push((size & 0xff) as u8);
+        }
     }
 }

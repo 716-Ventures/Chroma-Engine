@@ -735,6 +735,197 @@
       }
     }
   ],
+  "chapters": [
+    {
+      "id": "7827594216866567124",
+      "startMs": 0,
+      "endMs": 334834,
+      "title": null,
+      "language": "eng"
+    },
+    {
+      "id": "7041815248746652304",
+      "startMs": 334834,
+      "endMs": 507840,
+      "title": null,
+      "language": "eng"
+    },
+    {
+      "id": "879754293118777782",
+      "startMs": 507840,
+      "endMs": 802343,
+      "title": null,
+      "language": "eng"
+    },
+    {
+      "id": "11730083892930251540",
+      "startMs": 802343,
+      "endMs": 901150,
+      "title": null,
+      "language": "eng"
+    },
+    {
+      "id": "2624805594517698174",
+      "startMs": 901150,
+      "endMs": 1185058,
+      "title": null,
+      "language": "eng"
+    },
+    {
+      "id": "8071594286192098011",
+      "startMs": 1185058,
+      "endMs": 1367074,
+      "title": null,
+      "language": "eng"
+    },
+    {
+      "id": "10834636196926921531",
+      "startMs": 1367074,
+      "endMs": 1961209,
+      "title": null,
+      "language": "eng"
+    },
+    {
+      "id": "17761503718601260323",
+      "startMs": 1961209,
+      "endMs": 2277942,
+      "title": null,
+      "language": "eng"
+    },
+    {
+      "id": "10086955973261334690",
+      "startMs": 2277942,
+      "endMs": 2456996,
+      "title": null,
+      "language": "eng"
+    },
+    {
+      "id": "10418018631571805633",
+      "startMs": 2456996,
+      "endMs": 2673379,
+      "title": null,
+      "language": "eng"
+    },
+    {
+      "id": "8511187085631987843",
+      "startMs": 2673379,
+      "endMs": 3073695,
+      "title": null,
+      "language": "eng"
+    },
+    {
+      "id": "5582447770452154831",
+      "startMs": 3073695,
+      "endMs": 3251331,
+      "title": null,
+      "language": "eng"
+    },
+    {
+      "id": "17594186782214104686",
+      "startMs": 3251331,
+      "endMs": 3548002,
+      "title": null,
+      "language": "eng"
+    },
+    {
+      "id": "15001065581480959534",
+      "startMs": 3548002,
+      "endMs": 3698319,
+      "title": null,
+      "language": "eng"
+    },
+    {
+      "id": "3494996353971278923",
+      "startMs": 3698319,
+      "endMs": 3767597,
+      "title": null,
+      "language": "eng"
+    },
+    {
+      "id": "2223583329183130391",
+      "startMs": 3767597,
+      "endMs": 3912408,
+      "title": null,
+      "language": "eng"
+    },
+    {
+      "id": "14249467297228666344",
+      "startMs": 3912408,
+      "endMs": 4055176,
+      "title": null,
+      "language": "eng"
+    },
+    {
+      "id": "1714118959025416773",
+      "startMs": 4055176,
+      "endMs": 4197401,
+      "title": null,
+      "language": "eng"
+    },
+    {
+      "id": "10023521123918371324",
+      "startMs": 4197401,
+      "endMs": 4387883,
+      "title": null,
+      "language": "eng"
+    },
+    {
+      "id": "14293208771133645755",
+      "startMs": 4387883,
+      "endMs": 4689226,
+      "title": null,
+      "language": "eng"
+    },
+    {
+      "id": "10997294003246411705",
+      "startMs": 4689226,
+      "endMs": 4863608,
+      "title": null,
+      "language": "eng"
+    },
+    {
+      "id": "11627704978835432541",
+      "startMs": 4863608,
+      "endMs": 5245114,
+      "title": null,
+      "language": "eng"
+    },
+    {
+      "id": "15279500732172655465",
+      "startMs": 5245114,
+      "endMs": 5591919,
+      "title": null,
+      "language": "eng"
+    },
+    {
+      "id": "12680461088803400052",
+      "startMs": 5591919,
+      "endMs": 5706492,
+      "title": null,
+      "language": "eng"
+    },
+    {
+      "id": "977215776330295551",
+      "startMs": 5706492,
+      "endMs": 5892136,
+      "title": null,
+      "language": "eng"
+    },
+    {
+      "id": "16763399304588738207",
+      "startMs": 5892136,
+      "endMs": 6127121,
+      "title": null,
+      "language": "eng"
+    },
+    {
+      "id": "10740778557913233296",
+      "startMs": 6127121,
+      "endMs": 6372699,
+      "title": null,
+      "language": "eng"
+    }
+  ],
   "attachments": {
     "count": 4
   },
