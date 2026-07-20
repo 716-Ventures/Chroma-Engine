@@ -1,5 +1,6 @@
 pub mod codec;
 pub mod container;
+pub mod fmp4;
 pub mod hls;
 pub mod packet;
 pub mod platform;

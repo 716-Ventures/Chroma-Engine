@@ -425,8 +425,7 @@ pub fn write_hls_segments(
     }
 
     let file = File::open(input).with_context(|| format!("open {}", input.display()))?;
-    let source =
-        unsafe { Mmap::map(&file) }.with_context(|| format!("map {}", input.display()))?;
+    let source = unsafe { Mmap::map(&file) }.with_context(|| format!("map {}", input.display()))?;
     let bytes = source.as_ref();
     if matroska::looks_like_ebml(bytes) {
         let segment_target_ms = options.segment_target_ms.max(500);
