@@ -11,6 +11,7 @@ use chroma_engine::container::{
     },
 };
 use chroma_engine::hls::{
+    write_hls_fmp4_init, write_hls_fmp4_segment, write_hls_fmp4_segments, write_hls_fmp4_vod,
     write_hls_segment, write_hls_segments, write_hls_vod, HlsOptions, HlsSegmentInfo,
     HlsVodPlaylistPlan,
 };
@@ -132,6 +133,48 @@ enum Command {
     Hls {
         input: PathBuf,
         output_dir: PathBuf,
+        #[arg(long)]
+        audio_track: Option<String>,
+        #[arg(long, default_value_t = 4_000)]
+        segment_ms: u64,
+    },
+    /// Package an MP4 source into native fMP4/CMAF HLS VOD output.
+    HlsFmp4 {
+        input: PathBuf,
+        output_dir: PathBuf,
+        #[arg(long)]
+        audio_track: Option<String>,
+        #[arg(long, default_value_t = 4_000)]
+        segment_ms: u64,
+    },
+    /// Write a native fMP4/CMAF HLS init segment.
+    HlsFmp4Init {
+        input: PathBuf,
+        output: PathBuf,
+        #[arg(long)]
+        audio_track: Option<String>,
+        #[arg(long, default_value_t = 4_000)]
+        segment_ms: u64,
+    },
+    /// Write one native fMP4/CMAF HLS media segment by index.
+    HlsFmp4Segment {
+        input: PathBuf,
+        output: PathBuf,
+        #[arg(long)]
+        index: usize,
+        #[arg(long)]
+        audio_track: Option<String>,
+        #[arg(long, default_value_t = 4_000)]
+        segment_ms: u64,
+    },
+    /// Write a contiguous run of native fMP4/CMAF HLS segments by index.
+    HlsFmp4Segments {
+        input: PathBuf,
+        output_dir: PathBuf,
+        #[arg(long)]
+        start: usize,
+        #[arg(long)]
+        count: usize,
         #[arg(long)]
         audio_track: Option<String>,
         #[arg(long, default_value_t = 4_000)]
@@ -474,6 +517,81 @@ fn main() -> Result<()> {
                     audio_track_id: audio_track,
                 },
             )?;
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        }
+        Command::HlsFmp4 {
+            input,
+            output_dir,
+            audio_track,
+            segment_ms,
+        } => {
+            let output = write_hls_fmp4_vod(
+                &input,
+                &output_dir,
+                HlsOptions {
+                    segment_target_ms: segment_ms,
+                    audio_track_id: audio_track,
+                },
+            )?;
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        }
+        Command::HlsFmp4Init {
+            input,
+            output,
+            audio_track,
+            segment_ms,
+        } => {
+            write_hls_fmp4_init(
+                &input,
+                &output,
+                HlsOptions {
+                    segment_target_ms: segment_ms,
+                    audio_track_id: audio_track,
+                },
+            )?;
+            println!("{}", serde_json::json!({ "ok": true, "output": output }));
+        }
+        Command::HlsFmp4Segment {
+            input,
+            output,
+            index,
+            audio_track,
+            segment_ms,
+        } => {
+            let segment = write_hls_fmp4_segment(
+                &input,
+                index,
+                &output,
+                HlsOptions {
+                    segment_target_ms: segment_ms,
+                    audio_track_id: audio_track,
+                },
+            )?;
+            println!("{}", serde_json::to_string_pretty(&segment)?);
+        }
+        Command::HlsFmp4Segments {
+            input,
+            output_dir,
+            start,
+            count,
+            audio_track,
+            segment_ms,
+        } => {
+            let segments = write_hls_fmp4_segments(
+                &input,
+                &output_dir,
+                start,
+                count,
+                HlsOptions {
+                    segment_target_ms: segment_ms,
+                    audio_track_id: audio_track,
+                },
+            )?;
+            let output = HlsSegmentsOutput {
+                start,
+                requested_count: count,
+                segments,
+            };
             println!("{}", serde_json::to_string_pretty(&output)?);
         }
         Command::HlsPlan {

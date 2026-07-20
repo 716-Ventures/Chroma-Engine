@@ -124,13 +124,38 @@ pub fn media_fragment(sequence_number: u32, tracks: &[Fmp4FragmentTrack]) -> Res
 }
 
 pub fn samples_from_packets(packets: &[PacketRef]) -> Vec<Fmp4Sample> {
+    let timescale = packets
+        .first()
+        .map(|packet| packet.duration.scale.units_per_second)
+        .unwrap_or(MOVIE_TIMESCALE);
+    samples_from_packets_with_timescale(packets, timescale)
+}
+
+pub fn samples_from_packets_with_timescale(
+    packets: &[PacketRef],
+    timescale: u32,
+) -> Vec<Fmp4Sample> {
     packets
         .iter()
         .map(|packet| {
-            let duration = packet.duration.as_millis().max(1).min(u64::from(u32::MAX)) as u32;
-            let pts90 = to_90khz(packet.pts.units, packet.pts.scale.units_per_second);
-            let dts90 = to_90khz(packet.dts.units, packet.dts.scale.units_per_second);
-            let composition_time_offset = ((pts90 as i128 - dts90 as i128) / 90)
+            let duration = rescale_time(
+                packet.duration.units,
+                packet.duration.scale.units_per_second,
+                timescale,
+            )
+            .max(1)
+            .min(u64::from(u32::MAX)) as u32;
+            let pts = rescale_time(
+                packet.pts.units,
+                packet.pts.scale.units_per_second,
+                timescale,
+            );
+            let dts = rescale_time(
+                packet.dts.units,
+                packet.dts.scale.units_per_second,
+                timescale,
+            );
+            let composition_time_offset = (pts as i128 - dts as i128)
                 .clamp(i128::from(i32::MIN), i128::from(i32::MAX))
                 as i32;
             Fmp4Sample {
@@ -145,6 +170,14 @@ pub fn samples_from_packets(packets: &[PacketRef]) -> Vec<Fmp4Sample> {
             }
         })
         .collect()
+}
+
+pub fn decode_time_for_timescale(packet: &PacketRef, timescale: u32) -> u64 {
+    rescale_time(
+        packet.dts.units,
+        packet.dts.scale.units_per_second,
+        timescale,
+    )
 }
 
 fn write_mvhd(out: &mut Vec<u8>) {
@@ -496,8 +529,8 @@ fn be_i32(out: &mut Vec<u8>, v: i32) {
     out.extend_from_slice(&v.to_be_bytes());
 }
 
-fn to_90khz(units: u64, units_per_second: u32) -> u64 {
-    units.saturating_mul(90_000) / u64::from(units_per_second.max(1))
+fn rescale_time(units: u64, from_units_per_second: u32, to_units_per_second: u32) -> u64 {
+    units.saturating_mul(u64::from(to_units_per_second)) / u64::from(from_units_per_second.max(1))
 }
 
 #[cfg(test)]

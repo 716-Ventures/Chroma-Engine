@@ -1,5 +1,6 @@
 use std::{
     fs::{create_dir_all, write, File},
+    io::Read,
     path::{Path, PathBuf},
 };
 
@@ -16,6 +17,11 @@ use crate::{
     container::{
         matroska::{self, MatroskaTrackKind},
         mp4::{self, Mp4TrackKind},
+    },
+    fmp4::{
+        decode_time_for_timescale, init_segment, media_fragment,
+        samples_from_packets_with_timescale, Fmp4FragmentTrack, Fmp4SampleEntry, Fmp4Track,
+        Fmp4TrackKind,
     },
     packet::{ChunkPlan, PacketRef},
 };
@@ -49,6 +55,8 @@ impl Default for HlsOptions {
 pub struct HlsOutput {
     pub master_playlist: PathBuf,
     pub media_playlist: PathBuf,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub init_segment: Option<PathBuf>,
     pub segment_count: usize,
     pub target_duration_seconds: u64,
     pub video_track_id: String,
@@ -242,6 +250,10 @@ impl HlsVodPlan {
         media_playlist_for_windows(self.target_duration_seconds, &self.windows)
     }
 
+    pub fn fmp4_media_playlist(&self) -> String {
+        fmp4_media_playlist_for_windows(self.target_duration_seconds, &self.windows)
+    }
+
     pub fn mux_segment(&self, index: usize) -> Result<Vec<u8>> {
         let window = self
             .windows
@@ -299,6 +311,92 @@ impl HlsVodPlan {
         }
         Ok(written)
     }
+
+    pub fn fmp4_init_segment(&self) -> Result<Vec<u8>> {
+        let video_entry = self
+            .tracks
+            .video
+            .fmp4_sample_entry
+            .clone()
+            .ok_or_else(|| anyhow!("fMP4 HLS requires video sample-entry metadata"))?;
+        let audio_entry = self
+            .tracks
+            .audio
+            .fmp4_sample_entry
+            .clone()
+            .ok_or_else(|| anyhow!("fMP4 HLS requires audio sample-entry metadata"))?;
+        init_segment(&[
+            Fmp4Track {
+                id: 1,
+                kind: Fmp4TrackKind::Video,
+                timescale: self.tracks.video.timescale,
+                default_sample_duration: default_sample_duration(&self.tracks.video.packets),
+                default_sample_size: 0,
+                default_sample_flags: 0x0101_0000,
+                sample_entry: video_entry,
+            },
+            Fmp4Track {
+                id: 2,
+                kind: Fmp4TrackKind::Audio,
+                timescale: self.tracks.audio.timescale,
+                default_sample_duration: default_sample_duration(&self.tracks.audio.packets),
+                default_sample_size: 0,
+                default_sample_flags: 0x0200_0000,
+                sample_entry: audio_entry,
+            },
+        ])
+    }
+
+    pub fn mux_fmp4_segment(&self, index: usize) -> Result<Vec<u8>> {
+        let window = self
+            .windows
+            .get(index)
+            .copied()
+            .ok_or_else(|| anyhow!("HLS segment index {index} is out of range"))?;
+        mux_fmp4_segment(self.source.as_ref(), &self.tracks, window)
+    }
+
+    pub fn write_fmp4_segment(&self, index: usize, output: &Path) -> Result<HlsSegmentInfo> {
+        let window = self
+            .windows
+            .get(index)
+            .copied()
+            .ok_or_else(|| anyhow!("HLS segment index {index} is out of range"))?;
+        let segment = mux_fmp4_segment(self.source.as_ref(), &self.tracks, window)?;
+        if let Some(parent) = output.parent() {
+            create_dir_all(parent)?;
+        }
+        write(output, segment)?;
+        Ok(HlsSegmentInfo {
+            index: window.index,
+            start_ms: window.start_ms,
+            duration_ms: window.end_ms.saturating_sub(window.start_ms).max(1),
+            uri: fmp4_segment_name(window.index),
+        })
+    }
+
+    pub fn write_fmp4_segments(
+        &self,
+        start_index: usize,
+        count: usize,
+        output_dir: &Path,
+    ) -> Result<Vec<HlsSegmentInfo>> {
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        if start_index >= self.windows.len() {
+            bail!("HLS segment start index {start_index} is out of range");
+        }
+
+        create_dir_all(output_dir)?;
+        let end_index = start_index.saturating_add(count).min(self.windows.len());
+        let mut written = Vec::with_capacity(end_index.saturating_sub(start_index));
+        for index in start_index..end_index {
+            let output = output_dir.join(fmp4_segment_name(index));
+            written.push(self.write_fmp4_segment(index, &output)?);
+        }
+        Ok(written)
+    }
 }
 
 fn segment_infos(windows: &[SegmentWindow]) -> Vec<HlsSegmentInfo> {
@@ -321,6 +419,17 @@ fn media_playlist_for_windows(target_duration_seconds: u64, windows: &[SegmentWi
     media_playlist_body(target_duration_seconds, &durations)
 }
 
+fn fmp4_media_playlist_for_windows(
+    target_duration_seconds: u64,
+    windows: &[SegmentWindow],
+) -> String {
+    let durations: Vec<u64> = windows
+        .iter()
+        .map(|window| window.end_ms.saturating_sub(window.start_ms).max(1))
+        .collect();
+    fmp4_media_playlist_body(target_duration_seconds, &durations)
+}
+
 #[derive(Debug, Clone)]
 struct HlsTrackSet {
     video: HlsTrack,
@@ -331,8 +440,10 @@ struct HlsTrackSet {
 struct HlsTrack {
     id: String,
     codec_string: String,
+    timescale: u32,
     packets: Vec<PacketRef>,
     payload: PayloadKind,
+    fmp4_sample_entry: Option<Fmp4SampleEntry>,
 }
 
 #[derive(Debug, Clone)]
@@ -386,6 +497,7 @@ pub fn write_hls_vod(input: &Path, output_dir: &Path, options: HlsOptions) -> Re
     Ok(HlsOutput {
         master_playlist,
         media_playlist,
+        init_segment: None,
         segment_count: plan.segment_count(),
         target_duration_seconds: plan.target_duration_seconds(),
         video_track_id: plan.video_track_id().to_string(),
@@ -394,6 +506,101 @@ pub fn write_hls_vod(input: &Path, output_dir: &Path, options: HlsOptions) -> Re
         video_codec: plan.video_codec().to_string(),
         audio_codec: plan.audio_codec().to_string(),
     })
+}
+
+pub fn write_hls_fmp4_vod(
+    input: &Path,
+    output_dir: &Path,
+    options: HlsOptions,
+) -> Result<HlsOutput> {
+    ensure_fmp4_mp4_input(input)?;
+    let plan = HlsVodPlan::open(input, options)?;
+    if !matches!(plan.tracks.audio.payload, PayloadKind::Aac { .. }) {
+        bail!("fMP4 HLS currently requires AAC audio");
+    }
+
+    create_dir_all(output_dir)?;
+    let variant_dir = output_dir.join("0");
+    create_dir_all(&variant_dir)?;
+
+    let init_path = variant_dir.join("init.mp4");
+    write(&init_path, plan.fmp4_init_segment()?)?;
+    for segment in plan.segments() {
+        let output = variant_dir.join(fmp4_segment_name(segment.index));
+        plan.write_fmp4_segment(segment.index, &output)?;
+    }
+
+    let media_playlist = variant_dir.join("playlist.m3u8");
+    write(&media_playlist, plan.fmp4_media_playlist())?;
+    let master_playlist = output_dir.join("master.m3u8");
+    write(&master_playlist, plan.master_playlist())?;
+
+    Ok(HlsOutput {
+        master_playlist,
+        media_playlist,
+        init_segment: Some(init_path),
+        segment_count: plan.segment_count(),
+        target_duration_seconds: plan.target_duration_seconds(),
+        video_track_id: plan.video_track_id().to_string(),
+        audio_track_id: plan.audio_track_id().to_string(),
+        bandwidth_bits_per_second: plan.bandwidth_bits_per_second(),
+        video_codec: plan.video_codec().to_string(),
+        audio_codec: plan.audio_codec().to_string(),
+    })
+}
+
+pub fn write_hls_fmp4_init(input: &Path, output: &Path, options: HlsOptions) -> Result<()> {
+    ensure_fmp4_mp4_input(input)?;
+    let plan = HlsVodPlan::open(input, options)?;
+    if let Some(parent) = output.parent() {
+        create_dir_all(parent)?;
+    }
+    write(output, plan.fmp4_init_segment()?)?;
+    Ok(())
+}
+
+pub fn write_hls_fmp4_segment(
+    input: &Path,
+    index: usize,
+    output: &Path,
+    options: HlsOptions,
+) -> Result<HlsSegmentInfo> {
+    ensure_fmp4_mp4_input(input)?;
+    let plan = HlsVodPlan::open(input, options)?;
+    if !matches!(plan.tracks.audio.payload, PayloadKind::Aac { .. }) {
+        bail!("fMP4 HLS currently requires AAC audio");
+    }
+    plan.write_fmp4_segment(index, output)
+}
+
+pub fn write_hls_fmp4_segments(
+    input: &Path,
+    output_dir: &Path,
+    start_index: usize,
+    count: usize,
+    options: HlsOptions,
+) -> Result<Vec<HlsSegmentInfo>> {
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+    ensure_fmp4_mp4_input(input)?;
+    let plan = HlsVodPlan::open(input, options)?;
+    if !matches!(plan.tracks.audio.payload, PayloadKind::Aac { .. }) {
+        bail!("fMP4 HLS currently requires AAC audio");
+    }
+    plan.write_fmp4_segments(start_index, count, output_dir)
+}
+
+fn ensure_fmp4_mp4_input(input: &Path) -> Result<()> {
+    let mut file = File::open(input).with_context(|| format!("open {}", input.display()))?;
+    let mut head = [0_u8; 12];
+    let n = file
+        .read(&mut head)
+        .with_context(|| format!("read {}", input.display()))?;
+    if !mp4::looks_like_mp4(&head[..n]) {
+        bail!("fMP4 HLS currently supports MP4/MOV inputs only");
+    }
+    Ok(())
 }
 
 pub fn write_hls_segment(
@@ -627,6 +834,29 @@ fn hls_tracks_from_mp4(
         }
         other => bail!("native HLS MP4 video codec {other} is not supported"),
     };
+    let video_fmp4_sample_entry = match video_meta.codec.as_str() {
+        "h264" => Some(Fmp4SampleEntry::Avc {
+            codec_config: hex_to_bytes(
+                video_config
+                    .description_hex
+                    .as_deref()
+                    .ok_or_else(|| anyhow!("missing avcC"))?,
+            )?,
+            width: clamped_u16(video_meta.width.unwrap_or(0)),
+            height: clamped_u16(video_meta.height.unwrap_or(0)),
+        }),
+        "hevc" => Some(Fmp4SampleEntry::Hevc {
+            codec_config: hex_to_bytes(
+                video_config
+                    .description_hex
+                    .as_deref()
+                    .ok_or_else(|| anyhow!("missing hvcC"))?,
+            )?,
+            width: clamped_u16(video_meta.width.unwrap_or(0)),
+            height: clamped_u16(video_meta.height.unwrap_or(0)),
+        }),
+        _ => None,
+    };
     let audio_payload = match audio_meta.codec.as_str() {
         "aac" => {
             let asc = hex_to_bytes(
@@ -643,6 +873,27 @@ fn hls_tracks_from_mp4(
         "eac3" => PayloadKind::Eac3,
         other => bail!("native HLS MP4 audio codec {other} is not supported"),
     };
+    let audio_fmp4_sample_entry = match audio_meta.codec.as_str() {
+        "aac" => Some(Fmp4SampleEntry::Aac {
+            decoder_config: hex_to_bytes(
+                audio_config
+                    .description_hex
+                    .as_deref()
+                    .ok_or_else(|| anyhow!("missing AudioSpecificConfig"))?,
+            )?,
+            channel_count: clamped_u16(audio_meta.channels.unwrap_or(2)),
+            sample_rate: audio_meta.sample_rate.unwrap_or(48_000),
+        }),
+        _ => None,
+    };
+    let video_timescale = video_packets
+        .first()
+        .map(|packet| packet.dts.scale.units_per_second)
+        .unwrap_or(90_000);
+    let audio_timescale = audio_packets
+        .first()
+        .map(|packet| packet.dts.scale.units_per_second)
+        .unwrap_or_else(|| audio_meta.sample_rate.unwrap_or(48_000));
 
     Ok(HlsTrackSet {
         video: HlsTrack {
@@ -650,16 +901,20 @@ fn hls_tracks_from_mp4(
             codec_string: video_config
                 .codec_string
                 .unwrap_or_else(|| fallback_video_codec_string(video_meta.codec.as_str())),
+            timescale: video_timescale,
             packets: video_packets,
             payload: video_payload,
+            fmp4_sample_entry: video_fmp4_sample_entry,
         },
         audio: HlsTrack {
             id: audio_track_id,
             codec_string: audio_config
                 .codec_string
                 .unwrap_or_else(|| fallback_audio_codec_string(audio_meta.codec.as_str())),
+            timescale: audio_timescale,
             packets: audio_packets,
             payload: audio_payload,
+            fmp4_sample_entry: audio_fmp4_sample_entry,
         },
     })
 }
@@ -736,14 +991,24 @@ fn hls_tracks_from_matroska(
         video: HlsTrack {
             id: video_track_id,
             codec_string: matroska_video_codec_string(video),
+            timescale: video_packets
+                .first()
+                .map(|packet| packet.dts.scale.units_per_second)
+                .unwrap_or(90_000),
             packets: video_packets,
             payload: video_payload,
+            fmp4_sample_entry: None,
         },
         audio: HlsTrack {
             id: audio_track_id,
             codec_string: matroska_audio_codec_string(audio),
+            timescale: audio_packets
+                .first()
+                .map(|packet| packet.dts.scale.units_per_second)
+                .unwrap_or(48_000),
             packets: audio_packets,
             payload: audio_payload,
+            fmp4_sample_entry: None,
         },
     })
 }
@@ -932,14 +1197,24 @@ fn write_matroska_hls_segment_from_plan(
         video: HlsTrack {
             id: plan.video_track_id().to_string(),
             codec_string: plan.video_codec().to_string(),
+            timescale: video_packets
+                .first()
+                .map(|packet| packet.dts.scale.units_per_second)
+                .unwrap_or(90_000),
             packets: video_packets,
             payload: video_payload,
+            fmp4_sample_entry: None,
         },
         audio: HlsTrack {
             id: plan.audio_track_id().to_string(),
             codec_string: plan.audio_codec().to_string(),
+            timescale: audio_packets
+                .first()
+                .map(|packet| packet.dts.scale.units_per_second)
+                .unwrap_or(48_000),
             packets: audio_packets,
             payload: audio_payload,
+            fmp4_sample_entry: None,
         },
     };
     let segment = mux_segment(bytes, &tracks, window)?;
@@ -1195,6 +1470,79 @@ fn mux_segment(bytes: &[u8], tracks: &HlsTrackSet, window: SegmentWindow) -> Res
     }
 
     Ok(mux.into_bytes())
+}
+
+fn mux_fmp4_segment(bytes: &[u8], tracks: &HlsTrackSet, window: SegmentWindow) -> Result<Vec<u8>> {
+    let video_packets = packets_in_window(&tracks.video.packets, window);
+    let audio_packets = packets_in_window(&tracks.audio.packets, window);
+    if video_packets.is_empty() {
+        bail!("fMP4 segment {} contains no video samples", window.index);
+    }
+    if audio_packets.is_empty() {
+        bail!("fMP4 segment {} contains no audio samples", window.index);
+    }
+
+    let video_payload = raw_packet_payload(bytes, &video_packets)?;
+    let audio_payload = raw_packet_payload(bytes, &audio_packets)?;
+    media_fragment(
+        window.index as u32 + 1,
+        &[
+            Fmp4FragmentTrack {
+                track_id: 1,
+                base_decode_time: decode_time_for_timescale(
+                    &video_packets[0],
+                    tracks.video.timescale,
+                ),
+                samples: samples_from_packets_with_timescale(
+                    &video_packets,
+                    tracks.video.timescale,
+                ),
+                payload: video_payload,
+            },
+            Fmp4FragmentTrack {
+                track_id: 2,
+                base_decode_time: decode_time_for_timescale(
+                    &audio_packets[0],
+                    tracks.audio.timescale,
+                ),
+                samples: samples_from_packets_with_timescale(
+                    &audio_packets,
+                    tracks.audio.timescale,
+                ),
+                payload: audio_payload,
+            },
+        ],
+    )
+}
+
+fn packets_in_window(packets: &[PacketRef], window: SegmentWindow) -> Vec<PacketRef> {
+    packets
+        .iter()
+        .filter(|packet| {
+            let pts = packet.pts.as_millis();
+            pts >= window.start_ms && pts < window.end_ms
+        })
+        .cloned()
+        .collect()
+}
+
+fn raw_packet_payload(bytes: &[u8], packets: &[PacketRef]) -> Result<Vec<u8>> {
+    let byte_count = packets
+        .iter()
+        .map(|packet| u64::from(packet.size))
+        .sum::<u64>();
+    let mut out = Vec::with_capacity(usize::try_from(byte_count).unwrap_or(bytes.len()));
+    for packet in packets {
+        let start = packet.source_offset as usize;
+        let end = start
+            .checked_add(packet.size as usize)
+            .ok_or_else(|| anyhow!("packet range overflows"))?;
+        if end > bytes.len() {
+            bail!("packet range is outside source");
+        }
+        out.extend_from_slice(&bytes[start..end]);
+    }
+    Ok(out)
 }
 
 #[derive(Debug, Default)]
@@ -1570,6 +1918,10 @@ fn fallback_audio_codec_string(codec: &str) -> String {
     }
 }
 
+fn clamped_u16(value: u32) -> u16 {
+    value.min(u32::from(u16::MAX)) as u16
+}
+
 fn matroska_video_codec_string(track: &matroska::MatroskaTrack) -> String {
     match (track.codec.as_str(), track.codec_private.as_deref()) {
         ("h264", Some(config)) if config.len() >= 4 => {
@@ -1626,8 +1978,34 @@ fn media_playlist_body(target_duration_seconds: u64, durations_ms: &[u64]) -> St
     out
 }
 
+fn fmp4_media_playlist_body(target_duration_seconds: u64, durations_ms: &[u64]) -> String {
+    let mut out = format!(
+        "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:{target_duration_seconds}\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-MAP:URI=\"init.mp4\"\n"
+    );
+    for (index, duration_ms) in durations_ms.iter().enumerate() {
+        out.push_str(&format!(
+            "#EXTINF:{:.3},\n{}\n",
+            *duration_ms as f64 / 1000.0,
+            fmp4_segment_name(index)
+        ));
+    }
+    out.push_str("#EXT-X-ENDLIST\n");
+    out
+}
+
 fn segment_name(index: usize) -> String {
     format!("seg-{index:05}.ts")
+}
+
+fn fmp4_segment_name(index: usize) -> String {
+    format!("seg-{index:05}.m4s")
+}
+
+fn default_sample_duration(packets: &[PacketRef]) -> u32 {
+    packets
+        .first()
+        .map(|packet| packet.duration.units.min(u64::from(u32::MAX)).max(1) as u32)
+        .unwrap_or(1)
 }
 
 fn hex_to_bytes(hex: &str) -> Result<Vec<u8>> {
@@ -1692,6 +2070,7 @@ mod tests {
                 video: HlsTrack {
                     id: "v0".to_string(),
                     codec_string: "avc1.640028".to_string(),
+                    timescale: 1_000,
                     packets: vec![packet],
                     payload: PayloadKind::Avc {
                         nalu_length_size: 4,
@@ -1701,10 +2080,12 @@ mod tests {
                             pps: Vec::new(),
                         },
                     },
+                    fmp4_sample_entry: None,
                 },
                 audio: HlsTrack {
                     id: "a0".to_string(),
                     codec_string: "mp4a.40.2".to_string(),
+                    timescale: 48_000,
                     packets: Vec::new(),
                     payload: PayloadKind::Aac {
                         config: AacAudioSpecificConfig {
@@ -1713,6 +2094,7 @@ mod tests {
                             channel_config: 2,
                         },
                     },
+                    fmp4_sample_entry: None,
                 },
             },
             windows: vec![SegmentWindow {
@@ -1824,6 +2206,18 @@ mod tests {
         bytes.chunks_exact(188).collect()
     }
 
+    fn top_level_boxes(bytes: &[u8]) -> Vec<[u8; 4]> {
+        let mut out = Vec::new();
+        let mut offset = 0;
+        while offset + 8 <= bytes.len() {
+            let size = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+            assert!(size >= 8);
+            out.push(bytes[offset + 4..offset + 8].try_into().unwrap());
+            offset += size;
+        }
+        out
+    }
+
     fn ts_pid(packet: &[u8]) -> u16 {
         (u16::from(packet[1] & 0x1f) << 8) | u16::from(packet[2])
     }
@@ -1843,6 +2237,91 @@ mod tests {
         assert!(body.contains("#EXTINF:1.500,"));
         assert!(body.contains("seg-00001.ts"));
         assert!(body.ends_with("#EXT-X-ENDLIST\n"));
+    }
+
+    #[test]
+    fn renders_fmp4_media_playlist_with_init_map() {
+        let body = fmp4_media_playlist_body(4, &[1500, 4010]);
+        assert!(body.contains("#EXT-X-VERSION:7"));
+        assert!(body.contains("#EXT-X-MAP:URI=\"init.mp4\""));
+        assert!(body.contains("#EXTINF:4.010,"));
+        assert!(body.contains("seg-00001.m4s"));
+        assert!(body.ends_with("#EXT-X-ENDLIST\n"));
+    }
+
+    #[test]
+    fn muxes_fmp4_segment_from_raw_mp4_samples() {
+        let scale = crate::packet::TimeScale {
+            units_per_second: 1_000,
+        };
+        let packet = |source_offset: u64, pts_ms: u64, size: u32, keyframe: bool| PacketRef {
+            source_offset,
+            size,
+            pts: crate::packet::TimePoint {
+                units: pts_ms,
+                scale,
+            },
+            dts: crate::packet::TimePoint {
+                units: pts_ms,
+                scale,
+            },
+            duration: crate::packet::TimeDelta { units: 40, scale },
+            keyframe,
+        };
+        let bytes = b"vvvvvaaaaa";
+        let tracks = HlsTrackSet {
+            video: HlsTrack {
+                id: "v0".to_string(),
+                codec_string: "avc1.640028".to_string(),
+                timescale: 1_000,
+                packets: vec![packet(0, 0, 5, true)],
+                payload: PayloadKind::Avc {
+                    nalu_length_size: 4,
+                    parameter_sets: AvcParameterSets {
+                        nalu_length_size: 4,
+                        sps: Vec::new(),
+                        pps: Vec::new(),
+                    },
+                },
+                fmp4_sample_entry: Some(Fmp4SampleEntry::Avc {
+                    codec_config: vec![1, 100, 0, 40, 0xff, 0xe1, 0, 0],
+                    width: 1_920,
+                    height: 1_080,
+                }),
+            },
+            audio: HlsTrack {
+                id: "a0".to_string(),
+                codec_string: "mp4a.40.2".to_string(),
+                timescale: 1_000,
+                packets: vec![packet(5, 0, 5, true)],
+                payload: PayloadKind::Aac {
+                    config: AacAudioSpecificConfig {
+                        object_type: 2,
+                        sample_rate: 48_000,
+                        channel_config: 2,
+                    },
+                },
+                fmp4_sample_entry: Some(Fmp4SampleEntry::Aac {
+                    decoder_config: vec![0x11, 0x90],
+                    channel_count: 2,
+                    sample_rate: 48_000,
+                }),
+            },
+        };
+
+        let segment = mux_fmp4_segment(
+            bytes,
+            &tracks,
+            SegmentWindow {
+                index: 0,
+                start_ms: 0,
+                end_ms: 1_000,
+            },
+        )
+        .expect("fMP4 segment");
+
+        assert_eq!(top_level_boxes(&segment), vec![*b"moof", *b"mdat"]);
+        assert!(segment.ends_with(b"vvvvvaaaaa"));
     }
 
     #[test]
@@ -1868,6 +2347,7 @@ mod tests {
             video: HlsTrack {
                 id: "v0".to_string(),
                 codec_string: "avc1.640028".to_string(),
+                timescale: 1_000,
                 packets: vec![packet(0, 20_000), packet(1_000, 40_000)],
                 payload: PayloadKind::Avc {
                     nalu_length_size: 4,
@@ -1877,10 +2357,12 @@ mod tests {
                         pps: Vec::new(),
                     },
                 },
+                fmp4_sample_entry: None,
             },
             audio: HlsTrack {
                 id: "a0".to_string(),
                 codec_string: "mp4a.40.2".to_string(),
+                timescale: 1_000,
                 packets: vec![packet(0, 5_000), packet(1_000, 5_000)],
                 payload: PayloadKind::Aac {
                     config: AacAudioSpecificConfig {
@@ -1889,6 +2371,7 @@ mod tests {
                         channel_config: 2,
                     },
                 },
+                fmp4_sample_entry: None,
             },
         };
         let windows = vec![
