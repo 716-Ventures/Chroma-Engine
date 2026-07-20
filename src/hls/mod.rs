@@ -667,12 +667,18 @@ fn packet_end_ms(packet: &PacketRef) -> u64 {
 }
 
 fn estimate_hls_bandwidth_bits_per_second(tracks: &HlsTrackSet, windows: &[SegmentWindow]) -> u64 {
+    let video_bytes = track_bytes_by_window(&tracks.video, windows);
+    let audio_bytes = track_bytes_by_window(&tracks.audio, windows);
     let max_bits_per_second = windows
         .iter()
-        .map(|window| {
+        .enumerate()
+        .map(|(index, window)| {
             let duration_ms = window.end_ms.saturating_sub(window.start_ms).max(1);
-            let bytes = estimated_track_bytes_in_window(&tracks.video, window)
-                .saturating_add(estimated_track_bytes_in_window(&tracks.audio, window));
+            let bytes = video_bytes
+                .get(index)
+                .copied()
+                .unwrap_or(0)
+                .saturating_add(audio_bytes.get(index).copied().unwrap_or(0));
             bytes.saturating_mul(8).saturating_mul(1_000) / duration_ms
         })
         .max()
@@ -683,16 +689,27 @@ fn estimate_hls_bandwidth_bits_per_second(tracks: &HlsTrackSet, windows: &[Segme
         .max(128_000)
 }
 
-fn estimated_track_bytes_in_window(track: &HlsTrack, window: &SegmentWindow) -> u64 {
-    track
-        .packets
-        .iter()
-        .filter(|packet| {
-            let pts = packet.pts.as_millis();
-            pts >= window.start_ms && pts < window.end_ms
-        })
-        .map(|packet| u64::from(packet.size))
-        .sum()
+fn track_bytes_by_window(track: &HlsTrack, windows: &[SegmentWindow]) -> Vec<u64> {
+    let mut out = vec![0_u64; windows.len()];
+    if windows.is_empty() {
+        return out;
+    }
+
+    let mut window_index = 0_usize;
+    for packet in &track.packets {
+        let pts = packet.pts.as_millis();
+        while window_index < windows.len() && pts >= windows[window_index].end_ms {
+            window_index += 1;
+        }
+        if window_index >= windows.len() {
+            break;
+        }
+        let window = &windows[window_index];
+        if pts >= window.start_ms {
+            out[window_index] = out[window_index].saturating_add(u64::from(packet.size));
+        }
+    }
+    out
 }
 
 fn mux_segment(bytes: &[u8], tracks: &HlsTrackSet, window: SegmentWindow) -> Result<Vec<u8>> {
