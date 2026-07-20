@@ -11,7 +11,8 @@ use chroma_engine::container::{
     },
 };
 use chroma_engine::hls::{
-    write_hls_segment, write_hls_vod, HlsOptions, HlsSegmentInfo, HlsVodPlan, HlsVodPlaylistPlan,
+    write_hls_segment, write_hls_segments, write_hls_vod, HlsOptions, HlsSegmentInfo,
+    HlsVodPlaylistPlan,
 };
 use chroma_engine::playback_manifest::{
     build_matroska_playback_manifest, build_mp4_playback_manifest, MatroskaManifestOptions,
@@ -527,14 +528,16 @@ fn main() -> Result<()> {
             audio_track,
             segment_ms,
         } => {
-            let plan = HlsVodPlan::open(
+            let segments = write_hls_segments(
                 &input,
+                &output_dir,
+                start,
+                count,
                 HlsOptions {
                     segment_target_ms: segment_ms,
                     audio_track_id: audio_track,
                 },
             )?;
-            let segments = plan.write_segments(start, count, &output_dir)?;
             let output = HlsSegmentsOutput {
                 start,
                 requested_count: count,

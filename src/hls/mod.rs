@@ -413,6 +413,50 @@ pub fn write_hls_segment(
     plan.write_segment(index, output)
 }
 
+pub fn write_hls_segments(
+    input: &Path,
+    output_dir: &Path,
+    start_index: usize,
+    count: usize,
+    options: HlsOptions,
+) -> Result<Vec<HlsSegmentInfo>> {
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+
+    let file = File::open(input).with_context(|| format!("open {}", input.display()))?;
+    let source =
+        unsafe { Mmap::map(&file) }.with_context(|| format!("map {}", input.display()))?;
+    let bytes = source.as_ref();
+    if matroska::looks_like_ebml(bytes) {
+        let segment_target_ms = options.segment_target_ms.max(500);
+        let plan = hls_playlist_plan_from_matroska(
+            bytes,
+            bytes.len() as u64,
+            options.audio_track_id.as_deref(),
+            segment_target_ms,
+        )?;
+        if start_index >= plan.windows.len() {
+            bail!("HLS segment start index {start_index} is out of range");
+        }
+        create_dir_all(output_dir)?;
+        let end_index = start_index.saturating_add(count).min(plan.windows.len());
+        let mut written = Vec::with_capacity(end_index.saturating_sub(start_index));
+        for index in start_index..end_index {
+            written.push(write_matroska_hls_segment_from_plan(
+                bytes,
+                index,
+                &output_dir.join(segment_name(index)),
+                &plan,
+            )?);
+        }
+        return Ok(written);
+    }
+
+    let plan = HlsVodPlan::open(input, options)?;
+    plan.write_segments(start_index, count, output_dir)
+}
+
 fn select_mp4_hls_track<'a>(
     tracks: &'a [mp4::Mp4Track],
     kind: Mp4TrackKind,
@@ -800,6 +844,15 @@ fn write_matroska_hls_segment(
         options.audio_track_id.as_deref(),
         segment_target_ms,
     )?;
+    write_matroska_hls_segment_from_plan(bytes, index, output, &plan)
+}
+
+fn write_matroska_hls_segment_from_plan(
+    bytes: &[u8],
+    index: usize,
+    output: &Path,
+    plan: &HlsVodPlaylistPlan,
+) -> Result<HlsSegmentInfo> {
     let window = plan
         .windows
         .get(index)
