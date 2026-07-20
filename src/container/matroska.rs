@@ -1242,7 +1242,32 @@ impl SaturatingAddSigned for i64 {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
+
+    proptest! {
+        #[test]
+        fn arbitrary_matroska_bytes_do_not_panic(bytes in prop::collection::vec(any::<u8>(), 0..4096)) {
+            let _ = looks_like_ebml(&bytes);
+            let _ = parse_basic_metadata(&bytes);
+            let _ = parse_chunk_plan(&bytes, None, 4_000);
+            let _ = parse_packet_track(&bytes, None);
+        }
+
+        #[test]
+        fn matroska_timecode_conversion_is_monotonic(
+            first in -10_000_i64..10_000,
+            delta in 0_i64..10_000,
+            scale in 1_u64..10_000_000,
+        ) {
+            let second = first.saturating_add(delta);
+            prop_assert!(
+                matroska_timecode_to_ms(first, scale)
+                    <= matroska_timecode_to_ms(second, scale)
+            );
+        }
+    }
 
     #[test]
     fn detects_ebml() {

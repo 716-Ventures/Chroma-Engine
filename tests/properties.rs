@@ -1,5 +1,6 @@
 use chroma_engine::{
-    PacketRef, TimeDelta, TimePoint, parse_subrip, plan_fixed_chunks, segment_webvtt,
+    ContainerKind, PacketRef, TimeDelta, TimePoint, parse_subrip, plan_fixed_chunks,
+    segment_webvtt, sniff_container,
 };
 use proptest::prelude::*;
 
@@ -62,6 +63,19 @@ proptest! {
             prop_assert!(segment.body.starts_with("WEBVTT\n\n"));
             expected_start = expected_start.saturating_add(segment_ms);
         }
+    }
+
+    #[test]
+    fn container_sniffing_never_panics_for_arbitrary_headers(head in prop::collection::vec(any::<u8>(), 0..512)) {
+        let kind = sniff_container(&head);
+        prop_assert!(matches!(
+            kind,
+            ContainerKind::Mp4
+                | ContainerKind::Mov
+                | ContainerKind::Matroska
+                | ContainerKind::Webm
+                | ContainerKind::Unknown
+        ));
     }
 }
 

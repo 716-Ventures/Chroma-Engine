@@ -1200,7 +1200,20 @@ fn hex_string(bytes: Vec<u8>) -> String {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
+
+    proptest! {
+        #[test]
+        fn arbitrary_mp4_bytes_do_not_panic(bytes in prop::collection::vec(any::<u8>(), 0..4096)) {
+            let _ = looks_like_mp4(&bytes);
+            let _ = sniff_mp4_brand(&bytes);
+            let _ = parse_basic_metadata(&bytes);
+            let _ = parse_chunk_plan(&bytes, None, 4_000);
+            let _ = parse_codec_config(&bytes, None);
+        }
+    }
 
     #[test]
     fn detects_ftyp() {

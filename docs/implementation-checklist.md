@@ -27,7 +27,7 @@
 - [x] Add missing-docs policy for the public facade.
 - [x] Split oversized implementation modules: HLS, MP4, Matroska, CLI.
 - [x] Replace broad `anyhow` use in library-facing APIs with typed engine errors.
-- [ ] Add fuzz/property tests for EBML, MP4 atoms, packet range math, and timestamp repair.
+- [x] Add fuzz/property tests for EBML, MP4 atoms, packet range math, and timestamp repair.
 
 ## Probe
 
