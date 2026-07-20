@@ -1,6 +1,11 @@
 use serde::{Deserialize, Serialize};
 
+use crate::packet::TimeScale;
 use crate::platform::EncoderProfile;
+
+mod audio_clock;
+
+pub use audio_clock::{AudioClockConfig, AudioFrameTiming, AudioSampleClock};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -117,4 +122,14 @@ pub enum SubtitleOp {
         /// Reason the subtitle cannot be carried.
         reason: String,
     },
+}
+
+fn rescale_units_rounded(units: u64, from: TimeScale, to: TimeScale) -> u64 {
+    if from.units_per_second == 0 || to.units_per_second == 0 {
+        return 0;
+    }
+    let numerator = u128::from(units) * u128::from(to.units_per_second);
+    let denominator = u128::from(from.units_per_second);
+    let rounded = (numerator + (denominator / 2)) / denominator;
+    rounded.min(u128::from(u64::MAX)) as u64
 }
