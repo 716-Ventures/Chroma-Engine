@@ -219,6 +219,8 @@ pub fn parse_packet_track(
         segment,
         segment_element.payload_offset,
         selected.number,
+        selected.kind,
+        selected.frame_duration_ms,
         timecode_scale,
     )?;
     Some(MatroskaPacketTrack {
@@ -716,6 +718,7 @@ fn normalize_codec_id(id: &str) -> String {
 struct SelectedChunkTrack {
     id: String,
     number: u64,
+    kind: MatroskaTrackKind,
     frame_duration_ms: Option<u64>,
 }
 
@@ -797,12 +800,12 @@ pub fn parse_packet_tracks_in_time_window(
     if out.iter().any(|track| track.packets.is_empty()) {
         return None;
     }
-    for track in &mut out {
-        let last_duration =
-            infer_last_packet_duration(&track.packets).unwrap_or_else(|| TimeDelta::millis(0));
-        if let Some(last) = track.packets.last_mut() {
-            last.duration = last_duration;
-        }
+    for (track, selected) in out.iter_mut().zip(selected.iter()) {
+        repair_matroska_packet_timing(
+            &mut track.packets,
+            selected.kind,
+            selected.frame_duration_ms,
+        );
     }
     Some(out)
 }
@@ -830,6 +833,7 @@ fn select_chunk_track(
             return Some(SelectedChunkTrack {
                 id,
                 number: track.number,
+                kind: track.kind,
                 frame_duration_ms: track_frame_duration_ms(track),
             });
         }
@@ -936,6 +940,8 @@ fn parse_track_packets(
     segment: &[u8],
     segment_base_offset: usize,
     track_number: u64,
+    kind: MatroskaTrackKind,
+    frame_duration_ms: Option<u64>,
     timecode_scale: u64,
 ) -> Option<Vec<PacketRef>> {
     let mut packets: Vec<PacketRef> = Vec::new();
@@ -968,11 +974,7 @@ fn parse_track_packets(
         return None;
     }
 
-    let last_duration =
-        infer_last_packet_duration(&packets).unwrap_or_else(|| TimeDelta::millis(0));
-    if let Some(last) = packets.last_mut() {
-        last.duration = last_duration;
-    }
+    repair_matroska_packet_timing(&mut packets, kind, frame_duration_ms);
     Some(packets)
 }
 
@@ -1007,6 +1009,53 @@ fn push_block_packets(
             keyframe: block.keyframe,
         });
     }
+}
+
+fn repair_matroska_packet_timing(
+    packets: &mut [PacketRef],
+    kind: MatroskaTrackKind,
+    frame_duration_ms: Option<u64>,
+) {
+    if packets.is_empty() {
+        return;
+    }
+
+    if kind == MatroskaTrackKind::Video {
+        let duration_ms = frame_duration_ms
+            .or_else(|| infer_nominal_frame_duration_ms(packets))
+            .unwrap_or(1)
+            .max(1);
+        let first_dts_ms = packets[0].pts.as_millis();
+        for (index, packet) in packets.iter_mut().enumerate() {
+            packet.dts = TimePoint::millis(
+                first_dts_ms.saturating_add(duration_ms.saturating_mul(index as u64)),
+            );
+            packet.duration = TimeDelta::millis(duration_ms);
+        }
+        return;
+    }
+
+    let last_duration = infer_last_packet_duration(packets).unwrap_or_else(|| TimeDelta::millis(0));
+    if let Some(last) = packets.last_mut() {
+        last.duration = last_duration;
+    }
+}
+
+fn infer_nominal_frame_duration_ms(packets: &[PacketRef]) -> Option<u64> {
+    let mut deltas = packets
+        .windows(2)
+        .filter_map(|pair| {
+            let a = pair[0].pts.as_millis();
+            let b = pair[1].pts.as_millis();
+            (b > a).then_some(b - a)
+        })
+        .filter(|delta| *delta > 0 && *delta <= 250)
+        .collect::<Vec<_>>();
+    if deltas.is_empty() {
+        return None;
+    }
+    deltas.sort_unstable();
+    Some(deltas[deltas.len() / 2].max(1))
 }
 
 fn parse_block_group(payload: &[u8], base_offset: usize) -> Option<ClusterBlock> {
@@ -1435,6 +1484,54 @@ mod tests {
         let (chunk, payload) = extract_chunk(&bytes, Some("v0"), 4_000, 0).unwrap();
         assert_eq!(chunk.packet_count, 2);
         assert_eq!(payload, b"frame-oneframe-two");
+    }
+
+    #[test]
+    fn repairs_matroska_video_dts_for_decode_order_b_frames() {
+        let info = elem(
+            0x1549_a966,
+            &[elem(0x002a_d7b1, &1_000_000_u64.to_be_bytes()[5..])].concat(),
+        );
+        let video = track_entry(
+            1,
+            1,
+            "V_MPEG4/ISO/AVC",
+            &[elem(0x23e3_83, &40_000_000_u64.to_be_bytes()[4..])],
+        );
+        let tracks = elem(0x1654_ae6b, &video);
+        let cluster0 = cluster(
+            0,
+            &[
+                simple_block(1, 0, true),
+                simple_block(1, 120, false),
+                simple_block(1, 40, false),
+                simple_block(1, 80, false),
+            ],
+        );
+        let segment = elem(0x1853_8067, &[info, tracks, cluster0].concat());
+        let mut bytes = elem(0x1a45_dfa3, &[]);
+        bytes.extend_from_slice(&segment);
+
+        let track = parse_packet_track(&bytes, Some("v0")).unwrap();
+        let pts = track
+            .packets
+            .iter()
+            .map(|packet| packet.pts.as_millis())
+            .collect::<Vec<_>>();
+        let dts = track
+            .packets
+            .iter()
+            .map(|packet| packet.dts.as_millis())
+            .collect::<Vec<_>>();
+        let durations = track
+            .packets
+            .iter()
+            .map(|packet| packet.duration.as_millis())
+            .collect::<Vec<_>>();
+
+        assert_eq!(pts, vec![0, 120, 40, 80]);
+        assert_eq!(dts, vec![0, 40, 80, 120]);
+        assert_eq!(durations, vec![40, 40, 40, 40]);
     }
 
     #[test]
