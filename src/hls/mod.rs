@@ -15,7 +15,8 @@ use crate::{
         ac3::{parse_ac3_specific_box, parse_eac3_specific_box},
         h264::{AvcParameterSets, H264ParseError, avc_sample_to_annex_b, parse_avc_decoder_config},
         hevc::{
-            HevcDecoderConfig, HevcParseError, hevc_sample_to_annex_b, parse_hevc_decoder_config,
+            HevcParseError, hevc_decoder_config_to_annex_b, hevc_sample_to_annex_b,
+            parse_hevc_decoder_config,
         },
     },
     container::{
@@ -531,7 +532,7 @@ enum PayloadKind {
     },
     Hevc {
         nalu_length_size: u8,
-        parameter_sets: HevcDecoderConfig,
+        parameter_sets_annex_b: Vec<u8>,
     },
     Aac {
         config: AacAudioSpecificConfig,
@@ -925,7 +926,7 @@ fn hls_tracks_from_mp4(
                 nalu_length_size: video_config
                     .nalu_length_size
                     .unwrap_or(parameter_sets.nalu_length_size),
-                parameter_sets,
+                parameter_sets_annex_b: hevc_decoder_config_to_annex_b(&hvc)?,
             }
         }
         other => bail!("native HLS MP4 video codec {other} is not supported"),
@@ -1086,7 +1087,7 @@ fn hls_tracks_from_matroska(
             let parameter_sets = parse_hevc_decoder_config(hvc)?;
             PayloadKind::Hevc {
                 nalu_length_size: parameter_sets.nalu_length_size,
-                parameter_sets,
+                parameter_sets_annex_b: hevc_decoder_config_to_annex_b(hvc)?,
             }
         }
         other => bail!("native HLS Matroska video codec {other} is not supported"),
@@ -1205,7 +1206,7 @@ fn matroska_video_payload_kind(track: &matroska::MatroskaTrack) -> Result<Payloa
             let parameter_sets = parse_hevc_decoder_config(hvc)?;
             Ok(PayloadKind::Hevc {
                 nalu_length_size: parameter_sets.nalu_length_size,
-                parameter_sets,
+                parameter_sets_annex_b: hevc_decoder_config_to_annex_b(hvc)?,
             })
         }
         other => bail!("native HLS Matroska video codec {other} is not supported"),
@@ -2051,19 +2052,11 @@ fn packet_to_payload(bytes: &[u8], packet: &PacketRef, kind: &PayloadKind) -> Re
         }
         PayloadKind::Hevc {
             nalu_length_size,
-            parameter_sets,
+            parameter_sets_annex_b,
         } => {
             let mut out = Vec::new();
             if packet.keyframe {
-                for array in &parameter_sets.arrays {
-                    if !matches!(array.nal_unit_type, 32..=34) {
-                        continue;
-                    }
-                    for unit in &array.units {
-                        out.extend_from_slice(&[0, 0, 0, 1]);
-                        out.extend_from_slice(unit);
-                    }
-                }
+                out.extend_from_slice(parameter_sets_annex_b);
             }
             out.extend_from_slice(&hevc_sample_to_annex_b(
                 &bytes[start..end],

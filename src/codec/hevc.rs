@@ -102,6 +102,32 @@ pub fn hevc_sample_to_annex_b(
     Ok(out)
 }
 
+pub fn hevc_decoder_config_to_annex_b(payload: &[u8]) -> Result<Vec<u8>, HevcParseError> {
+    let config = parse_hevc_decoder_config(payload)?;
+    Ok(hevc_parameter_sets_to_annex_b(&config))
+}
+
+pub fn hevc_parameter_sets_to_annex_b(config: &HevcDecoderConfig) -> Vec<u8> {
+    let byte_count = config
+        .arrays
+        .iter()
+        .filter(|array| matches!(array.nal_unit_type, 32..=34))
+        .flat_map(|array| array.units.iter())
+        .map(|unit| 4 + unit.len())
+        .sum();
+    let mut out = Vec::with_capacity(byte_count);
+    for array in &config.arrays {
+        if !matches!(array.nal_unit_type, 32..=34) {
+            continue;
+        }
+        for unit in &array.units {
+            out.extend_from_slice(&[0, 0, 0, 1]);
+            out.extend_from_slice(unit);
+        }
+    }
+    out
+}
+
 pub fn hevc_chunk_to_annex_b(
     payload: &[u8],
     samples: &[ChunkSample],
@@ -161,6 +187,23 @@ mod tests {
         let sample = [0, 0, 0, 2, 0xaa, 0xbb, 0, 0, 0, 1, 0xcc];
         let out = hevc_sample_to_annex_b(&sample, 4).unwrap();
         assert_eq!(out, vec![0, 0, 0, 1, 0xaa, 0xbb, 0, 0, 0, 1, 0xcc]);
+    }
+
+    #[test]
+    fn converts_hevc_decoder_config_parameter_sets_to_annex_b() {
+        let mut config = vec![
+            1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 120, 0, 0, 0, 0, 0, 0, 0, 0, 3, 4,
+        ];
+        config.extend_from_slice(&[0x20, 0, 1, 0, 2, 0xaa, 0xbb]);
+        config.extend_from_slice(&[0x21, 0, 1, 0, 1, 0xcc]);
+        config.extend_from_slice(&[0x22, 0, 1, 0, 1, 0xdd]);
+        config.extend_from_slice(&[0x27, 0, 1, 0, 1, 0xee]);
+
+        let out = hevc_decoder_config_to_annex_b(&config).unwrap();
+        assert_eq!(
+            out,
+            vec![0, 0, 0, 1, 0xaa, 0xbb, 0, 0, 0, 1, 0xcc, 0, 0, 0, 1, 0xdd,]
+        );
     }
 
     #[test]

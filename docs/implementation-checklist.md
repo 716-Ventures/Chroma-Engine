@@ -55,7 +55,7 @@
 - [x] Matroska block reader.
 - [x] MP4 writer with faststart `moov` before media data.
 - [x] H.264 AVC configuration parsing and Annex-B conversion.
-- [ ] HEVC configuration conversion.
+- [x] HEVC configuration conversion.
 - [x] Extract MP4/MOV H.264, HEVC, and AAC codec configuration records.
 - [ ] AAC/AC-3/E-AC-3/MP3/FLAC/ALAC sample entries.
 - [ ] Text subtitle to `mov_text`.
