@@ -235,7 +235,7 @@ fn manifest_track(bytes: &[u8], track_id: &str, target_ms: u64) -> Option<Manife
             .codec_string
             .or_else(|| fallback_codec_string(config.codec.as_str())),
         codec: config.codec,
-        language: None,
+        language: track_meta.and_then(|track| track.language.clone()),
         title: None,
         channels: track_meta.and_then(|track| track.channels),
         sample_rate: track_meta.and_then(|track| track.sample_rate),

@@ -391,7 +391,7 @@ fn tracks_from_mp4(meta: &mp4::Mp4BasicMetadata) -> Vec<MediaTrack> {
                 kind,
                 codec: track.codec.clone(),
                 duration_ms: track.duration_ms,
-                language: None,
+                language: track.language.clone(),
                 title: None,
                 flags: TrackFlags {
                     default: false,

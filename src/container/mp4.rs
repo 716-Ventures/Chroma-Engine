@@ -26,6 +26,7 @@ pub struct Mp4Track {
     pub kind: Mp4TrackKind,
     pub codec: String,
     pub duration_ms: Option<u64>,
+    pub language: Option<String>,
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub channels: Option<u32>,
@@ -344,6 +345,7 @@ fn parse_trak(payload: &[u8], index: u32) -> Option<Mp4Track> {
         kind,
         codec,
         duration_ms: mdia.duration_ms,
+        language: mdia.language,
         width,
         height,
         channels: stsd.channels,
@@ -355,6 +357,7 @@ fn parse_trak(payload: &[u8], index: u32) -> Option<Mp4Track> {
 struct MdiaInfo {
     handler: Option<String>,
     duration_ms: Option<u64>,
+    language: Option<String>,
     sample_entry: Option<SampleEntryInfo>,
 }
 
@@ -370,6 +373,7 @@ struct SampleEntryInfo {
 fn parse_mdia(payload: &[u8]) -> Option<MdiaInfo> {
     let mut handler = None;
     let mut duration_ms = None;
+    let mut language = None;
     let mut sample_entry = None;
 
     for atom in AtomIter::new(payload) {
@@ -377,6 +381,7 @@ fn parse_mdia(payload: &[u8]) -> Option<MdiaInfo> {
             handler = parse_hdlr(atom.payload);
         } else if atom.kind == *b"mdhd" {
             duration_ms = parse_mdhd_duration_ms(atom.payload);
+            language = parse_mdhd_language(atom.payload);
         } else if atom.kind == *b"minf" {
             sample_entry = parse_minf(atom.payload);
         }
@@ -385,6 +390,7 @@ fn parse_mdia(payload: &[u8]) -> Option<MdiaInfo> {
     Some(MdiaInfo {
         handler,
         duration_ms,
+        language,
         sample_entry,
     })
 }
@@ -1086,6 +1092,30 @@ fn parse_mdhd_duration_ms(payload: &[u8]) -> Option<u64> {
     }
 }
 
+fn parse_mdhd_language(payload: &[u8]) -> Option<String> {
+    let version = *payload.first()?;
+    let language_offset = if version == 1 { 32 } else { 20 };
+    if payload.len() < language_offset + 2 {
+        return None;
+    }
+    decode_iso_639_2(read_u16(&payload[language_offset..language_offset + 2])?)
+}
+
+fn decode_iso_639_2(bits: u16) -> Option<String> {
+    if bits == 0 || bits == 0x55c4 {
+        return None;
+    }
+    let mut out = String::with_capacity(3);
+    for shift in [10, 5, 0] {
+        let value = ((bits >> shift) & 0x1f) as u8;
+        if value == 0 || value > 26 {
+            return None;
+        }
+        out.push((b'a' + value - 1) as char);
+    }
+    Some(out)
+}
+
 fn parse_tkhd_size(payload: &[u8]) -> Option<(u32, u32)> {
     let version = *payload.first()?;
     let (width_offset, height_offset) = if version == 1 { (88, 92) } else { (76, 80) };
@@ -1277,6 +1307,38 @@ mod tests {
         assert_eq!(meta.tracks[1].codec, "aac");
         assert_eq!(meta.tracks[1].channels, Some(2));
         assert_eq!(meta.tracks[1].sample_rate, Some(48000));
+    }
+
+    #[test]
+    fn parses_mp4_track_language_from_mdhd() {
+        let mut data = ftyp();
+        let moov = atom(
+            b"moov",
+            &atom(
+                b"trak",
+                &[
+                    tkhd(None),
+                    atom(
+                        b"mdia",
+                        &[
+                            mdhd_with_language(48_000, 144_000, "eng"),
+                            hdlr(b"soun"),
+                            atom(
+                                b"minf",
+                                &atom(b"stbl", &stsd(b"mp4a", None, Some((2, 48_000)))),
+                            ),
+                        ]
+                        .concat(),
+                    ),
+                ]
+                .concat(),
+            ),
+        );
+        data.extend_from_slice(&moov);
+
+        let meta = parse_basic_metadata(&data);
+        assert_eq!(meta.tracks.len(), 1);
+        assert_eq!(meta.tracks[0].language.as_deref(), Some("eng"));
     }
 
     #[test]
@@ -1620,10 +1682,23 @@ mod tests {
     }
 
     fn mdhd(timescale: u32, duration: u32) -> Vec<u8> {
+        mdhd_with_language(timescale, duration, "und")
+    }
+
+    fn mdhd_with_language(timescale: u32, duration: u32, language: &str) -> Vec<u8> {
         let mut payload = vec![0_u8; 20];
         payload[12..16].copy_from_slice(&timescale.to_be_bytes());
         payload[16..20].copy_from_slice(&duration.to_be_bytes());
+        payload.extend_from_slice(&encode_iso_639_2(language).to_be_bytes());
+        payload.extend_from_slice(&0_u16.to_be_bytes());
         atom(b"mdhd", &payload)
+    }
+
+    fn encode_iso_639_2(language: &str) -> u16 {
+        language
+            .bytes()
+            .take(3)
+            .fold(0_u16, |bits, byte| (bits << 5) | u16::from(byte - b'a' + 1))
     }
 
     fn hdlr(handler: &[u8; 4]) -> Vec<u8> {
