@@ -42,7 +42,7 @@
 - [x] Extract MP4 audio fields: codec, channels, sample rate.
 - [x] Extract MP4 audio title/default/forced disposition.
 - [x] Extract audio fields: bitrate and MP4 E-AC-3 Atmos/JOC hints.
-- [ ] Extract Matroska E-AC-3 Atmos/JOC hints.
+- [x] Extract Matroska E-AC-3 Atmos/JOC hints.
 - [x] Extract subtitles: text vs bitmap classification, language/title, default/forced disposition.
 - [x] Extract chapters.
 - [x] Extract duration.

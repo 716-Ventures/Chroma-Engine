@@ -68,6 +68,7 @@ expression: probe
         "sampleRate": 48000,
         "bitrateBps": null,
         "atmos": false,
+        "objectAudioCandidate": false,
         "lossless": false
       },
       "subtitle": null

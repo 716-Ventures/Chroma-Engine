@@ -47,6 +47,8 @@ pub struct MatroskaTrack {
     pub pixel_format: Option<String>,
     pub channels: Option<u32>,
     pub sample_rate: Option<u32>,
+    pub atmos: bool,
+    pub object_audio_candidate: bool,
     pub default_duration_ns: Option<u64>,
     pub codec_private: Option<Vec<u8>>,
 }
@@ -723,6 +725,7 @@ fn parse_track_entry(payload: &[u8], index: u32) -> Option<MatroskaTrack> {
     let pixel_format = (kind == MatroskaTrackKind::Video)
         .then(|| video_pixel_format_from_codec_private(&codec, codec_private.as_deref()))
         .flatten();
+    let audio_features = matroska_audio_features(&codec);
     Some(MatroskaTrack {
         index,
         number: number.unwrap_or(u64::from(index) + 1),
@@ -737,9 +740,25 @@ fn parse_track_entry(payload: &[u8], index: u32) -> Option<MatroskaTrack> {
         pixel_format,
         channels,
         sample_rate,
+        atmos: audio_features.atmos,
+        object_audio_candidate: audio_features.object_audio_candidate,
         default_duration_ns,
         codec_private,
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AudioCodingFeatures {
+    atmos: bool,
+    object_audio_candidate: bool,
+}
+
+fn matroska_audio_features(codec: &str) -> AudioCodingFeatures {
+    let object_audio_candidate = matches!(codec, "eac3" | "truehd");
+    AudioCodingFeatures {
+        atmos: false,
+        object_audio_candidate,
+    }
 }
 
 fn video_pixel_format_from_codec_private(
@@ -1447,12 +1466,39 @@ mod tests {
         assert_eq!(meta.tracks[1].codec, "aac");
         assert_eq!(meta.tracks[1].channels, Some(2));
         assert_eq!(meta.tracks[1].sample_rate, Some(48000));
+        assert!(!meta.tracks[1].object_audio_candidate);
         assert_eq!(meta.chapters.len(), 1);
         assert_eq!(meta.chapters[0].id, "42");
         assert_eq!(meta.chapters[0].start_ms, 5_000);
         assert_eq!(meta.chapters[0].end_ms, Some(10_000));
         assert_eq!(meta.chapters[0].title.as_deref(), Some("Opening"));
         assert_eq!(meta.chapters[0].language.as_deref(), Some("eng"));
+    }
+
+    #[test]
+    fn marks_matroska_object_audio_candidates() {
+        let tracks = elem(
+            0x1654_ae6b,
+            &[
+                track_entry(1, 2, "A_EAC3", &[]),
+                track_entry(2, 2, "A_TRUEHD", &[]),
+                track_entry(3, 2, "A_AAC", &[]),
+            ]
+            .concat(),
+        );
+        let segment = elem(0x1853_8067, &tracks);
+        let mut bytes = elem(0x1a45_dfa3, &[]);
+        bytes.extend_from_slice(&segment);
+
+        let meta = parse_basic_metadata(&bytes);
+        let eac3 = &meta.tracks[0];
+        let truehd = &meta.tracks[1];
+        let aac = &meta.tracks[2];
+
+        assert!(!eac3.atmos);
+        assert!(eac3.object_audio_candidate);
+        assert!(truehd.object_audio_candidate);
+        assert!(!aac.object_audio_candidate);
     }
 
     #[test]

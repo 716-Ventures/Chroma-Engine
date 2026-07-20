@@ -258,6 +258,9 @@ pub struct AudioDescriptor {
     pub bitrate_bps: Option<u64>,
     /// Whether the track carries Dolby Atmos metadata.
     pub atmos: bool,
+    /// Whether this codec can carry object audio that should be preserved until frame analysis.
+    #[serde(default)]
+    pub object_audio_candidate: bool,
     /// Whether the codec is lossless.
     pub lossless: bool,
 }
@@ -438,6 +441,7 @@ fn tracks_from_mp4(meta: &mp4::Mp4BasicMetadata) -> Vec<MediaTrack> {
                     channels: track.channels,
                     sample_rate: track.sample_rate,
                     atmos: track.atmos,
+                    object_audio_candidate: track.atmos,
                 },
             })
         })
@@ -486,7 +490,8 @@ fn tracks_from_matroska(meta: &matroska::MatroskaBasicMetadata) -> Vec<MediaTrac
                     pixel_format: track.pixel_format.clone(),
                     channels: track.channels,
                     sample_rate: track.sample_rate,
-                    atmos: false,
+                    atmos: track.atmos,
+                    object_audio_candidate: track.object_audio_candidate,
                 },
             })
         })
@@ -517,6 +522,7 @@ struct TrackShape {
     channels: Option<u32>,
     sample_rate: Option<u32>,
     atmos: bool,
+    object_audio_candidate: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -560,6 +566,7 @@ fn media_track(input: TrackInput) -> MediaTrack {
             sample_rate: input.shape.sample_rate,
             bitrate_bps: input.shape.bitrate_bps,
             atmos: input.shape.atmos,
+            object_audio_candidate: input.shape.object_audio_candidate,
             lossless: matches!(
                 family,
                 CodecFamily::TrueHd | CodecFamily::Flac | CodecFamily::Alac
@@ -780,6 +787,46 @@ mod tests {
         assert_eq!(tracks[0].title.as_deref(), Some("English 5.1"));
         assert!(tracks[0].flags.default);
         assert!(!tracks[0].flags.forced);
+        assert_eq!(
+            tracks[0]
+                .audio
+                .as_ref()
+                .map(|audio| audio.object_audio_candidate),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn matroska_object_audio_candidates_reach_probe_tracks() {
+        let meta = matroska::MatroskaBasicMetadata {
+            duration_ms: Some(1_000),
+            tracks: vec![matroska::MatroskaTrack {
+                index: 0,
+                number: 1,
+                kind: matroska::MatroskaTrackKind::Audio,
+                codec: "eac3".to_string(),
+                language: Some("eng".to_string()),
+                name: Some("English surround".to_string()),
+                default: true,
+                forced: false,
+                width: None,
+                height: None,
+                pixel_format: None,
+                channels: Some(6),
+                sample_rate: Some(48_000),
+                atmos: false,
+                object_audio_candidate: true,
+                default_duration_ns: None,
+                codec_private: None,
+            }],
+            chapters: Vec::new(),
+            attachment_count: 0,
+        };
+
+        let tracks = tracks_from_matroska(&meta);
+        let audio = tracks[0].audio.as_ref().expect("audio descriptor");
+        assert!(!audio.atmos);
+        assert!(audio.object_audio_candidate);
     }
 
     #[test]
