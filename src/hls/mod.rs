@@ -17,7 +17,7 @@ use crate::{
         matroska::{self, MatroskaTrackKind},
         mp4::{self, Mp4TrackKind},
     },
-    packet::PacketRef,
+    packet::{ChunkPlan, PacketRef},
 };
 
 const VIDEO_PID: u16 = 0x0100;
@@ -75,6 +75,92 @@ pub struct HlsVodPlan {
     bandwidth_bits_per_second: u64,
 }
 
+pub struct HlsVodPlaylistPlan {
+    video_track_id: String,
+    audio_track_id: String,
+    video_codec: String,
+    audio_codec: String,
+    windows: Vec<SegmentWindow>,
+    target_duration_seconds: u64,
+    bandwidth_bits_per_second: u64,
+}
+
+impl HlsVodPlaylistPlan {
+    pub fn open(input: &Path, options: HlsOptions) -> Result<Self> {
+        let file = File::open(input).with_context(|| format!("open {}", input.display()))?;
+        let source_len = file
+            .metadata()
+            .with_context(|| format!("stat {}", input.display()))?
+            .len();
+        let source =
+            unsafe { Mmap::map(&file) }.with_context(|| format!("map {}", input.display()))?;
+        let bytes = source.as_ref();
+        let segment_target_ms = options.segment_target_ms.max(500);
+
+        if mp4::looks_like_mp4(bytes) {
+            hls_playlist_plan_from_mp4(
+                bytes,
+                source_len,
+                options.audio_track_id.as_deref(),
+                segment_target_ms,
+            )
+        } else if matroska::looks_like_ebml(bytes) {
+            hls_playlist_plan_from_matroska(
+                bytes,
+                source_len,
+                options.audio_track_id.as_deref(),
+                segment_target_ms,
+            )
+        } else {
+            bail!("native HLS currently supports MP4/MOV and Matroska/WebM sources");
+        }
+    }
+
+    pub fn segment_count(&self) -> usize {
+        self.windows.len()
+    }
+
+    pub fn target_duration_seconds(&self) -> u64 {
+        self.target_duration_seconds
+    }
+
+    pub fn bandwidth_bits_per_second(&self) -> u64 {
+        self.bandwidth_bits_per_second
+    }
+
+    pub fn video_codec(&self) -> &str {
+        &self.video_codec
+    }
+
+    pub fn audio_codec(&self) -> &str {
+        &self.audio_codec
+    }
+
+    pub fn video_track_id(&self) -> &str {
+        &self.video_track_id
+    }
+
+    pub fn audio_track_id(&self) -> &str {
+        &self.audio_track_id
+    }
+
+    pub fn segments(&self) -> Vec<HlsSegmentInfo> {
+        segment_infos(&self.windows)
+    }
+
+    pub fn master_playlist(&self) -> String {
+        master_playlist_body(
+            self.video_codec(),
+            self.audio_codec(),
+            self.bandwidth_bits_per_second,
+        )
+    }
+
+    pub fn media_playlist(&self) -> String {
+        media_playlist_for_windows(self.target_duration_seconds, &self.windows)
+    }
+}
+
 impl HlsVodPlan {
     pub fn open(input: &Path, options: HlsOptions) -> Result<Self> {
         let file = File::open(input).with_context(|| format!("open {}", input.display()))?;
@@ -100,19 +186,7 @@ impl HlsVodPlan {
         if windows.is_empty() {
             bail!("native HLS could not build keyframe-aligned segment windows");
         }
-        let target_duration_seconds = windows
-            .iter()
-            .map(|window| {
-                window
-                    .end_ms
-                    .saturating_sub(window.start_ms)
-                    .max(1)
-                    .saturating_add(999)
-                    / 1000
-            })
-            .max()
-            .unwrap_or(1)
-            .max(1);
+        let target_duration_seconds = target_duration_seconds_for_windows(&windows);
         let bandwidth_bits_per_second = estimate_hls_bandwidth_bits_per_second(&tracks, &windows);
 
         Ok(Self {
@@ -153,15 +227,7 @@ impl HlsVodPlan {
     }
 
     pub fn segments(&self) -> Vec<HlsSegmentInfo> {
-        self.windows
-            .iter()
-            .map(|window| HlsSegmentInfo {
-                index: window.index,
-                start_ms: window.start_ms,
-                duration_ms: window.end_ms.saturating_sub(window.start_ms).max(1),
-                uri: segment_name(window.index),
-            })
-            .collect()
+        segment_infos(&self.windows)
     }
 
     pub fn master_playlist(&self) -> String {
@@ -173,12 +239,7 @@ impl HlsVodPlan {
     }
 
     pub fn media_playlist(&self) -> String {
-        let durations: Vec<u64> = self
-            .windows
-            .iter()
-            .map(|window| window.end_ms.saturating_sub(window.start_ms).max(1))
-            .collect();
-        media_playlist_body(self.target_duration_seconds, &durations)
+        media_playlist_for_windows(self.target_duration_seconds, &self.windows)
     }
 
     pub fn mux_segment(&self, index: usize) -> Result<Vec<u8>> {
@@ -238,6 +299,26 @@ impl HlsVodPlan {
         }
         Ok(written)
     }
+}
+
+fn segment_infos(windows: &[SegmentWindow]) -> Vec<HlsSegmentInfo> {
+    windows
+        .iter()
+        .map(|window| HlsSegmentInfo {
+            index: window.index,
+            start_ms: window.start_ms,
+            duration_ms: window.end_ms.saturating_sub(window.start_ms).max(1),
+            uri: segment_name(window.index),
+        })
+        .collect()
+}
+
+fn media_playlist_for_windows(target_duration_seconds: u64, windows: &[SegmentWindow]) -> String {
+    let durations: Vec<u64> = windows
+        .iter()
+        .map(|window| window.end_ms.saturating_sub(window.start_ms).max(1))
+        .collect();
+    media_playlist_body(target_duration_seconds, &durations)
 }
 
 #[derive(Debug, Clone)]
@@ -605,6 +686,163 @@ fn hls_tracks_from_matroska(
             payload: audio_payload,
         },
     })
+}
+
+fn hls_playlist_plan_from_mp4(
+    bytes: &[u8],
+    source_len: u64,
+    requested_audio_track_id: Option<&str>,
+    segment_target_ms: u64,
+) -> Result<HlsVodPlaylistPlan> {
+    let meta = mp4::parse_basic_metadata(bytes);
+    let (video_track_id, video_meta) =
+        select_mp4_hls_track(&meta.tracks, Mp4TrackKind::Video, None)
+            .ok_or_else(|| anyhow!("native HLS MP4 path currently requires H.264 or HEVC video"))?;
+    let (audio_track_id, audio_meta) =
+        select_mp4_hls_track(&meta.tracks, Mp4TrackKind::Audio, requested_audio_track_id)
+            .ok_or_else(|| {
+                requested_audio_track_id
+                    .map(|track_id| {
+                        anyhow!(
+                            "native HLS MP4 path could not use requested audio track {track_id}"
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        anyhow!("native HLS MP4 path currently requires AAC, AC-3, or E-AC-3 audio")
+                    })
+            })?;
+    let video_config = mp4::parse_codec_config(bytes, Some(&video_track_id))
+        .ok_or_else(|| anyhow!("missing MP4 video decoder config"))?;
+    let audio_config = mp4::parse_codec_config(bytes, Some(&audio_track_id))
+        .ok_or_else(|| anyhow!("missing MP4 audio decoder config"))?;
+    let video_plan = mp4::parse_chunk_plan(bytes, Some(&video_track_id), segment_target_ms)
+        .ok_or_else(|| anyhow!("missing MP4 video chunk plan"))?;
+    hls_playlist_plan_from_chunk_plan(
+        video_track_id,
+        audio_track_id,
+        video_config
+            .codec_string
+            .unwrap_or_else(|| fallback_video_codec_string(video_meta.codec.as_str())),
+        audio_config
+            .codec_string
+            .unwrap_or_else(|| fallback_audio_codec_string(audio_meta.codec.as_str())),
+        video_plan,
+        source_len,
+        meta.duration_ms,
+    )
+}
+
+fn hls_playlist_plan_from_matroska(
+    bytes: &[u8],
+    source_len: u64,
+    requested_audio_track_id: Option<&str>,
+    segment_target_ms: u64,
+) -> Result<HlsVodPlaylistPlan> {
+    let meta = matroska::parse_basic_metadata(bytes);
+    let (video_track_id, video) =
+        select_matroska_hls_track(&meta.tracks, MatroskaTrackKind::Video, None).ok_or_else(
+            || anyhow!("native HLS Matroska path currently requires H.264 or HEVC video"),
+        )?;
+    let (audio_track_id, audio) = select_matroska_hls_track(
+        &meta.tracks,
+        MatroskaTrackKind::Audio,
+        requested_audio_track_id,
+    )
+    .ok_or_else(|| {
+        requested_audio_track_id
+            .map(|track_id| {
+                anyhow!("native HLS Matroska path could not use requested audio track {track_id}")
+            })
+            .unwrap_or_else(|| {
+                anyhow!("native HLS Matroska path currently requires AAC, AC-3, or E-AC-3 audio")
+            })
+    })?;
+    let video_plan = matroska::parse_chunk_plan(bytes, Some(&video_track_id), segment_target_ms)
+        .ok_or_else(|| anyhow!("missing Matroska video chunk plan"))?;
+    hls_playlist_plan_from_chunk_plan(
+        video_track_id,
+        audio_track_id,
+        matroska_video_codec_string(video),
+        matroska_audio_codec_string(audio),
+        video_plan,
+        source_len,
+        meta.duration_ms,
+    )
+}
+
+fn hls_playlist_plan_from_chunk_plan(
+    video_track_id: String,
+    audio_track_id: String,
+    video_codec: String,
+    audio_codec: String,
+    video_plan: ChunkPlan,
+    source_len: u64,
+    duration_ms: Option<u64>,
+) -> Result<HlsVodPlaylistPlan> {
+    let mut windows = chunk_plan_windows(&video_plan);
+    if windows.is_empty() {
+        bail!("native HLS could not build keyframe-aligned segment windows");
+    }
+    if let Some(duration_ms) = duration_ms {
+        if let Some(last) = windows.last_mut() {
+            last.end_ms = last.end_ms.max(duration_ms).max(last.start_ms.saturating_add(1));
+        }
+    }
+    let target_duration_seconds = target_duration_seconds_for_windows(&windows);
+    let bandwidth_bits_per_second =
+        estimate_hls_bandwidth_from_source_size(source_len, duration_ms);
+    Ok(HlsVodPlaylistPlan {
+        video_track_id,
+        audio_track_id,
+        video_codec,
+        audio_codec,
+        windows,
+        target_duration_seconds,
+        bandwidth_bits_per_second,
+    })
+}
+
+fn chunk_plan_windows(plan: &ChunkPlan) -> Vec<SegmentWindow> {
+    let windows = plan
+        .chunks
+        .iter()
+        .map(|chunk| {
+            let start_ms = chunk.start.as_millis();
+            let end_ms = start_ms
+                .saturating_add(chunk.duration.as_millis())
+                .max(start_ms.saturating_add(1));
+            SegmentWindow {
+                index: chunk.index as usize,
+                start_ms,
+                end_ms,
+            }
+        })
+        .collect();
+    collapse_short_windows(windows, MIN_SEGMENT_MS)
+}
+
+fn target_duration_seconds_for_windows(windows: &[SegmentWindow]) -> u64 {
+    windows
+        .iter()
+        .map(|window| {
+            window
+                .end_ms
+                .saturating_sub(window.start_ms)
+                .max(1)
+                .saturating_add(999)
+                / 1000
+        })
+        .max()
+        .unwrap_or(1)
+        .max(1)
+}
+
+fn estimate_hls_bandwidth_from_source_size(source_len: u64, duration_ms: Option<u64>) -> u64 {
+    let Some(duration_ms) = duration_ms.filter(|duration| *duration > 0) else {
+        return 12_000_000;
+    };
+    let average = source_len.saturating_mul(8).saturating_mul(1_000) / duration_ms;
+    average.saturating_add(average / 4).max(128_000)
 }
 
 fn segment_windows(video_packets: &[PacketRef], target_ms: u64) -> Vec<SegmentWindow> {

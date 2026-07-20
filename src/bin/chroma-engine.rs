@@ -10,7 +10,9 @@ use chroma_engine::container::{
         parse_chunk_plan as parse_mp4_chunk_plan, parse_codec_config as parse_mp4_codec_config,
     },
 };
-use chroma_engine::hls::{write_hls_vod, HlsOptions, HlsSegmentInfo, HlsVodPlan};
+use chroma_engine::hls::{
+    write_hls_vod, HlsOptions, HlsSegmentInfo, HlsVodPlan, HlsVodPlaylistPlan,
+};
 use chroma_engine::playback_manifest::{
     build_matroska_playback_manifest, build_mp4_playback_manifest, MatroskaManifestOptions,
     Mp4ManifestOptions,
@@ -478,7 +480,7 @@ fn main() -> Result<()> {
             audio_track,
             segment_ms,
         } => {
-            let plan = HlsVodPlan::open(
+            let plan = HlsVodPlaylistPlan::open(
                 &input,
                 HlsOptions {
                     segment_target_ms: segment_ms,
