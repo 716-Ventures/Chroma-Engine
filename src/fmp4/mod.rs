@@ -18,6 +18,26 @@ pub struct Fmp4Track {
     pub default_sample_duration: u32,
     pub default_sample_size: u32,
     pub default_sample_flags: u32,
+    pub sample_entry: Fmp4SampleEntry,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Fmp4SampleEntry {
+    Avc {
+        codec_config: Vec<u8>,
+        width: u16,
+        height: u16,
+    },
+    Hevc {
+        codec_config: Vec<u8>,
+        width: u16,
+        height: u16,
+    },
+    Aac {
+        decoder_config: Vec<u8>,
+        channel_count: u16,
+        sample_rate: u32,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,7 +159,7 @@ fn write_trak(out: &mut Vec<u8>, track: &Fmp4Track) {
                     Fmp4TrackKind::Audio => write_smhd(out),
                 }
                 write_dinf(out);
-                write_empty_stbl(out);
+                write_empty_stbl(out, track);
             });
         });
     });
@@ -166,8 +186,17 @@ fn write_tkhd(out: &mut Vec<u8>, track: &Fmp4Track) {
         );
         be_u16(out, 0);
         write_identity_matrix(out);
-        be_u32(out, 0);
-        be_u32(out, 0);
+        match &track.sample_entry {
+            Fmp4SampleEntry::Avc { width, height, .. }
+            | Fmp4SampleEntry::Hevc { width, height, .. } => {
+                be_u32(out, u32::from(*width) << 16);
+                be_u32(out, u32::from(*height) << 16);
+            }
+            Fmp4SampleEntry::Aac { .. } => {
+                be_u32(out, 0);
+                be_u32(out, 0);
+            }
+        }
     });
 }
 
@@ -221,12 +250,9 @@ fn write_dinf(out: &mut Vec<u8>) {
     });
 }
 
-fn write_empty_stbl(out: &mut Vec<u8>) {
+fn write_empty_stbl(out: &mut Vec<u8>, track: &Fmp4Track) {
     write_box(out, *b"stbl", |out| {
-        write_box(out, *b"stsd", |out| {
-            be_u32(out, 0);
-            be_u32(out, 0);
-        });
+        write_stsd(out, track);
         write_full_box(out, *b"stts", 0, 0, |out| be_u32(out, 0));
         write_full_box(out, *b"stsc", 0, 0, |out| be_u32(out, 0));
         write_full_box(out, *b"stsz", 0, 0, |out| {
@@ -235,6 +261,127 @@ fn write_empty_stbl(out: &mut Vec<u8>) {
         });
         write_full_box(out, *b"stco", 0, 0, |out| be_u32(out, 0));
     });
+}
+
+fn write_stsd(out: &mut Vec<u8>, track: &Fmp4Track) {
+    write_full_box(out, *b"stsd", 0, 0, |out| {
+        be_u32(out, 1);
+        match &track.sample_entry {
+            Fmp4SampleEntry::Avc {
+                codec_config,
+                width,
+                height,
+            } => write_video_sample_entry(out, *b"avc1", *width, *height, *b"avcC", codec_config),
+            Fmp4SampleEntry::Hevc {
+                codec_config,
+                width,
+                height,
+            } => write_video_sample_entry(out, *b"hvc1", *width, *height, *b"hvcC", codec_config),
+            Fmp4SampleEntry::Aac {
+                decoder_config,
+                channel_count,
+                sample_rate,
+            } => write_audio_sample_entry(out, *b"mp4a", *channel_count, *sample_rate, |out| {
+                write_esds(out, decoder_config)
+            }),
+        }
+    });
+}
+
+fn write_video_sample_entry(
+    out: &mut Vec<u8>,
+    coding_name: [u8; 4],
+    width: u16,
+    height: u16,
+    config_name: [u8; 4],
+    codec_config: &[u8],
+) {
+    write_box(out, coding_name, |out| {
+        out.extend_from_slice(&[0; 6]);
+        be_u16(out, 1);
+        be_u16(out, 0);
+        be_u16(out, 0);
+        be_u32(out, 0);
+        be_u32(out, 0);
+        be_u32(out, 0);
+        be_u16(out, width);
+        be_u16(out, height);
+        be_u32(out, 0x0048_0000);
+        be_u32(out, 0x0048_0000);
+        be_u32(out, 0);
+        be_u16(out, 1);
+        out.extend_from_slice(&[0; 32]);
+        be_u16(out, 0x0018);
+        be_u16(out, 0xffff);
+        write_box(out, config_name, |out| out.extend_from_slice(codec_config));
+    });
+}
+
+fn write_audio_sample_entry<F>(
+    out: &mut Vec<u8>,
+    coding_name: [u8; 4],
+    channel_count: u16,
+    sample_rate: u32,
+    write_extension: F,
+) where
+    F: FnOnce(&mut Vec<u8>),
+{
+    write_box(out, coding_name, |out| {
+        out.extend_from_slice(&[0; 6]);
+        be_u16(out, 1);
+        be_u16(out, 0);
+        be_u16(out, 0);
+        be_u32(out, 0);
+        be_u16(out, channel_count);
+        be_u16(out, 16);
+        be_u16(out, 0);
+        be_u16(out, 0);
+        be_u32(out, sample_rate << 16);
+        write_extension(out);
+    });
+}
+
+fn write_esds(out: &mut Vec<u8>, decoder_config: &[u8]) {
+    write_full_box(out, *b"esds", 0, 0, |out| {
+        write_descriptor(out, 0x03, |out| {
+            be_u16(out, 0);
+            out.push(0);
+            write_descriptor(out, 0x04, |out| {
+                out.push(0x40);
+                out.push(0x15);
+                out.extend_from_slice(&[0, 0, 0]);
+                be_u32(out, 0);
+                be_u32(out, 0);
+                write_descriptor(out, 0x05, |out| out.extend_from_slice(decoder_config));
+            });
+            write_descriptor(out, 0x06, |out| out.push(2));
+        });
+    });
+}
+
+fn write_descriptor<F>(out: &mut Vec<u8>, tag: u8, write_payload: F)
+where
+    F: FnOnce(&mut Vec<u8>),
+{
+    out.push(tag);
+    let len_pos = out.len();
+    out.extend_from_slice(&[0; 4]);
+    let payload_start = out.len();
+    write_payload(out);
+    let len = out.len() - payload_start;
+    write_descriptor_len(&mut out[len_pos..len_pos + 4], len);
+}
+
+fn write_descriptor_len(slot: &mut [u8], mut len: usize) {
+    let mut bytes = [0u8; 4];
+    for i in (0..4).rev() {
+        bytes[i] = (len & 0x7f) as u8;
+        if i != 3 {
+            bytes[i] |= 0x80;
+        }
+        len >>= 7;
+    }
+    slot.copy_from_slice(&bytes);
 }
 
 fn write_mvex(out: &mut Vec<u8>, tracks: &[Fmp4Track]) {
@@ -348,6 +495,11 @@ mod tests {
                 default_sample_duration: 3_753,
                 default_sample_size: 0,
                 default_sample_flags: 0x0101_0000,
+                sample_entry: Fmp4SampleEntry::Avc {
+                    codec_config: vec![1, 100, 0, 31, 0xff, 0xe1, 0, 0],
+                    width: 1_920,
+                    height: 1_080,
+                },
             },
             Fmp4Track {
                 id: 2,
@@ -356,6 +508,11 @@ mod tests {
                 default_sample_duration: 1_024,
                 default_sample_size: 0,
                 default_sample_flags: 0x0200_0000,
+                sample_entry: Fmp4SampleEntry::Aac {
+                    decoder_config: vec![0x11, 0x90],
+                    channel_count: 6,
+                    sample_rate: 48_000,
+                },
             },
         ])
         .expect("init segment");
@@ -363,7 +520,39 @@ mod tests {
         assert_eq!(&init[4..8], b"ftyp");
         assert!(contains_box(&init, b"moov"));
         assert!(init.windows(4).any(|w| w == b"mvex"));
+        assert!(init.windows(4).any(|w| w == b"avc1"));
+        assert!(init.windows(4).any(|w| w == b"avcC"));
+        assert!(init.windows(4).any(|w| w == b"mp4a"));
+        assert!(init.windows(4).any(|w| w == b"esds"));
         assert_eq!(top_level_boxes(&init), vec![*b"ftyp", *b"moov"]);
+    }
+
+    #[test]
+    fn init_segment_writes_hevc_sample_description() {
+        let init = init_segment(&[Fmp4Track {
+            id: 1,
+            kind: Fmp4TrackKind::Video,
+            timescale: 90_000,
+            default_sample_duration: 3_753,
+            default_sample_size: 0,
+            default_sample_flags: 0x0101_0000,
+            sample_entry: Fmp4SampleEntry::Hevc {
+                codec_config: vec![
+                    1, 1, 0x60, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xf3, 0,
+                ],
+                width: 3_840,
+                height: 2_160,
+            },
+        }])
+        .expect("init segment");
+
+        assert!(init.windows(4).any(|w| w == b"hvc1"));
+        assert!(init.windows(4).any(|w| w == b"hvcC"));
+        assert!(init.windows(23).any(|w| {
+            w == [
+                1, 1, 0x60, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xf3, 0,
+            ]
+        }));
     }
 
     #[test]
