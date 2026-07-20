@@ -396,6 +396,23 @@ pub fn write_hls_vod(input: &Path, output_dir: &Path, options: HlsOptions) -> Re
     })
 }
 
+pub fn write_hls_segment(
+    input: &Path,
+    index: usize,
+    output: &Path,
+    options: HlsOptions,
+) -> Result<HlsSegmentInfo> {
+    let file = File::open(input).with_context(|| format!("open {}", input.display()))?;
+    let source = unsafe { Mmap::map(&file) }.with_context(|| format!("map {}", input.display()))?;
+    let bytes = source.as_ref();
+    if matroska::looks_like_ebml(bytes) {
+        return write_matroska_hls_segment(bytes, index, output, options);
+    }
+
+    let plan = HlsVodPlan::open(input, options)?;
+    plan.write_segment(index, output)
+}
+
 fn select_mp4_hls_track<'a>(
     tracks: &'a [mp4::Mp4Track],
     kind: Mp4TrackKind,
@@ -770,6 +787,122 @@ fn hls_playlist_plan_from_matroska(
     )
 }
 
+fn write_matroska_hls_segment(
+    bytes: &[u8],
+    index: usize,
+    output: &Path,
+    options: HlsOptions,
+) -> Result<HlsSegmentInfo> {
+    let segment_target_ms = options.segment_target_ms.max(500);
+    let plan = hls_playlist_plan_from_matroska(
+        bytes,
+        bytes.len() as u64,
+        options.audio_track_id.as_deref(),
+        segment_target_ms,
+    )?;
+    let window = plan
+        .windows
+        .get(index)
+        .copied()
+        .ok_or_else(|| anyhow!("HLS segment index {index} is out of range"))?;
+    let meta = matroska::parse_basic_metadata(bytes);
+    let (_, video) = select_matroska_hls_track(&meta.tracks, MatroskaTrackKind::Video, None)
+        .ok_or_else(|| {
+            anyhow!("native HLS Matroska path currently requires H.264 or HEVC video")
+        })?;
+    let (_, audio) = select_matroska_hls_track(
+        &meta.tracks,
+        MatroskaTrackKind::Audio,
+        Some(plan.audio_track_id()),
+    )
+    .ok_or_else(|| {
+        anyhow!(
+            "native HLS Matroska path could not use requested audio track {}",
+            plan.audio_track_id()
+        )
+    })?;
+    let tracks = matroska::parse_packet_tracks_in_time_window(
+        bytes,
+        &[plan.video_track_id(), plan.audio_track_id()],
+        window.start_ms,
+        window.end_ms,
+    )
+    .ok_or_else(|| anyhow!("missing Matroska packets for HLS segment window"))?;
+    let video_packets = tracks
+        .iter()
+        .find(|track| track.id == plan.video_track_id())
+        .map(|track| track.packets.clone())
+        .ok_or_else(|| anyhow!("missing Matroska video packets for HLS segment window"))?;
+    let audio_packets = tracks
+        .iter()
+        .find(|track| track.id == plan.audio_track_id())
+        .map(|track| track.packets.clone())
+        .ok_or_else(|| anyhow!("missing Matroska audio packets for HLS segment window"))?;
+    let video_payload = match video.codec.as_str() {
+        "h264" => {
+            let avc = video
+                .codec_private
+                .as_deref()
+                .ok_or_else(|| anyhow!("missing Matroska avcC private data"))?;
+            PayloadKind::Avc {
+                nalu_length_size: parse_avc_decoder_config(avc)?.nalu_length_size,
+                parameter_sets: parse_avc_decoder_config(avc)?,
+            }
+        }
+        "hevc" => {
+            let hvc = video
+                .codec_private
+                .as_deref()
+                .ok_or_else(|| anyhow!("missing Matroska hvcC private data"))?;
+            let parameter_sets = parse_hevc_decoder_config(hvc)?;
+            PayloadKind::Hevc {
+                nalu_length_size: parameter_sets.nalu_length_size,
+                parameter_sets,
+            }
+        }
+        other => bail!("native HLS Matroska video codec {other} is not supported"),
+    };
+    let audio_payload = match audio.codec.as_str() {
+        "aac" => {
+            let asc = audio
+                .codec_private
+                .as_deref()
+                .ok_or_else(|| anyhow!("missing Matroska AAC private data"))?;
+            PayloadKind::Aac {
+                config: parse_audio_specific_config(asc)?,
+            }
+        }
+        "ac3" => PayloadKind::Ac3,
+        "eac3" => PayloadKind::Eac3,
+        other => bail!("native HLS Matroska audio codec {other} is not supported"),
+    };
+    let tracks = HlsTrackSet {
+        video: HlsTrack {
+            id: plan.video_track_id().to_string(),
+            codec_string: plan.video_codec().to_string(),
+            packets: video_packets,
+            payload: video_payload,
+        },
+        audio: HlsTrack {
+            id: plan.audio_track_id().to_string(),
+            codec_string: plan.audio_codec().to_string(),
+            packets: audio_packets,
+            payload: audio_payload,
+        },
+    };
+    let segment = mux_segment(bytes, &tracks, window)?;
+    if let Some(parent) = output.parent() {
+        create_dir_all(parent)?;
+    }
+    write(output, segment)?;
+    Ok(HlsSegmentInfo {
+        index: window.index,
+        start_ms: window.start_ms,
+        duration_ms: window.end_ms.saturating_sub(window.start_ms).max(1),
+        uri: segment_name(window.index),
+    })
+}
+
 fn hls_playlist_plan_from_chunk_plan(
     video_track_id: String,
     audio_track_id: String,
@@ -785,7 +918,10 @@ fn hls_playlist_plan_from_chunk_plan(
     }
     if let Some(duration_ms) = duration_ms {
         if let Some(last) = windows.last_mut() {
-            last.end_ms = last.end_ms.max(duration_ms).max(last.start_ms.saturating_add(1));
+            last.end_ms = last
+                .end_ms
+                .max(duration_ms)
+                .max(last.start_ms.saturating_add(1));
         }
     }
     let target_duration_seconds = target_duration_seconds_for_windows(&windows);

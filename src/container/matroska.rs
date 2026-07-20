@@ -463,6 +463,73 @@ fn parse_cue_point(payload: &[u8], selected_track_number: u64, timecode_scale: u
         .then(|| matroska_timecode_to_ms(cue_time.unwrap_or(0) as i64, timecode_scale))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CueLocation {
+    time_ms: u64,
+    cluster_position: usize,
+}
+
+fn cue_cluster_position_for_time(
+    segment: &[u8],
+    selected_track_number: u64,
+    start_ms: u64,
+    timecode_scale: u64,
+) -> Option<usize> {
+    let cues = find_cues_payload(segment)?;
+    ElementIter::new(cues)
+        .filter(|element| element.id == 0xbb)
+        .filter_map(|cue| {
+            parse_cue_point_location(cue.payload, selected_track_number, timecode_scale)
+        })
+        .filter(|cue| cue.time_ms <= start_ms)
+        .max_by_key(|cue| cue.time_ms)
+        .map(|cue| cue.cluster_position)
+}
+
+fn parse_cue_point_location(
+    payload: &[u8],
+    selected_track_number: u64,
+    timecode_scale: u64,
+) -> Option<CueLocation> {
+    let mut cue_time = None;
+    let mut cluster_position = None;
+
+    for element in ElementIter::new(payload) {
+        match element.id {
+            0xb3 => cue_time = read_uint(element.payload),
+            0xb7 => {
+                if let Some(position) =
+                    cue_position_for_track(element.payload, selected_track_number)
+                {
+                    cluster_position = Some(position);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Some(CueLocation {
+        time_ms: matroska_timecode_to_ms(cue_time.unwrap_or(0) as i64, timecode_scale),
+        cluster_position: cluster_position?,
+    })
+}
+
+fn cue_position_for_track(payload: &[u8], selected_track_number: u64) -> Option<usize> {
+    let mut track = None;
+    let mut cluster_position = None;
+    for element in ElementIter::new(payload) {
+        match element.id {
+            0xf7 => track = read_uint(element.payload),
+            0xf1 => {
+                cluster_position =
+                    read_uint(element.payload).and_then(|value| usize::try_from(value).ok())
+            }
+            _ => {}
+        }
+    }
+    (track == Some(selected_track_number)).then_some(cluster_position?)
+}
+
 fn cue_positions_track(payload: &[u8]) -> Option<u64> {
     ElementIter::new(payload)
         .find(|element| element.id == 0xf7)
@@ -656,6 +723,88 @@ struct SelectedChunkTrack {
 pub struct MatroskaPacketTrack {
     pub id: String,
     pub packets: Vec<PacketRef>,
+}
+
+pub fn parse_packet_tracks_in_time_window(
+    bytes: &[u8],
+    requested_track_ids: &[&str],
+    start_ms: u64,
+    end_ms: u64,
+) -> Option<Vec<MatroskaPacketTrack>> {
+    let meta = parse_basic_metadata(bytes);
+    let selected = requested_track_ids
+        .iter()
+        .map(|track_id| select_chunk_track(&meta.tracks, Some(track_id)))
+        .collect::<Option<Vec<_>>>()?;
+    let segment_element = find_first_child_element(bytes, 0x1853_8067)?;
+    let segment = segment_element.payload;
+    let segment_base_offset = segment_element.payload_offset;
+    let timecode_scale = parse_segment_timecode_scale(segment);
+    let scan_offset =
+        cue_cluster_position_for_time(segment, selected[0].number, start_ms, timecode_scale)
+            .unwrap_or(0);
+    let mut out = selected
+        .iter()
+        .map(|track| MatroskaPacketTrack {
+            id: track.id.clone(),
+            packets: Vec::new(),
+        })
+        .collect::<Vec<_>>();
+    let mut saw_window_packet = false;
+    let scan = segment.get(scan_offset..)?;
+
+    'clusters: for cluster in ElementIter::new(scan).filter(|element| element.id == 0x1f43_b675) {
+        let cluster_timecode = parse_cluster_timecode(cluster.payload).unwrap_or(0);
+        let cluster_ms = matroska_timecode_to_ms(cluster_timecode, timecode_scale);
+        if saw_window_packet && cluster_ms >= end_ms {
+            break;
+        }
+
+        for block in ClusterBlockIter::new_with_base(
+            cluster.payload,
+            segment_base_offset + scan_offset + cluster.payload_offset,
+        ) {
+            let Some(track_index) = selected
+                .iter()
+                .position(|track| track.number == block.track_number)
+            else {
+                continue;
+            };
+            let timestamp_ms = matroska_timecode_to_ms(
+                cluster_timecode.saturating_add_signed(i64::from(block.relative_timecode)),
+                timecode_scale,
+            );
+            if timestamp_ms >= end_ms {
+                continue;
+            }
+            if timestamp_ms < start_ms {
+                continue;
+            }
+            saw_window_packet = true;
+            push_block_packets(
+                &mut out[track_index].packets,
+                &block,
+                timestamp_ms,
+                selected[track_index].frame_duration_ms,
+            );
+        }
+
+        if saw_window_packet && cluster_ms > end_ms {
+            break 'clusters;
+        }
+    }
+
+    if out.iter().any(|track| track.packets.is_empty()) {
+        return None;
+    }
+    for track in &mut out {
+        let last_duration =
+            infer_last_packet_duration(&track.packets).unwrap_or_else(|| TimeDelta::millis(0));
+        if let Some(last) = track.packets.last_mut() {
+            last.duration = last_duration;
+        }
+    }
+    Some(out)
 }
 
 fn select_chunk_track(
