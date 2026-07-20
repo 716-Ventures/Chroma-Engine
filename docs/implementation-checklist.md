@@ -126,10 +126,10 @@
 - [x] **Milestone: ready to update GenusServer and test in the web player.** Verified with `/Volumes/Movies/42.mp4`: Chroma Engine emits an fMP4 HLS playlist with `#EXT-X-MAP`, `init.mp4`, and `.m4s` media fragments without FFmpeg. Test artifact: `/tmp/chroma-engine-milestone-42-20260720`.
 - [x] Define minimum web-player test contract: Chroma-native manifest, selected tracks, codec config, chunk URLs, timestamp model, and error shape. See `docs/web-player-test-contract.md`.
 - [x] Emit browser-playable or WebCodecs-ready H.264/AAC output for one real MP4. Covered by `scripts/smoke-web-player-output.sh`.
-- [ ] Add a GenusServer env-flagged route that serves the Chroma-native manifest and chunks.
+- [x] Add a GenusServer env-flagged route that serves the Chroma-native manifest and chunks. GenusServer now proxies `/v1/chroma/{sessionId}/...` and the stream sidecar serves Chroma Engine manifests, fMP4 HLS playlists, `init.mp4`, and `.m4s` fragments; smoke-covered by `npm run smoke:chroma-hls --workspace @chroma-server/admin-web -- /Volumes/Movies/42.mp4`.
 - [ ] Run one end-to-end web player test using Chroma Engine output.
 - [ ] Replace host-server playback/probe contracts with Chroma Engine contracts.
-- [ ] Run Chroma Engine behind an env flag.
+- [x] Run Chroma Engine behind an env flag. GenusServer gates playback selection through `CHROMA_ENGINE_PLAYBACK`; the stream/analyzer binary path is overridable with `CHROMA_ENGINE_BIN`.
 - [ ] Add side-by-side diagnostics for Chroma Engine vs legacy media path during migration.
 - [ ] Switch playback sessions to Chroma Engine.
 - [ ] Switch offline MKV remux to Rust engine.
