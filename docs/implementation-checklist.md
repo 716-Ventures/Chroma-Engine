@@ -122,7 +122,7 @@
 - [x] CPU fallback decision.
 - [x] Linux VAAPI/NVENC/QSV path.
 - [x] Windows NVENC/QSV/AMF path.
-- [ ] Warm encoder session initialization. `warmup` is intentionally a no-op while native encode backends are planned but not executable.
+- [ ] Warm encoder session initialization. AAC AudioToolbox warmup now instantiates a native converter with a tiny silent encode before playback; still open until native video and bridge backends have matching warmups.
 
 ## Integration
 

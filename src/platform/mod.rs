@@ -1,7 +1,10 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{error::EngineErrorCode, transcode::AudioCodec};
+use crate::{
+    error::EngineErrorCode,
+    transcode::{AudioCodec, PcmAudioFormat, encode_aac_from_interleaved_i16},
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -87,10 +90,22 @@ pub struct AudioEncoderBackend {
 pub struct EncoderWarmupTask {
     /// Encoder name to warm.
     pub encoder: String,
-    /// Output video codec warmed by this task.
-    pub codec: VideoOutputCodec,
+    /// Media domain warmed by this task.
+    pub kind: EncoderWarmupKind,
+    /// Output codec warmed by this task.
+    pub codec: String,
     /// Whether this warmup is required before first playback.
     pub required: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+/// Media domain for an encoder warmup task.
+pub enum EncoderWarmupKind {
+    /// Video encoder warmup.
+    Video,
+    /// Audio encoder warmup.
+    Audio,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -186,20 +201,33 @@ pub fn encoder_probe() -> EncoderProbe {
 pub fn encoder_backend_plan() -> EncoderBackendPlan {
     let os = std::env::consts::OS.to_string();
     let video_backends = video_backend_matrix();
+    let audio_backends = audio_backend_matrix();
     let warmup_tasks = video_backends
         .iter()
         .filter(|backend| backend.available && backend.kind != HardwareKind::Cpu)
         .map(|backend| EncoderWarmupTask {
             encoder: backend.video_encoder.clone(),
-            codec: backend.codec,
+            kind: EncoderWarmupKind::Video,
+            codec: video_codec_label(backend.codec).to_string(),
             required: true,
         })
+        .chain(
+            audio_backends
+                .iter()
+                .filter(|backend| backend.available)
+                .map(|backend| EncoderWarmupTask {
+                    encoder: backend.encoder.clone(),
+                    kind: EncoderWarmupKind::Audio,
+                    codec: audio_codec_label(backend.codec).to_string(),
+                    required: true,
+                }),
+        )
         .collect();
 
     EncoderBackendPlan {
         os,
         video_backends,
-        audio_backends: audio_backend_matrix(),
+        audio_backends,
         cpu_fallback: default_cpu_profile(),
         warmup_tasks,
     }
@@ -214,6 +242,31 @@ pub fn warmup() -> Result<(), EncoderWarmupError> {
                 reason: "encoder warmup task has an empty encoder name".to_string(),
             });
         }
+        run_warmup_task(&task)?;
+    }
+    Ok(())
+}
+
+fn run_warmup_task(task: &EncoderWarmupTask) -> Result<(), EncoderWarmupError> {
+    match (task.kind, task.encoder.as_str(), task.codec.as_str()) {
+        (EncoderWarmupKind::Audio, "chroma-audiotoolbox-aac", "aac") => warm_aac_encoder(),
+        _ => Ok(()),
+    }
+}
+
+fn warm_aac_encoder() -> Result<(), EncoderWarmupError> {
+    #[cfg(target_os = "macos")]
+    {
+        let format = PcmAudioFormat {
+            sample_rate: 48_000,
+            channels: 2,
+        };
+        let pcm = vec![0_i16; 2048 * format.channels as usize];
+        encode_aac_from_interleaved_i16(format, &pcm, 128_000).map_err(|error| {
+            EncoderWarmupError {
+                reason: format!("AAC warmup failed: {error}"),
+            }
+        })?;
     }
     Ok(())
 }
@@ -320,6 +373,21 @@ fn audio_backend_matrix() -> Vec<AudioEncoderBackend> {
 
 fn audio_backend_available(codec: AudioCodec) -> bool {
     matches!(codec, AudioCodec::Aac) && cfg!(target_os = "macos")
+}
+
+fn video_codec_label(codec: VideoOutputCodec) -> &'static str {
+    match codec {
+        VideoOutputCodec::H264 => "h264",
+        VideoOutputCodec::Hevc => "hevc",
+    }
+}
+
+fn audio_codec_label(codec: AudioCodec) -> &'static str {
+    match codec {
+        AudioCodec::Aac => "aac",
+        AudioCodec::Ac3 => "ac3",
+        AudioCodec::Eac3 => "eac3",
+    }
 }
 
 fn planned_video_backend(
@@ -437,7 +505,12 @@ mod tests {
                     && backend.codec == VideoOutputCodec::Hevc
                     && !backend.available
             }));
-            assert!(plan.warmup_tasks.is_empty());
+            assert!(
+                !plan
+                    .warmup_tasks
+                    .iter()
+                    .any(|task| task.kind == EncoderWarmupKind::Video)
+            );
         } else {
             assert!(
                 plan.video_backends
@@ -450,5 +523,17 @@ mod tests {
     #[test]
     fn warmup_validates_planned_encoder_tasks() {
         warmup().unwrap();
+    }
+
+    #[test]
+    fn backend_plan_warms_available_audio_backends() {
+        let plan = encoder_backend_plan();
+        let has_aac_warmup = plan.warmup_tasks.iter().any(|task| {
+            task.kind == EncoderWarmupKind::Audio
+                && task.codec == "aac"
+                && task.encoder == "chroma-audiotoolbox-aac"
+        });
+
+        assert_eq!(has_aac_warmup, cfg!(target_os = "macos"));
     }
 }
