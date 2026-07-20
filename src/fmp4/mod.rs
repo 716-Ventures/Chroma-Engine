@@ -553,6 +553,8 @@ fn rescale_time(units: u64, from_units_per_second: u32, to_units_per_second: u32
 
 #[cfg(test)]
 mod tests {
+    use crate::packet::{PacketRef, TimeDelta, TimePoint};
+
     use super::*;
 
     #[test]
@@ -744,6 +746,79 @@ mod tests {
     }
 
     #[test]
+    fn media_fragment_inspection_validates_timing_without_external_tools() {
+        let packets = vec![
+            PacketRef {
+                source_offset: 0,
+                size: 3,
+                pts: TimePoint::millis(1_000),
+                dts: TimePoint::millis(900),
+                duration: TimeDelta::millis(40),
+                keyframe: true,
+            },
+            PacketRef {
+                source_offset: 3,
+                size: 2,
+                pts: TimePoint::millis(1_040),
+                dts: TimePoint::millis(940),
+                duration: TimeDelta::millis(40),
+                keyframe: false,
+            },
+        ];
+        let samples = samples_from_packets_with_timescale(&packets, 90_000);
+        let base_decode_time = decode_time_for_timescale(&packets[0], 90_000);
+        let fragment = media_fragment(
+            11,
+            &[Fmp4FragmentTrack {
+                track_id: 1,
+                base_decode_time,
+                samples,
+                payload: vec![0xaa, 0xbb, 0xcc, 0xdd, 0xee],
+            }],
+        )
+        .expect("media fragment");
+
+        let moof = top_level_box_payload(&fragment, b"moof").expect("moof");
+        let traf = child_box_payload(moof, b"traf").expect("traf");
+        let tfdt = child_box_payload(traf, b"tfdt").expect("tfdt");
+        let trun = child_box_payload(traf, b"trun").expect("trun");
+        let mdat_offset = find_top_level_box(&fragment, b"mdat").expect("mdat");
+
+        assert_eq!(tfdt_base_decode_time(tfdt), Some(81_000));
+        let inspected = inspect_trun(trun).expect("trun inspection");
+        assert_eq!(inspected.data_offset, (mdat_offset + 8) as i32);
+        assert_eq!(
+            inspected.samples,
+            vec![
+                InspectedSample {
+                    duration: 3_600,
+                    size: 3,
+                    flags: 0x0200_0000,
+                    composition_time_offset: 9_000,
+                },
+                InspectedSample {
+                    duration: 3_600,
+                    size: 2,
+                    flags: 0x0101_0000,
+                    composition_time_offset: 9_000,
+                },
+            ]
+        );
+        assert_eq!(
+            inspected
+                .samples
+                .iter()
+                .map(|sample| sample.size)
+                .sum::<u32>(),
+            5
+        );
+        assert_eq!(
+            &fragment[mdat_offset + 8..],
+            &[0xaa, 0xbb, 0xcc, 0xdd, 0xee]
+        );
+    }
+
+    #[test]
     fn media_fragment_rejects_payload_size_mismatch() {
         let err = media_fragment(
             1,
@@ -785,6 +860,88 @@ mod tests {
             offset += size;
         }
         None
+    }
+
+    fn top_level_box_payload<'a>(bytes: &'a [u8], name: &[u8; 4]) -> Option<&'a [u8]> {
+        let offset = find_top_level_box(bytes, name)?;
+        box_payload_at(bytes, offset)
+    }
+
+    fn child_box_payload<'a>(bytes: &'a [u8], name: &[u8; 4]) -> Option<&'a [u8]> {
+        let mut offset = 0;
+        while offset + 8 <= bytes.len() {
+            let size = u32::from_be_bytes(bytes[offset..offset + 4].try_into().ok()?) as usize;
+            if size < 8 || offset + size > bytes.len() {
+                return None;
+            }
+            if &bytes[offset + 4..offset + 8] == name {
+                return Some(&bytes[offset + 8..offset + size]);
+            }
+            offset += size;
+        }
+        None
+    }
+
+    fn box_payload_at(bytes: &[u8], offset: usize) -> Option<&[u8]> {
+        let size = u32::from_be_bytes(bytes.get(offset..offset + 4)?.try_into().ok()?) as usize;
+        if size < 8 || offset + size > bytes.len() {
+            return None;
+        }
+        Some(&bytes[offset + 8..offset + size])
+    }
+
+    fn tfdt_base_decode_time(payload: &[u8]) -> Option<u64> {
+        if payload.len() < 12 || payload[0] != 1 {
+            return None;
+        }
+        Some(u64::from_be_bytes(payload[4..12].try_into().ok()?))
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct InspectedTrun {
+        data_offset: i32,
+        samples: Vec<InspectedSample>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct InspectedSample {
+        duration: u32,
+        size: u32,
+        flags: u32,
+        composition_time_offset: i32,
+    }
+
+    fn inspect_trun(payload: &[u8]) -> Option<InspectedTrun> {
+        if payload.len() < 12 || payload[0] != 1 {
+            return None;
+        }
+        let flags = u32::from_be_bytes([0, payload[1], payload[2], payload[3]]);
+        if flags != 0x000f01 {
+            return None;
+        }
+        let sample_count = u32::from_be_bytes(payload[4..8].try_into().ok()?) as usize;
+        let data_offset = i32::from_be_bytes(payload[8..12].try_into().ok()?);
+        let mut offset = 12_usize;
+        let mut samples = Vec::with_capacity(sample_count);
+        for _ in 0..sample_count {
+            let end = offset.checked_add(16)?;
+            if end > payload.len() {
+                return None;
+            }
+            samples.push(InspectedSample {
+                duration: u32::from_be_bytes(payload[offset..offset + 4].try_into().ok()?),
+                size: u32::from_be_bytes(payload[offset + 4..offset + 8].try_into().ok()?),
+                flags: u32::from_be_bytes(payload[offset + 8..offset + 12].try_into().ok()?),
+                composition_time_offset: i32::from_be_bytes(
+                    payload[offset + 12..offset + 16].try_into().ok()?,
+                ),
+            });
+            offset = end;
+        }
+        (offset == payload.len()).then_some(InspectedTrun {
+            data_offset,
+            samples,
+        })
     }
 
     fn contains_box(bytes: &[u8], name: &[u8; 4]) -> bool {
