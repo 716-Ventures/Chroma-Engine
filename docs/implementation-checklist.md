@@ -75,7 +75,8 @@
 - [x] Sanitize per-stream output timestamps to keep DTS monotonic.
 - [x] Collapse pathological sub-second segment windows.
 - [x] Signal AC-3/E-AC-3 in PMT descriptors for more reliable player detection.
-- [ ] Add native TS/fMP4 inspection tests that validate segment packet timing without external FFmpeg tools.
+- [x] Add native TS inspection tests for PMT signaling, PCR placement, and continuity counters without external FFmpeg tools.
+- [ ] Add native fMP4 inspection tests that validate fragment timing without external FFmpeg tools.
 - [ ] Add multi-audio HLS outputs without duplicating video work.
 - [ ] Add subtitle sidecar/rendition generation from native text subtitle parsing.
 

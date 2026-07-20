@@ -1145,6 +1145,62 @@ mod tests {
         assert_eq!(read_pcr_base(&out[6..12]), 90_000);
     }
 
+    #[test]
+    fn ts_continuity_counter_increments_across_large_pes_payloads() {
+        let mut mux = TsMuxer::new(0x1b, 0x0f);
+        mux.write_pes(
+            VIDEO_PID,
+            VIDEO_STREAM_ID,
+            &TimedPayload {
+                pts90: 90_000,
+                dts90: 90_000,
+                bytes: vec![0xaa; 600],
+            },
+            true,
+        );
+
+        let out = mux.into_bytes();
+        let packets = ts_packets(&out);
+        assert!(packets.len() > 3);
+        for (index, packet) in packets.iter().enumerate() {
+            assert_eq!(packet[0], 0x47);
+            assert_eq!(ts_pid(packet), VIDEO_PID);
+            assert_eq!(packet[3] & 0x0f, (index as u8) & 0x0f);
+        }
+    }
+
+    #[test]
+    fn audio_pes_packets_do_not_carry_pcr() {
+        let mut mux = TsMuxer::new(0x1b, 0x0f);
+        mux.write_pes(
+            AUDIO_PID,
+            AUDIO_STREAM_ID,
+            &TimedPayload {
+                pts90: 90_000,
+                dts90: 90_000,
+                bytes: vec![0xbb; 256],
+            },
+            false,
+        );
+
+        let out = mux.into_bytes();
+        let packets = ts_packets(&out);
+        assert!(packets.len() >= 2);
+        assert_eq!(ts_pid(packets[0]), AUDIO_PID);
+        assert_eq!(packets[0][1] & 0x40, 0x40);
+        assert_eq!(packets[0][5] & 0x10, 0x00);
+        assert_eq!(packets[1][1] & 0x40, 0x00);
+    }
+
+    fn ts_packets(bytes: &[u8]) -> Vec<&[u8]> {
+        assert_eq!(bytes.len() % 188, 0);
+        bytes.chunks_exact(188).collect()
+    }
+
+    fn ts_pid(packet: &[u8]) -> u16 {
+        (u16::from(packet[1] & 0x1f) << 8) | u16::from(packet[2])
+    }
+
     fn read_pcr_base(bytes: &[u8]) -> u64 {
         (u64::from(bytes[0]) << 25)
             | (u64::from(bytes[1]) << 17)
