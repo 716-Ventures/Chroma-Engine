@@ -53,6 +53,7 @@ pub struct HlsOutput {
     pub target_duration_seconds: u64,
     pub video_track_id: String,
     pub audio_track_id: String,
+    pub bandwidth_bits_per_second: u64,
     pub video_codec: String,
     pub audio_codec: String,
 }
@@ -71,6 +72,7 @@ pub struct HlsVodPlan {
     tracks: HlsTrackSet,
     windows: Vec<SegmentWindow>,
     target_duration_seconds: u64,
+    bandwidth_bits_per_second: u64,
 }
 
 impl HlsVodPlan {
@@ -111,12 +113,14 @@ impl HlsVodPlan {
             .max()
             .unwrap_or(1)
             .max(1);
+        let bandwidth_bits_per_second = estimate_hls_bandwidth_bits_per_second(&tracks, &windows);
 
         Ok(Self {
             source,
             tracks,
             windows,
             target_duration_seconds,
+            bandwidth_bits_per_second,
         })
     }
 
@@ -126,6 +130,10 @@ impl HlsVodPlan {
 
     pub fn target_duration_seconds(&self) -> u64 {
         self.target_duration_seconds
+    }
+
+    pub fn bandwidth_bits_per_second(&self) -> u64 {
+        self.bandwidth_bits_per_second
     }
 
     pub fn video_codec(&self) -> &str {
@@ -157,7 +165,11 @@ impl HlsVodPlan {
     }
 
     pub fn master_playlist(&self) -> String {
-        master_playlist_body(self.video_codec(), self.audio_codec())
+        master_playlist_body(
+            self.video_codec(),
+            self.audio_codec(),
+            self.bandwidth_bits_per_second,
+        )
     }
 
     pub fn media_playlist(&self) -> String {
@@ -297,6 +309,7 @@ pub fn write_hls_vod(input: &Path, output_dir: &Path, options: HlsOptions) -> Re
         target_duration_seconds: plan.target_duration_seconds(),
         video_track_id: plan.video_track_id().to_string(),
         audio_track_id: plan.audio_track_id().to_string(),
+        bandwidth_bits_per_second: plan.bandwidth_bits_per_second(),
         video_codec: plan.video_codec().to_string(),
         audio_codec: plan.audio_codec().to_string(),
     })
@@ -651,6 +664,35 @@ fn packet_end_ms(packet: &PacketRef) -> u64 {
         .pts
         .as_millis()
         .saturating_add(packet.duration.as_millis())
+}
+
+fn estimate_hls_bandwidth_bits_per_second(tracks: &HlsTrackSet, windows: &[SegmentWindow]) -> u64 {
+    let max_bits_per_second = windows
+        .iter()
+        .map(|window| {
+            let duration_ms = window.end_ms.saturating_sub(window.start_ms).max(1);
+            let bytes = estimated_track_bytes_in_window(&tracks.video, window)
+                .saturating_add(estimated_track_bytes_in_window(&tracks.audio, window));
+            bytes.saturating_mul(8).saturating_mul(1_000) / duration_ms
+        })
+        .max()
+        .unwrap_or(0);
+
+    max_bits_per_second
+        .saturating_add(max_bits_per_second / 10)
+        .max(128_000)
+}
+
+fn estimated_track_bytes_in_window(track: &HlsTrack, window: &SegmentWindow) -> u64 {
+    track
+        .packets
+        .iter()
+        .filter(|packet| {
+            let pts = packet.pts.as_millis();
+            pts >= window.start_ms && pts < window.end_ms
+        })
+        .map(|packet| u64::from(packet.size))
+        .sum()
 }
 
 fn mux_segment(bytes: &[u8], tracks: &HlsTrackSet, window: SegmentWindow) -> Result<Vec<u8>> {
@@ -1060,9 +1102,13 @@ impl To90Khz for crate::packet::TimeScale {
     }
 }
 
-fn master_playlist_body(video_codec: &str, audio_codec: &str) -> String {
+fn master_playlist_body(
+    video_codec: &str,
+    audio_codec: &str,
+    bandwidth_bits_per_second: u64,
+) -> String {
     format!(
-        "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-STREAM-INF:BANDWIDTH=12000000,CODECS=\"{video_codec},{audio_codec}\"\n0/playlist.m3u8\n"
+        "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-STREAM-INF:BANDWIDTH={bandwidth_bits_per_second},CODECS=\"{video_codec},{audio_codec}\"\n0/playlist.m3u8\n"
     )
 }
 
@@ -1232,6 +1278,7 @@ mod tests {
                 end_ms: 1_000,
             }],
             target_duration_seconds: 1,
+            bandwidth_bits_per_second: 128_000,
         }
     }
 
@@ -1353,6 +1400,74 @@ mod tests {
         assert!(body.contains("#EXTINF:1.500,"));
         assert!(body.contains("seg-00001.ts"));
         assert!(body.ends_with("#EXT-X-ENDLIST\n"));
+    }
+
+    #[test]
+    fn estimates_hls_bandwidth_from_peak_segment_packet_bytes() {
+        let scale = crate::packet::TimeScale {
+            units_per_second: 1_000,
+        };
+        let packet = |pts_ms: u64, size: u32| PacketRef {
+            source_offset: 0,
+            size,
+            pts: crate::packet::TimePoint {
+                units: pts_ms,
+                scale,
+            },
+            dts: crate::packet::TimePoint {
+                units: pts_ms,
+                scale,
+            },
+            duration: crate::packet::TimeDelta { units: 1, scale },
+            keyframe: true,
+        };
+        let tracks = HlsTrackSet {
+            video: HlsTrack {
+                id: "v0".to_string(),
+                codec_string: "avc1.640028".to_string(),
+                packets: vec![packet(0, 20_000), packet(1_000, 40_000)],
+                payload: PayloadKind::Avc {
+                    nalu_length_size: 4,
+                    parameter_sets: AvcParameterSets {
+                        nalu_length_size: 4,
+                        sps: Vec::new(),
+                        pps: Vec::new(),
+                    },
+                },
+            },
+            audio: HlsTrack {
+                id: "a0".to_string(),
+                codec_string: "mp4a.40.2".to_string(),
+                packets: vec![packet(0, 5_000), packet(1_000, 5_000)],
+                payload: PayloadKind::Aac {
+                    config: AacAudioSpecificConfig {
+                        object_type: 2,
+                        sample_rate: 48_000,
+                        channel_config: 2,
+                    },
+                },
+            },
+        };
+        let windows = vec![
+            SegmentWindow {
+                index: 0,
+                start_ms: 0,
+                end_ms: 1_000,
+            },
+            SegmentWindow {
+                index: 1,
+                start_ms: 1_000,
+                end_ms: 2_000,
+            },
+        ];
+
+        assert_eq!(
+            estimate_hls_bandwidth_bits_per_second(&tracks, &windows),
+            396_000
+        );
+        assert!(
+            master_playlist_body("avc1.640028", "mp4a.40.2", 396_000).contains("BANDWIDTH=396000")
+        );
     }
 
     #[test]
