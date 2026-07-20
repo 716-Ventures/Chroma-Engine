@@ -1123,6 +1123,37 @@ mod tests {
     }
 
     #[test]
+    fn video_pes_packets_carry_pcr_from_dts() {
+        let mut mux = TsMuxer::new(0x1b, 0x0f);
+        mux.write_pes(
+            VIDEO_PID,
+            VIDEO_STREAM_ID,
+            &TimedPayload {
+                pts90: 180_000,
+                dts90: 90_000,
+                bytes: vec![0, 0, 1, 9, 0x10],
+            },
+            true,
+        );
+
+        let out = mux.into_bytes();
+        assert_eq!(out.len(), 188);
+        assert_eq!(out[0], 0x47);
+        assert_eq!(out[1] & 0x40, 0x40);
+        assert_eq!(out[3] & 0x20, 0x20);
+        assert_eq!(out[5] & 0x10, 0x10);
+        assert_eq!(read_pcr_base(&out[6..12]), 90_000);
+    }
+
+    fn read_pcr_base(bytes: &[u8]) -> u64 {
+        (u64::from(bytes[0]) << 25)
+            | (u64::from(bytes[1]) << 17)
+            | (u64::from(bytes[2]) << 9)
+            | (u64::from(bytes[3]) << 1)
+            | (u64::from(bytes[4]) >> 7)
+    }
+
+    #[test]
     fn renders_media_playlist() {
         let body = media_playlist_body(4, &[1500, 4010]);
         assert!(body.contains("#EXT-X-TARGETDURATION:4"));
