@@ -36,3 +36,14 @@ cargo run -- h264-annex-b /path/to/media.mp4 /tmp/chunk0.h264 --chunk-index 0
 cargo run -- aac-adts /path/to/media.mp4 /tmp/chunk0.aac --track a0 --chunk-index 0
 cargo run -- extract-chunk /path/to/media.mp4 /tmp/chunk0.bin --chunk-index 0
 ```
+
+Quality gates:
+
+```sh
+cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-features
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
+cargo bench --bench engine_hot_paths
+scripts/smoke-real-media.sh
+```

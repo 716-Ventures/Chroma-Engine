@@ -22,8 +22,8 @@ pub use hls::{
     write_hls_segments, write_hls_vod,
 };
 pub use packet::{
-    ChunkPlan, ChunkSample, ExtractedChunk, NativeChunk, PacketRange, TimeDelta, TimePoint,
-    TimeScale, plan_fixed_chunks,
+    ChunkPlan, ChunkSample, ExtractedChunk, NativeChunk, PacketRange, PacketRef, TimeDelta,
+    TimePoint, TimeScale, plan_fixed_chunks,
 };
 pub use platform::{
     EncoderFailureNote, EncoderProbe, EncoderProfile, HardwareKind, VideoOutputCodec,

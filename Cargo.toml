@@ -33,8 +33,13 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 [dev-dependencies]
 assert_cmd = "2.0"
+criterion = "0.7"
 insta = { version = "1.40", features = ["json"] }
 tempfile = "3.12"
+
+[[bench]]
+name = "engine_hot_paths"
+harness = false
 
 [lints.rust]
 unsafe_code = "deny"
