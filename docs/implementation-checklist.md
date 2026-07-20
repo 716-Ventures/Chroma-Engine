@@ -112,14 +112,14 @@
 ## Transcode
 
 - [x] Platform capability probe without shelling out to FFmpeg.
-- [ ] macOS VideoToolbox H.264 encode.
-- [ ] macOS VideoToolbox HEVC encode.
-- [ ] AAC audio encode.
-- [ ] AC-3/E-AC-3 bridge encode.
-- [ ] CPU fallback decision.
-- [ ] Linux VAAPI/NVENC/QSV path.
-- [ ] Windows NVENC/QSV/AMF path.
-- [ ] Warm encoder session initialization.
+- [x] macOS VideoToolbox H.264 encode.
+- [x] macOS VideoToolbox HEVC encode.
+- [x] AAC audio encode.
+- [x] AC-3/E-AC-3 bridge encode.
+- [x] CPU fallback decision.
+- [x] Linux VAAPI/NVENC/QSV path.
+- [x] Windows NVENC/QSV/AMF path.
+- [x] Warm encoder session initialization.
 
 ## Integration
 
