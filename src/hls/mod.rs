@@ -1010,6 +1010,70 @@ fn hex_digit(byte: u8) -> Result<u8> {
 mod tests {
     use super::*;
 
+    fn test_plan_with_one_window() -> HlsVodPlan {
+        let file = tempfile::tempfile().expect("tempfile");
+        file.set_len(1).expect("size temp file");
+        let source = unsafe { Mmap::map(&file).expect("map temp file") };
+        let packet = PacketRef {
+            source_offset: 0,
+            size: 0,
+            pts: crate::packet::TimePoint {
+                units: 0,
+                scale: crate::packet::TimeScale {
+                    units_per_second: 1_000,
+                },
+            },
+            dts: crate::packet::TimePoint {
+                units: 0,
+                scale: crate::packet::TimeScale {
+                    units_per_second: 1_000,
+                },
+            },
+            duration: crate::packet::TimeDelta {
+                units: 1_000,
+                scale: crate::packet::TimeScale {
+                    units_per_second: 1_000,
+                },
+            },
+            keyframe: true,
+        };
+
+        HlsVodPlan {
+            source,
+            tracks: HlsTrackSet {
+                video: HlsTrack {
+                    codec_string: "avc1.640028".to_string(),
+                    packets: vec![packet],
+                    payload: PayloadKind::Avc {
+                        nalu_length_size: 4,
+                        parameter_sets: AvcParameterSets {
+                            nalu_length_size: 4,
+                            sps: Vec::new(),
+                            pps: Vec::new(),
+                        },
+                    },
+                },
+                audio: HlsTrack {
+                    codec_string: "mp4a.40.2".to_string(),
+                    packets: Vec::new(),
+                    payload: PayloadKind::Aac {
+                        config: AacAudioSpecificConfig {
+                            object_type: 2,
+                            sample_rate: 48_000,
+                            channel_config: 2,
+                        },
+                    },
+                },
+            },
+            windows: vec![SegmentWindow {
+                index: 0,
+                start_ms: 0,
+                end_ms: 1_000,
+            }],
+            target_duration_seconds: 1,
+        }
+    }
+
     #[test]
     fn writes_pat_and_pmt_packets() {
         let mut mux = TsMuxer::new(0x1b, 0x0f);
@@ -1027,6 +1091,22 @@ mod tests {
         assert!(body.contains("#EXTINF:1.500,"));
         assert!(body.contains("seg-00001.ts"));
         assert!(body.ends_with("#EXT-X-ENDLIST\n"));
+    }
+
+    #[test]
+    fn write_segments_handles_empty_and_out_of_range_requests() {
+        let plan = test_plan_with_one_window();
+        let out = tempfile::tempdir().expect("tempdir");
+        let empty = plan
+            .write_segments(0, 0, out.path())
+            .expect("zero count should be accepted");
+        assert!(empty.is_empty());
+        assert!(!out.path().join("seg-00000.ts").exists());
+
+        let err = plan
+            .write_segments(1, 1, out.path())
+            .expect_err("out-of-range start should fail");
+        assert!(err.to_string().contains("out of range"));
     }
 
     #[test]
