@@ -1,6 +1,5 @@
 use std::{
     fs::{create_dir_all, write, File},
-    io::Read,
     path::{Path, PathBuf},
 };
 
@@ -168,6 +167,10 @@ impl HlsVodPlaylistPlan {
     pub fn media_playlist(&self) -> String {
         media_playlist_for_windows(self.target_duration_seconds, &self.windows)
     }
+
+    pub fn fmp4_media_playlist(&self) -> String {
+        fmp4_media_playlist_for_windows(self.target_duration_seconds, &self.windows)
+    }
 }
 
 impl HlsVodPlan {
@@ -314,38 +317,7 @@ impl HlsVodPlan {
     }
 
     pub fn fmp4_init_segment(&self) -> Result<Vec<u8>> {
-        let video_entry = self
-            .tracks
-            .video
-            .fmp4_sample_entry
-            .clone()
-            .ok_or_else(|| anyhow!("fMP4 HLS requires video sample-entry metadata"))?;
-        let audio_entry = self
-            .tracks
-            .audio
-            .fmp4_sample_entry
-            .clone()
-            .ok_or_else(|| anyhow!("fMP4 HLS requires audio sample-entry metadata"))?;
-        init_segment(&[
-            Fmp4Track {
-                id: 1,
-                kind: Fmp4TrackKind::Video,
-                timescale: self.tracks.video.timescale,
-                default_sample_duration: default_sample_duration(&self.tracks.video.packets),
-                default_sample_size: 0,
-                default_sample_flags: 0x0101_0000,
-                sample_entry: video_entry,
-            },
-            Fmp4Track {
-                id: 2,
-                kind: Fmp4TrackKind::Audio,
-                timescale: self.tracks.audio.timescale,
-                default_sample_duration: default_sample_duration(&self.tracks.audio.packets),
-                default_sample_size: 0,
-                default_sample_flags: 0x0200_0000,
-                sample_entry: audio_entry,
-            },
-        ])
+        fmp4_init_segment_for_tracks(&self.tracks)
     }
 
     pub fn mux_fmp4_segment(&self, index: usize) -> Result<Vec<u8>> {
@@ -514,7 +486,12 @@ pub fn write_hls_fmp4_vod(
     output_dir: &Path,
     options: HlsOptions,
 ) -> Result<HlsOutput> {
-    ensure_fmp4_mp4_input(input)?;
+    let source = map_input(input)?;
+    let bytes = source.as_ref();
+    if matroska::looks_like_ebml(bytes) {
+        return write_matroska_hls_fmp4_vod(bytes, output_dir, options);
+    }
+
     let plan = HlsVodPlan::open(input, options)?;
     if !supports_fmp4_audio(&plan.tracks.audio.payload) {
         bail!("fMP4 HLS currently requires AAC, AC-3, or E-AC-3 audio");
@@ -551,7 +528,12 @@ pub fn write_hls_fmp4_vod(
 }
 
 pub fn write_hls_fmp4_init(input: &Path, output: &Path, options: HlsOptions) -> Result<()> {
-    ensure_fmp4_mp4_input(input)?;
+    let source = map_input(input)?;
+    let bytes = source.as_ref();
+    if matroska::looks_like_ebml(bytes) {
+        return write_matroska_hls_fmp4_init(bytes, output, options);
+    }
+
     let plan = HlsVodPlan::open(input, options)?;
     if !supports_fmp4_audio(&plan.tracks.audio.payload) {
         bail!("fMP4 HLS currently requires AAC, AC-3, or E-AC-3 audio");
@@ -569,7 +551,12 @@ pub fn write_hls_fmp4_segment(
     output: &Path,
     options: HlsOptions,
 ) -> Result<HlsSegmentInfo> {
-    ensure_fmp4_mp4_input(input)?;
+    let source = map_input(input)?;
+    let bytes = source.as_ref();
+    if matroska::looks_like_ebml(bytes) {
+        return write_matroska_hls_fmp4_segment(bytes, index, output, options);
+    }
+
     let plan = HlsVodPlan::open(input, options)?;
     if !supports_fmp4_audio(&plan.tracks.audio.payload) {
         bail!("fMP4 HLS currently requires AAC, AC-3, or E-AC-3 audio");
@@ -587,7 +574,12 @@ pub fn write_hls_fmp4_segments(
     if count == 0 {
         return Ok(Vec::new());
     }
-    ensure_fmp4_mp4_input(input)?;
+    let source = map_input(input)?;
+    let bytes = source.as_ref();
+    if matroska::looks_like_ebml(bytes) {
+        return write_matroska_hls_fmp4_segments(bytes, output_dir, start_index, count, options);
+    }
+
     let plan = HlsVodPlan::open(input, options)?;
     if !supports_fmp4_audio(&plan.tracks.audio.payload) {
         bail!("fMP4 HLS currently requires AAC, AC-3, or E-AC-3 audio");
@@ -595,16 +587,9 @@ pub fn write_hls_fmp4_segments(
     plan.write_fmp4_segments(start_index, count, output_dir)
 }
 
-fn ensure_fmp4_mp4_input(input: &Path) -> Result<()> {
-    let mut file = File::open(input).with_context(|| format!("open {}", input.display()))?;
-    let mut head = [0_u8; 12];
-    let n = file
-        .read(&mut head)
-        .with_context(|| format!("read {}", input.display()))?;
-    if !mp4::looks_like_mp4(&head[..n]) {
-        bail!("fMP4 HLS currently supports MP4/MOV inputs only");
-    }
-    Ok(())
+fn map_input(input: &Path) -> Result<Mmap> {
+    let file = File::open(input).with_context(|| format!("open {}", input.display()))?;
+    unsafe { Mmap::map(&file) }.with_context(|| format!("map {}", input.display()))
 }
 
 pub fn write_hls_segment(
@@ -980,9 +965,10 @@ fn hls_tracks_from_matroska(
                 .codec_private
                 .as_deref()
                 .ok_or_else(|| anyhow!("missing Matroska avcC private data"))?;
+            let parameter_sets = parse_avc_decoder_config(avc)?;
             PayloadKind::Avc {
-                nalu_length_size: parse_avc_decoder_config(avc)?.nalu_length_size,
-                parameter_sets: parse_avc_decoder_config(avc)?,
+                nalu_length_size: parameter_sets.nalu_length_size,
+                parameter_sets,
             }
         }
         "hevc" => {
@@ -998,6 +984,25 @@ fn hls_tracks_from_matroska(
         }
         other => bail!("native HLS Matroska video codec {other} is not supported"),
     };
+    let video_fmp4_sample_entry = match video.codec.as_str() {
+        "h264" => Some(Fmp4SampleEntry::Avc {
+            codec_config: video
+                .codec_private
+                .clone()
+                .ok_or_else(|| anyhow!("missing Matroska avcC private data"))?,
+            width: clamped_u16(video.width.unwrap_or(0)),
+            height: clamped_u16(video.height.unwrap_or(0)),
+        }),
+        "hevc" => Some(Fmp4SampleEntry::Hevc {
+            codec_config: video
+                .codec_private
+                .clone()
+                .ok_or_else(|| anyhow!("missing Matroska hvcC private data"))?,
+            width: clamped_u16(video.width.unwrap_or(0)),
+            height: clamped_u16(video.height.unwrap_or(0)),
+        }),
+        _ => None,
+    };
     let audio_payload = match audio.codec.as_str() {
         "aac" => {
             let asc = audio
@@ -1012,6 +1017,39 @@ fn hls_tracks_from_matroska(
         "eac3" => PayloadKind::Eac3,
         other => bail!("native HLS Matroska audio codec {other} is not supported"),
     };
+    let audio_fmp4_sample_entry = match audio.codec.as_str() {
+        "aac" => Some(Fmp4SampleEntry::Aac {
+            decoder_config: audio
+                .codec_private
+                .clone()
+                .ok_or_else(|| anyhow!("missing Matroska AAC private data"))?,
+            channel_count: clamped_u16(audio.channels.unwrap_or(2)),
+            sample_rate: audio.sample_rate.unwrap_or(48_000),
+        }),
+        "ac3" => {
+            let first_packet = audio_packets
+                .first()
+                .ok_or_else(|| anyhow!("missing Matroska AC-3 packet for dac3"))?;
+            let frame = packet_bytes(bytes, first_packet)?;
+            Some(Fmp4SampleEntry::Ac3 {
+                dac3: parse_ac3_specific_box(frame)?.dac3_payload(),
+                channel_count: clamped_u16(audio.channels.unwrap_or(2)),
+                sample_rate: audio.sample_rate.unwrap_or(48_000),
+            })
+        }
+        "eac3" => {
+            let first_packet = audio_packets
+                .first()
+                .ok_or_else(|| anyhow!("missing Matroska E-AC-3 packet for dec3"))?;
+            let access_unit = packet_bytes(bytes, first_packet)?;
+            Some(Fmp4SampleEntry::Eac3 {
+                dec3: parse_eac3_specific_box(access_unit)?.dec3_payload(),
+                channel_count: clamped_u16(audio.channels.unwrap_or(2)),
+                sample_rate: audio.sample_rate.unwrap_or(48_000),
+            })
+        }
+        _ => None,
+    };
 
     Ok(HlsTrackSet {
         video: HlsTrack {
@@ -1023,7 +1061,7 @@ fn hls_tracks_from_matroska(
                 .unwrap_or(90_000),
             packets: video_packets,
             payload: video_payload,
-            fmp4_sample_entry: None,
+            fmp4_sample_entry: video_fmp4_sample_entry,
         },
         audio: HlsTrack {
             id: audio_track_id,
@@ -1034,9 +1072,118 @@ fn hls_tracks_from_matroska(
                 .unwrap_or(48_000),
             packets: audio_packets,
             payload: audio_payload,
-            fmp4_sample_entry: None,
+            fmp4_sample_entry: audio_fmp4_sample_entry,
         },
     })
+}
+
+fn matroska_video_payload_kind(track: &matroska::MatroskaTrack) -> Result<PayloadKind> {
+    match track.codec.as_str() {
+        "h264" => {
+            let avc = track
+                .codec_private
+                .as_deref()
+                .ok_or_else(|| anyhow!("missing Matroska avcC private data"))?;
+            let parameter_sets = parse_avc_decoder_config(avc)?;
+            Ok(PayloadKind::Avc {
+                nalu_length_size: parameter_sets.nalu_length_size,
+                parameter_sets,
+            })
+        }
+        "hevc" => {
+            let hvc = track
+                .codec_private
+                .as_deref()
+                .ok_or_else(|| anyhow!("missing Matroska hvcC private data"))?;
+            let parameter_sets = parse_hevc_decoder_config(hvc)?;
+            Ok(PayloadKind::Hevc {
+                nalu_length_size: parameter_sets.nalu_length_size,
+                parameter_sets,
+            })
+        }
+        other => bail!("native HLS Matroska video codec {other} is not supported"),
+    }
+}
+
+fn matroska_audio_payload_kind(track: &matroska::MatroskaTrack) -> Result<PayloadKind> {
+    match track.codec.as_str() {
+        "aac" => {
+            let asc = track
+                .codec_private
+                .as_deref()
+                .ok_or_else(|| anyhow!("missing Matroska AAC private data"))?;
+            Ok(PayloadKind::Aac {
+                config: parse_audio_specific_config(asc)?,
+            })
+        }
+        "ac3" => Ok(PayloadKind::Ac3),
+        "eac3" => Ok(PayloadKind::Eac3),
+        other => bail!("native HLS Matroska audio codec {other} is not supported"),
+    }
+}
+
+fn matroska_video_fmp4_sample_entry(
+    track: &matroska::MatroskaTrack,
+) -> Result<Option<Fmp4SampleEntry>> {
+    match track.codec.as_str() {
+        "h264" => Ok(Some(Fmp4SampleEntry::Avc {
+            codec_config: track
+                .codec_private
+                .clone()
+                .ok_or_else(|| anyhow!("missing Matroska avcC private data"))?,
+            width: clamped_u16(track.width.unwrap_or(0)),
+            height: clamped_u16(track.height.unwrap_or(0)),
+        })),
+        "hevc" => Ok(Some(Fmp4SampleEntry::Hevc {
+            codec_config: track
+                .codec_private
+                .clone()
+                .ok_or_else(|| anyhow!("missing Matroska hvcC private data"))?,
+            width: clamped_u16(track.width.unwrap_or(0)),
+            height: clamped_u16(track.height.unwrap_or(0)),
+        })),
+        _ => Ok(None),
+    }
+}
+
+fn matroska_audio_fmp4_sample_entry(
+    bytes: &[u8],
+    track: &matroska::MatroskaTrack,
+    packets: &[PacketRef],
+) -> Result<Option<Fmp4SampleEntry>> {
+    match track.codec.as_str() {
+        "aac" => Ok(Some(Fmp4SampleEntry::Aac {
+            decoder_config: track
+                .codec_private
+                .clone()
+                .ok_or_else(|| anyhow!("missing Matroska AAC private data"))?,
+            channel_count: clamped_u16(track.channels.unwrap_or(2)),
+            sample_rate: track.sample_rate.unwrap_or(48_000),
+        })),
+        "ac3" => {
+            let first_packet = packets
+                .first()
+                .ok_or_else(|| anyhow!("missing Matroska AC-3 packet for dac3"))?;
+            let frame = packet_bytes(bytes, first_packet)?;
+            Ok(Some(Fmp4SampleEntry::Ac3 {
+                dac3: parse_ac3_specific_box(frame)?.dac3_payload(),
+                channel_count: clamped_u16(track.channels.unwrap_or(2)),
+                sample_rate: track.sample_rate.unwrap_or(48_000),
+            }))
+        }
+        "eac3" => {
+            let first_packet = packets
+                .first()
+                .ok_or_else(|| anyhow!("missing Matroska E-AC-3 packet for dec3"))?;
+            let access_unit = packet_bytes(bytes, first_packet)?;
+            Ok(Some(Fmp4SampleEntry::Eac3 {
+                dec3: parse_eac3_specific_box(access_unit)?.dec3_payload(),
+                channel_count: clamped_u16(track.channels.unwrap_or(2)),
+                sample_rate: track.sample_rate.unwrap_or(48_000),
+            }))
+        }
+        _ => Ok(None),
+    }
 }
 
 fn hls_playlist_plan_from_mp4(
@@ -1148,6 +1295,178 @@ fn write_matroska_hls_segment_from_plan(
         .get(index)
         .copied()
         .ok_or_else(|| anyhow!("HLS segment index {index} is out of range"))?;
+    let tracks = matroska_hls_tracks_for_window(bytes, plan, window)?;
+    let segment = mux_segment(bytes, &tracks, window)?;
+    if let Some(parent) = output.parent() {
+        create_dir_all(parent)?;
+    }
+    write(output, segment)?;
+    Ok(HlsSegmentInfo {
+        index: window.index,
+        start_ms: window.start_ms,
+        duration_ms: window.end_ms.saturating_sub(window.start_ms).max(1),
+        uri: segment_name(window.index),
+    })
+}
+
+fn write_matroska_hls_fmp4_vod(
+    bytes: &[u8],
+    output_dir: &Path,
+    options: HlsOptions,
+) -> Result<HlsOutput> {
+    let segment_target_ms = options.segment_target_ms.max(500);
+    let plan = hls_playlist_plan_from_matroska(
+        bytes,
+        bytes.len() as u64,
+        options.audio_track_id.as_deref(),
+        segment_target_ms,
+    )?;
+
+    create_dir_all(output_dir)?;
+    let variant_dir = output_dir.join("0");
+    create_dir_all(&variant_dir)?;
+
+    let init_path = variant_dir.join("init.mp4");
+    write_matroska_hls_fmp4_init_from_plan(bytes, &init_path, &plan)?;
+    for index in 0..plan.windows.len() {
+        write_matroska_hls_fmp4_segment_from_plan(
+            bytes,
+            index,
+            &variant_dir.join(fmp4_segment_name(index)),
+            &plan,
+        )?;
+    }
+
+    let media_playlist = variant_dir.join("playlist.m3u8");
+    write(&media_playlist, plan.fmp4_media_playlist())?;
+    let master_playlist = output_dir.join("master.m3u8");
+    write(&master_playlist, plan.master_playlist())?;
+
+    Ok(HlsOutput {
+        master_playlist,
+        media_playlist,
+        init_segment: Some(init_path),
+        segment_count: plan.windows.len(),
+        target_duration_seconds: plan.target_duration_seconds,
+        video_track_id: plan.video_track_id().to_string(),
+        audio_track_id: plan.audio_track_id().to_string(),
+        bandwidth_bits_per_second: plan.bandwidth_bits_per_second,
+        video_codec: plan.video_codec().to_string(),
+        audio_codec: plan.audio_codec().to_string(),
+    })
+}
+
+fn write_matroska_hls_fmp4_init(bytes: &[u8], output: &Path, options: HlsOptions) -> Result<()> {
+    let segment_target_ms = options.segment_target_ms.max(500);
+    let plan = hls_playlist_plan_from_matroska(
+        bytes,
+        bytes.len() as u64,
+        options.audio_track_id.as_deref(),
+        segment_target_ms,
+    )?;
+    write_matroska_hls_fmp4_init_from_plan(bytes, output, &plan)
+}
+
+fn write_matroska_hls_fmp4_init_from_plan(
+    bytes: &[u8],
+    output: &Path,
+    plan: &HlsVodPlaylistPlan,
+) -> Result<()> {
+    let window =
+        plan.windows.first().copied().ok_or_else(|| {
+            anyhow!("native HLS could not build keyframe-aligned segment windows")
+        })?;
+    let tracks = matroska_hls_tracks_for_window(bytes, plan, window)?;
+    if !supports_fmp4_audio(&tracks.audio.payload) {
+        bail!("fMP4 HLS currently requires AAC, AC-3, or E-AC-3 audio");
+    }
+    if let Some(parent) = output.parent() {
+        create_dir_all(parent)?;
+    }
+    write(output, fmp4_init_segment_for_tracks(&tracks)?)?;
+    Ok(())
+}
+
+fn write_matroska_hls_fmp4_segment(
+    bytes: &[u8],
+    index: usize,
+    output: &Path,
+    options: HlsOptions,
+) -> Result<HlsSegmentInfo> {
+    let segment_target_ms = options.segment_target_ms.max(500);
+    let plan = hls_playlist_plan_from_matroska(
+        bytes,
+        bytes.len() as u64,
+        options.audio_track_id.as_deref(),
+        segment_target_ms,
+    )?;
+    write_matroska_hls_fmp4_segment_from_plan(bytes, index, output, &plan)
+}
+
+fn write_matroska_hls_fmp4_segments(
+    bytes: &[u8],
+    output_dir: &Path,
+    start_index: usize,
+    count: usize,
+    options: HlsOptions,
+) -> Result<Vec<HlsSegmentInfo>> {
+    let segment_target_ms = options.segment_target_ms.max(500);
+    let plan = hls_playlist_plan_from_matroska(
+        bytes,
+        bytes.len() as u64,
+        options.audio_track_id.as_deref(),
+        segment_target_ms,
+    )?;
+    if start_index >= plan.windows.len() {
+        bail!("HLS segment start index {start_index} is out of range");
+    }
+    create_dir_all(output_dir)?;
+    let end_index = start_index.saturating_add(count).min(plan.windows.len());
+    let mut written = Vec::with_capacity(end_index.saturating_sub(start_index));
+    for index in start_index..end_index {
+        written.push(write_matroska_hls_fmp4_segment_from_plan(
+            bytes,
+            index,
+            &output_dir.join(fmp4_segment_name(index)),
+            &plan,
+        )?);
+    }
+    Ok(written)
+}
+
+fn write_matroska_hls_fmp4_segment_from_plan(
+    bytes: &[u8],
+    index: usize,
+    output: &Path,
+    plan: &HlsVodPlaylistPlan,
+) -> Result<HlsSegmentInfo> {
+    let window = plan
+        .windows
+        .get(index)
+        .copied()
+        .ok_or_else(|| anyhow!("HLS segment index {index} is out of range"))?;
+    let tracks = matroska_hls_tracks_for_window(bytes, plan, window)?;
+    if !supports_fmp4_audio(&tracks.audio.payload) {
+        bail!("fMP4 HLS currently requires AAC, AC-3, or E-AC-3 audio");
+    }
+    let segment = mux_fmp4_segment(bytes, &tracks, window)?;
+    if let Some(parent) = output.parent() {
+        create_dir_all(parent)?;
+    }
+    write(output, segment)?;
+    Ok(HlsSegmentInfo {
+        index: window.index,
+        start_ms: window.start_ms,
+        duration_ms: window.end_ms.saturating_sub(window.start_ms).max(1),
+        uri: fmp4_segment_name(window.index),
+    })
+}
+
+fn matroska_hls_tracks_for_window(
+    bytes: &[u8],
+    plan: &HlsVodPlaylistPlan,
+    window: SegmentWindow,
+) -> Result<HlsTrackSet> {
     let meta = matroska::parse_basic_metadata(bytes);
     let (_, video) = select_matroska_hls_track(&meta.tracks, MatroskaTrackKind::Video, None)
         .ok_or_else(|| {
@@ -1181,45 +1500,9 @@ fn write_matroska_hls_segment_from_plan(
         .find(|track| track.id == plan.audio_track_id())
         .map(|track| track.packets.clone())
         .ok_or_else(|| anyhow!("missing Matroska audio packets for HLS segment window"))?;
-    let video_payload = match video.codec.as_str() {
-        "h264" => {
-            let avc = video
-                .codec_private
-                .as_deref()
-                .ok_or_else(|| anyhow!("missing Matroska avcC private data"))?;
-            PayloadKind::Avc {
-                nalu_length_size: parse_avc_decoder_config(avc)?.nalu_length_size,
-                parameter_sets: parse_avc_decoder_config(avc)?,
-            }
-        }
-        "hevc" => {
-            let hvc = video
-                .codec_private
-                .as_deref()
-                .ok_or_else(|| anyhow!("missing Matroska hvcC private data"))?;
-            let parameter_sets = parse_hevc_decoder_config(hvc)?;
-            PayloadKind::Hevc {
-                nalu_length_size: parameter_sets.nalu_length_size,
-                parameter_sets,
-            }
-        }
-        other => bail!("native HLS Matroska video codec {other} is not supported"),
-    };
-    let audio_payload = match audio.codec.as_str() {
-        "aac" => {
-            let asc = audio
-                .codec_private
-                .as_deref()
-                .ok_or_else(|| anyhow!("missing Matroska AAC private data"))?;
-            PayloadKind::Aac {
-                config: parse_audio_specific_config(asc)?,
-            }
-        }
-        "ac3" => PayloadKind::Ac3,
-        "eac3" => PayloadKind::Eac3,
-        other => bail!("native HLS Matroska audio codec {other} is not supported"),
-    };
-    let tracks = HlsTrackSet {
+    let audio_fmp4_sample_entry = matroska_audio_fmp4_sample_entry(bytes, audio, &audio_packets)?;
+
+    Ok(HlsTrackSet {
         video: HlsTrack {
             id: plan.video_track_id().to_string(),
             codec_string: plan.video_codec().to_string(),
@@ -1228,8 +1511,8 @@ fn write_matroska_hls_segment_from_plan(
                 .map(|packet| packet.dts.scale.units_per_second)
                 .unwrap_or(90_000),
             packets: video_packets,
-            payload: video_payload,
-            fmp4_sample_entry: None,
+            payload: matroska_video_payload_kind(video)?,
+            fmp4_sample_entry: matroska_video_fmp4_sample_entry(video)?,
         },
         audio: HlsTrack {
             id: plan.audio_track_id().to_string(),
@@ -1239,20 +1522,9 @@ fn write_matroska_hls_segment_from_plan(
                 .map(|packet| packet.dts.scale.units_per_second)
                 .unwrap_or(48_000),
             packets: audio_packets,
-            payload: audio_payload,
-            fmp4_sample_entry: None,
+            payload: matroska_audio_payload_kind(audio)?,
+            fmp4_sample_entry: audio_fmp4_sample_entry,
         },
-    };
-    let segment = mux_segment(bytes, &tracks, window)?;
-    if let Some(parent) = output.parent() {
-        create_dir_all(parent)?;
-    }
-    write(output, segment)?;
-    Ok(HlsSegmentInfo {
-        index: window.index,
-        start_ms: window.start_ms,
-        duration_ms: window.end_ms.saturating_sub(window.start_ms).max(1),
-        uri: segment_name(window.index),
     })
 }
 
@@ -1292,7 +1564,7 @@ fn hls_playlist_plan_from_chunk_plan(
 }
 
 fn chunk_plan_windows(plan: &ChunkPlan) -> Vec<SegmentWindow> {
-    let windows = plan
+    let mut windows = plan
         .chunks
         .iter()
         .map(|chunk| {
@@ -1306,7 +1578,11 @@ fn chunk_plan_windows(plan: &ChunkPlan) -> Vec<SegmentWindow> {
                 end_ms,
             }
         })
-        .collect();
+        .collect::<Vec<_>>();
+    for index in 0..windows.len().saturating_sub(1) {
+        let next_start_ms = windows[index + 1].start_ms;
+        windows[index].end_ms = next_start_ms.max(windows[index].start_ms.saturating_add(1));
+    }
     collapse_short_windows(windows, MIN_SEGMENT_MS)
 }
 
@@ -1539,6 +1815,39 @@ fn mux_fmp4_segment(bytes: &[u8], tracks: &HlsTrackSet, window: SegmentWindow) -
             },
         ],
     )
+}
+
+fn fmp4_init_segment_for_tracks(tracks: &HlsTrackSet) -> Result<Vec<u8>> {
+    let video_entry = tracks
+        .video
+        .fmp4_sample_entry
+        .clone()
+        .ok_or_else(|| anyhow!("fMP4 HLS requires video sample-entry metadata"))?;
+    let audio_entry = tracks
+        .audio
+        .fmp4_sample_entry
+        .clone()
+        .ok_or_else(|| anyhow!("fMP4 HLS requires audio sample-entry metadata"))?;
+    init_segment(&[
+        Fmp4Track {
+            id: 1,
+            kind: Fmp4TrackKind::Video,
+            timescale: tracks.video.timescale,
+            default_sample_duration: default_sample_duration(&tracks.video.packets),
+            default_sample_size: 0,
+            default_sample_flags: 0x0101_0000,
+            sample_entry: video_entry,
+        },
+        Fmp4Track {
+            id: 2,
+            kind: Fmp4TrackKind::Audio,
+            timescale: tracks.audio.timescale,
+            default_sample_duration: default_sample_duration(&tracks.audio.packets),
+            default_sample_size: 0,
+            default_sample_flags: 0x0200_0000,
+            sample_entry: audio_entry,
+        },
+    ])
 }
 
 fn packets_in_window(packets: &[PacketRef], window: SegmentWindow) -> Vec<PacketRef> {
