@@ -112,6 +112,7 @@
 ## Transcode
 
 - [x] Platform capability probe without shelling out to FFmpeg.
+- [x] Sample-accurate audio output clock for native decode/encode paths. `AudioSampleClock` anchors on source PTS only at startup/discontinuity and advances encoded output timestamps by sample count to avoid container timebase jitter.
 - [ ] macOS VideoToolbox H.264 encode. Planned in the backend matrix, but not reported as executable until Chroma Engine owns a real native encode path.
 - [ ] macOS VideoToolbox HEVC encode. Planned in the backend matrix, but not reported as executable until Chroma Engine owns a real native encode path.
 - [ ] AAC audio encode. Planned in the backend matrix, but not reported as executable until Chroma Engine owns a real native audio encode path.
