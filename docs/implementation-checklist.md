@@ -53,7 +53,7 @@
 
 - [x] Zero-copy packet path for supported stream-copy remux.
 - [x] Matroska block reader.
-- [ ] MP4 writer with faststart `moov` before media data.
+- [x] MP4 writer with faststart `moov` before media data.
 - [x] H.264 AVC configuration parsing and Annex-B conversion.
 - [ ] HEVC configuration conversion.
 - [x] Extract MP4/MOV H.264, HEVC, and AAC codec configuration records.

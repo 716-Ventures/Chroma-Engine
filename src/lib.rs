@@ -46,7 +46,9 @@ pub use playback_manifest::{
     build_matroska_playback_manifest, build_mp4_playback_manifest,
 };
 pub use probe::{Chapter, MediaProbe, ProbeError, probe_media_source};
-pub use remux::{RemuxError, RemuxPacketSpans, remux_mp4, stream_copy_packet_spans};
+pub use remux::{
+    RemuxError, RemuxPacketSpans, remux_mp4, stream_copy_packet_spans, write_faststart_mp4,
+};
 pub use session::{
     AudioSelection, PipelineStage, PlaybackConstraints, PlaybackPlan, PlaybackTarget, StageKind,
     StageMode, TransportKind, TransportPlan, plan_playback,
