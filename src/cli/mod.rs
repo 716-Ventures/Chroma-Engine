@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 
+mod hls;
+
 use crate::codec::aac::{aac_chunk_to_adts, parse_audio_specific_config};
 use crate::codec::h264::{avc_chunk_to_annex_b, parse_avc_chunk_nalus};
 use crate::container::{
@@ -8,11 +10,6 @@ use crate::container::{
         extract_chunk as extract_mp4_chunk, looks_like_mp4,
         parse_chunk_plan as parse_mp4_chunk_plan, parse_codec_config as parse_mp4_codec_config,
     },
-};
-use crate::hls::{
-    HlsOptions, HlsSegmentInfo, HlsVodPlaylistPlan, write_hls_fmp4_init, write_hls_fmp4_segment,
-    write_hls_fmp4_segments, write_hls_fmp4_vod, write_hls_segment, write_hls_segments,
-    write_hls_vod,
 };
 use crate::playback_manifest::{
     MatroskaManifestOptions, Mp4ManifestOptions, build_matroska_playback_manifest,
@@ -513,67 +510,26 @@ pub fn run() -> Result<()> {
             output_dir,
             audio_track,
             segment_ms,
-        } => {
-            let output = write_hls_vod(
-                &input,
-                &output_dir,
-                HlsOptions {
-                    segment_target_ms: segment_ms,
-                    audio_track_id: audio_track,
-                },
-            )?;
-            println!("{}", serde_json::to_string_pretty(&output)?);
-        }
+        } => hls::run_hls(input, output_dir, audio_track, segment_ms)?,
         Command::HlsFmp4 {
             input,
             output_dir,
             audio_track,
             segment_ms,
-        } => {
-            let output = write_hls_fmp4_vod(
-                &input,
-                &output_dir,
-                HlsOptions {
-                    segment_target_ms: segment_ms,
-                    audio_track_id: audio_track,
-                },
-            )?;
-            println!("{}", serde_json::to_string_pretty(&output)?);
-        }
+        } => hls::run_hls_fmp4(input, output_dir, audio_track, segment_ms)?,
         Command::HlsFmp4Init {
             input,
             output,
             audio_track,
             segment_ms,
-        } => {
-            write_hls_fmp4_init(
-                &input,
-                &output,
-                HlsOptions {
-                    segment_target_ms: segment_ms,
-                    audio_track_id: audio_track,
-                },
-            )?;
-            println!("{}", serde_json::json!({ "ok": true, "output": output }));
-        }
+        } => hls::run_hls_fmp4_init(input, output, audio_track, segment_ms)?,
         Command::HlsFmp4Segment {
             input,
             output,
             index,
             audio_track,
             segment_ms,
-        } => {
-            let segment = write_hls_fmp4_segment(
-                &input,
-                index,
-                &output,
-                HlsOptions {
-                    segment_target_ms: segment_ms,
-                    audio_track_id: audio_track,
-                },
-            )?;
-            println!("{}", serde_json::to_string_pretty(&segment)?);
-        }
+        } => hls::run_hls_fmp4_segment(input, output, index, audio_track, segment_ms)?,
         Command::HlsFmp4Segments {
             input,
             output_dir,
@@ -581,68 +537,19 @@ pub fn run() -> Result<()> {
             count,
             audio_track,
             segment_ms,
-        } => {
-            let segments = write_hls_fmp4_segments(
-                &input,
-                &output_dir,
-                start,
-                count,
-                HlsOptions {
-                    segment_target_ms: segment_ms,
-                    audio_track_id: audio_track,
-                },
-            )?;
-            let output = HlsSegmentsOutput {
-                start,
-                requested_count: count,
-                segments,
-            };
-            println!("{}", serde_json::to_string_pretty(&output)?);
-        }
+        } => hls::run_hls_fmp4_segments(input, output_dir, start, count, audio_track, segment_ms)?,
         Command::HlsPlan {
             input,
             audio_track,
             segment_ms,
-        } => {
-            let plan = HlsVodPlaylistPlan::open(
-                &input,
-                HlsOptions {
-                    segment_target_ms: segment_ms,
-                    audio_track_id: audio_track,
-                },
-            )?;
-            let output = HlsPlanOutput {
-                segment_count: plan.segment_count(),
-                target_duration_seconds: plan.target_duration_seconds(),
-                video_track_id: plan.video_track_id().to_string(),
-                audio_track_id: plan.audio_track_id().to_string(),
-                bandwidth_bits_per_second: plan.bandwidth_bits_per_second(),
-                video_codec: plan.video_codec().to_string(),
-                audio_codec: plan.audio_codec().to_string(),
-                master_playlist: plan.master_playlist(),
-                media_playlist: plan.media_playlist(),
-                segments: plan.segments(),
-            };
-            println!("{}", serde_json::to_string_pretty(&output)?);
-        }
+        } => hls::run_hls_plan(input, audio_track, segment_ms)?,
         Command::HlsSegment {
             input,
             output,
             index,
             audio_track,
             segment_ms,
-        } => {
-            let segment = write_hls_segment(
-                &input,
-                index,
-                &output,
-                HlsOptions {
-                    segment_target_ms: segment_ms,
-                    audio_track_id: audio_track,
-                },
-            )?;
-            println!("{}", serde_json::to_string_pretty(&segment)?);
-        }
+        } => hls::run_hls_segment(input, output, index, audio_track, segment_ms)?,
         Command::HlsSegments {
             input,
             output_dir,
@@ -650,24 +557,7 @@ pub fn run() -> Result<()> {
             count,
             audio_track,
             segment_ms,
-        } => {
-            let segments = write_hls_segments(
-                &input,
-                &output_dir,
-                start,
-                count,
-                HlsOptions {
-                    segment_target_ms: segment_ms,
-                    audio_track_id: audio_track,
-                },
-            )?;
-            let output = HlsSegmentsOutput {
-                start,
-                requested_count: count,
-                segments,
-            };
-            println!("{}", serde_json::to_string_pretty(&output)?);
-        }
+        } => hls::run_hls_segments(input, output_dir, start, count, audio_track, segment_ms)?,
         Command::RemuxMp4 { input, output } => {
             crate::remux::remux_mp4(&input, &output)?;
             println!("{}", serde_json::json!({ "ok": true }));
@@ -675,29 +565,6 @@ pub fn run() -> Result<()> {
     }
 
     Ok(())
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct HlsPlanOutput {
-    segment_count: usize,
-    target_duration_seconds: u64,
-    video_track_id: String,
-    audio_track_id: String,
-    bandwidth_bits_per_second: u64,
-    video_codec: String,
-    audio_codec: String,
-    master_playlist: String,
-    media_playlist: String,
-    segments: Vec<HlsSegmentInfo>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct HlsSegmentsOutput {
-    start: usize,
-    requested_count: usize,
-    segments: Vec<HlsSegmentInfo>,
 }
 
 #[derive(Debug, Serialize)]
