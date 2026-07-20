@@ -78,7 +78,7 @@
 - [x] Parse AVC/H.264 NAL-unit layout from native MP4/MOV chunks.
 - [x] Convert native MP4/MOV AVC chunks to Annex-B H.264 without decode.
 - [x] Wrap native MP4/MOV AAC chunks as ADTS without decode.
-- [ ] Emit stream chunks through reusable packet/decode/encode stages.
+- [x] Emit stream chunks through reusable packet/decode/encode stages.
 - [x] H.264/AAC native stream-copy chunks.
 - [x] HEVC native stream-copy chunks.
 - [ ] AC-3/E-AC-3/MP3/FLAC/ALAC native copy paths.

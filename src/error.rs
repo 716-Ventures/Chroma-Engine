@@ -32,4 +32,6 @@ pub enum EngineErrorCode {
     HevcFailed,
     /// Encoder warmup failed.
     EncoderWarmupFailed,
+    /// Playback pipeline stage routing failed.
+    PipelineFailed,
 }

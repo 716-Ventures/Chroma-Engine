@@ -15,6 +15,7 @@ pub(crate) mod error;
 pub(crate) mod fmp4;
 pub(crate) mod hls;
 pub(crate) mod packet;
+pub(crate) mod pipeline;
 pub(crate) mod platform;
 pub(crate) mod playback_manifest;
 pub(crate) mod probe;
@@ -38,6 +39,7 @@ pub use packet::{
     ChunkPlan, ChunkSample, ExtractedChunk, NativeChunk, PacketPayloadSpan, PacketRange, PacketRef,
     TimeDelta, TimePoint, TimeScale, packet_payload_spans, plan_fixed_chunks,
 };
+pub use pipeline::{PipelineError, PipelineStageChunk, PipelineStagePayload, emit_stage_chunks};
 pub use platform::{
     EncoderFailureNote, EncoderProbe, EncoderProfile, EncoderWarmupError, HardwareKind,
     VideoOutputCodec, encoder_probe, warmup,
