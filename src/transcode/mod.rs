@@ -101,6 +101,53 @@ pub enum AudioCodec {
     Eac3,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+/// Stable output description for an encoded audio stream.
+pub struct EncodedAudioStream {
+    /// Output codec carried by the stream.
+    pub codec: AudioCodec,
+    /// Output sample rate in Hz.
+    pub sample_rate: u32,
+    /// Output channel count.
+    pub channels: u32,
+    /// Codec-specific decoder configuration bytes, when required by the muxer.
+    pub decoder_config: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+/// One encoded audio access unit emitted by a native backend.
+pub struct EncodedAudioFrame {
+    /// Sample-clock timing for this access unit.
+    pub timing: AudioFrameTiming,
+    /// Compressed payload bytes.
+    pub payload: Vec<u8>,
+    /// True when this access unit starts after a real source discontinuity.
+    pub discontinuity: bool,
+}
+
+impl EncodedAudioStream {
+    /// Returns the time scale used by frames in this stream.
+    pub fn time_scale(&self) -> TimeScale {
+        TimeScale {
+            units_per_second: self.sample_rate.max(1),
+        }
+    }
+}
+
+impl EncodedAudioFrame {
+    /// Returns the frame presentation timestamp in milliseconds.
+    pub fn pts_ms(&self) -> u64 {
+        self.timing.pts.as_millis()
+    }
+
+    /// Returns the frame duration in milliseconds.
+    pub fn duration_ms(&self) -> u64 {
+        self.timing.duration.as_millis()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 /// Planned subtitle path for one source track.
@@ -132,4 +179,38 @@ fn rescale_units_rounded(units: u64, from: TimeScale, to: TimeScale) -> u64 {
     let denominator = u128::from(from.units_per_second);
     let rounded = (numerator + (denominator / 2)) / denominator;
     rounded.min(u128::from(u64::MAX)) as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::packet::TimePoint;
+
+    #[test]
+    fn encoded_audio_stream_uses_sample_rate_time_scale() {
+        let stream = EncodedAudioStream {
+            codec: AudioCodec::Aac,
+            sample_rate: 48_000,
+            channels: 2,
+            decoder_config: Some(vec![0x11, 0x90]),
+        };
+
+        assert_eq!(stream.time_scale().units_per_second, 48_000);
+    }
+
+    #[test]
+    fn encoded_audio_frame_reports_millisecond_timing() {
+        let mut clock = AudioSampleClock::new(AudioClockConfig {
+            sample_rate: 48_000,
+            discontinuity_threshold_ms: 100,
+        });
+        let frame = EncodedAudioFrame {
+            timing: clock.stamp_frame(Some(TimePoint::millis(1_000)), 1_024),
+            payload: vec![0xaa, 0xbb],
+            discontinuity: false,
+        };
+
+        assert_eq!(frame.pts_ms(), 1_000);
+        assert_eq!(frame.duration_ms(), 21);
+    }
 }

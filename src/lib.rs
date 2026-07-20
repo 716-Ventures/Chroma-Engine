@@ -65,6 +65,6 @@ pub use session::{
     plan_multi_audio_outputs, plan_playback,
 };
 pub use transcode::{
-    AudioClockConfig, AudioCodec, AudioFrameTiming, AudioOp, AudioSampleClock, OperationPlan,
-    PlanMode, SubtitleOp, VideoCodec, VideoOp,
+    AudioClockConfig, AudioCodec, AudioFrameTiming, AudioOp, AudioSampleClock, EncodedAudioFrame,
+    EncodedAudioStream, OperationPlan, PlanMode, SubtitleOp, VideoCodec, VideoOp,
 };
