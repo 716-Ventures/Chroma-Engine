@@ -47,7 +47,7 @@
 - [x] Extract chapters.
 - [x] Extract duration.
 - [x] Use memory-mapped probing instead of whole-file reads.
-- [ ] Define Chroma-native error taxonomy.
+- [x] Define Chroma-native error taxonomy.
 
 ## Remux MP4
 

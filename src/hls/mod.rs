@@ -22,6 +22,7 @@ use crate::{
         matroska::{self, MatroskaTrackKind},
         mp4::{self, Mp4TrackKind},
     },
+    error::EngineErrorCode,
     fmp4::{
         Fmp4FragmentTrack, Fmp4SampleEntry, Fmp4Track, Fmp4TrackKind, decode_time_for_timescale,
         init_segment, media_fragment, samples_from_packets_with_timescale,
@@ -76,6 +77,18 @@ pub enum HlsError {
 }
 
 impl HlsError {
+    /// Returns the stable Chroma Engine error code for this HLS failure.
+    pub fn code(&self) -> EngineErrorCode {
+        match self {
+            Self::Io(_) => EngineErrorCode::OutputIoFailed,
+            Self::Internal(_) => EngineErrorCode::HlsInternal,
+            Self::Aac(_) => EngineErrorCode::AacFailed,
+            Self::H264(_) => EngineErrorCode::H264Failed,
+            Self::Hevc(_) => EngineErrorCode::HevcFailed,
+            Self::Unsupported(_) => EngineErrorCode::HlsUnsupported,
+        }
+    }
+
     fn message(message: String) -> Self {
         Self::Unsupported(message)
     }
@@ -2427,6 +2440,14 @@ fn hex_digit(byte: u8) -> Result<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hls_errors_expose_stable_codes() {
+        assert_eq!(
+            HlsError::Unsupported("unsupported".to_string()).code(),
+            EngineErrorCode::HlsUnsupported
+        );
+    }
 
     fn test_plan_with_one_window() -> HlsVodPlan {
         let file = tempfile::NamedTempFile::new().expect("tempfile");

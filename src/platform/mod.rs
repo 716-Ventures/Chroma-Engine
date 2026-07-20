@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::error::EngineErrorCode;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 /// Result of probing the host for encoding capabilities.
@@ -75,6 +77,13 @@ pub enum VideoOutputCodec {
 pub struct EncoderWarmupError {
     /// Warmup failure reason.
     pub reason: String,
+}
+
+impl EncoderWarmupError {
+    /// Returns the stable Chroma Engine error code for this warmup failure.
+    pub fn code(&self) -> EngineErrorCode {
+        EngineErrorCode::EncoderWarmupFailed
+    }
 }
 
 /// Probes host encoder support and returns the preferred profile.

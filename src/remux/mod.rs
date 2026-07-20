@@ -2,7 +2,10 @@ use std::path::Path;
 
 use thiserror::Error;
 
-use crate::container::{ContainerKind, sniff_container};
+use crate::{
+    container::{ContainerKind, sniff_container},
+    error::EngineErrorCode,
+};
 
 /// Error returned while remuxing a source into MP4.
 #[derive(Debug, Error)]
@@ -18,6 +21,17 @@ pub enum RemuxError {
     NotImplemented(&'static str),
 }
 
+impl RemuxError {
+    /// Returns the stable Chroma Engine error code for this remux failure.
+    pub fn code(&self) -> EngineErrorCode {
+        match self {
+            Self::Io(_) => EngineErrorCode::SourceReadFailed,
+            Self::UnsupportedContainer(_) => EngineErrorCode::UnsupportedContainer,
+            Self::NotImplemented(_) => EngineErrorCode::OperationNotImplemented,
+        }
+    }
+}
+
 /// Remuxes a supported source into MP4 without decoding.
 pub fn remux_mp4(input: &Path, _output: &Path) -> Result<(), RemuxError> {
     let mut file = std::fs::File::open(input)?;
@@ -29,5 +43,22 @@ pub fn remux_mp4(input: &Path, _output: &Path) -> Result<(), RemuxError> {
             Err(RemuxError::NotImplemented(kind.public_name()))
         }
         ContainerKind::Unknown => Err(RemuxError::UnsupportedContainer(kind.public_name())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remux_errors_expose_stable_codes() {
+        assert_eq!(
+            RemuxError::UnsupportedContainer("unknown").code(),
+            EngineErrorCode::UnsupportedContainer
+        );
+        assert_eq!(
+            RemuxError::NotImplemented("mp4").code(),
+            EngineErrorCode::OperationNotImplemented
+        );
     }
 }

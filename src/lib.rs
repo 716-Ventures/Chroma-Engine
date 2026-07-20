@@ -11,6 +11,7 @@
 pub mod cli;
 pub(crate) mod codec;
 pub(crate) mod container;
+pub(crate) mod error;
 pub(crate) mod fmp4;
 pub(crate) mod hls;
 pub(crate) mod packet;
@@ -26,6 +27,7 @@ pub use codec::subtitles::{
     TextSubtitleCue, WebVttSegment, parse_subrip, render_webvtt, segment_webvtt,
 };
 pub use container::{ContainerKind, sniff_container};
+pub use error::EngineErrorCode;
 pub use hls::{
     HlsError, HlsOptions, HlsOutput, HlsSegmentInfo, HlsVodPlan, HlsVodPlaylistPlan,
     write_hls_fmp4_init, write_hls_fmp4_segment, write_hls_fmp4_segments, write_hls_fmp4_vod,

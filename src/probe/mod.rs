@@ -7,6 +7,7 @@ use thiserror::Error;
 
 use crate::{
     container::{ContainerKind, matroska, mp4, sniff_container},
+    error::EngineErrorCode,
     source::MappedMediaFile,
 };
 
@@ -25,6 +26,18 @@ pub enum ProbeError {
     /// The source file could not be memory mapped.
     #[error("map_failed: {0}")]
     MapFailed(String),
+}
+
+impl ProbeError {
+    /// Returns the stable Chroma Engine error code for this probe failure.
+    pub fn code(&self) -> EngineErrorCode {
+        match self {
+            Self::FileNotFound => EngineErrorCode::FileNotFound,
+            Self::OpenFailed(_) => EngineErrorCode::SourceOpenFailed,
+            Self::ReadFailed(_) => EngineErrorCode::SourceReadFailed,
+            Self::MapFailed(_) => EngineErrorCode::SourceMapFailed,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -717,6 +730,18 @@ mod tests {
     #[test]
     fn normalizes_dca_to_dts() {
         assert_eq!(normalize_audio_codec("DCA"), "dts");
+    }
+
+    #[test]
+    fn probe_errors_expose_stable_codes() {
+        assert_eq!(
+            ProbeError::FileNotFound.code(),
+            EngineErrorCode::FileNotFound
+        );
+        assert_eq!(
+            ProbeError::OpenFailed("nope".to_string()).code(),
+            EngineErrorCode::SourceOpenFailed
+        );
     }
 
     #[test]
