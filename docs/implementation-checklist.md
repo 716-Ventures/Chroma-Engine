@@ -111,7 +111,7 @@
 
 ## Transcode
 
-- [ ] Platform capability probe without shelling out to FFmpeg.
+- [x] Platform capability probe without shelling out to FFmpeg.
 - [ ] macOS VideoToolbox H.264 encode.
 - [ ] macOS VideoToolbox HEVC encode.
 - [ ] AAC audio encode.

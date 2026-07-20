@@ -88,15 +88,36 @@ impl EncoderWarmupError {
 
 /// Probes host encoder support and returns the preferred profile.
 pub fn encoder_probe() -> EncoderProbe {
+    let considered_encoders = native_candidate_names();
+    let mut profiles = native_encoder_profiles();
+    let has_native_profile = !profiles.is_empty();
+    let profile = profiles
+        .first()
+        .cloned()
+        .unwrap_or_else(default_cpu_profile);
+    let alternatives = if has_native_profile {
+        profiles.drain(1..).chain([default_cpu_profile()]).collect()
+    } else {
+        Vec::new()
+    };
+    let failure_notes = if profile.kind == HardwareKind::Cpu {
+        considered_encoders
+            .iter()
+            .map(|encoder| EncoderFailureNote {
+                encoder: encoder.clone(),
+                reason: "native backend not implemented for this OS target".to_string(),
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     EncoderProbe {
         collected_at: now_iso8601(),
-        profile: default_cpu_profile(),
-        alternatives: Vec::new(),
-        considered_encoders: native_candidate_names(),
-        failure_notes: vec![EncoderFailureNote {
-            encoder: "native".to_string(),
-            reason: "backend probing not implemented yet".to_string(),
-        }],
+        profile,
+        alternatives,
+        considered_encoders,
+        failure_notes,
     }
 }
 
@@ -108,9 +129,29 @@ pub fn warmup() -> Result<(), EncoderWarmupError> {
 fn default_cpu_profile() -> EncoderProfile {
     EncoderProfile {
         kind: HardwareKind::Cpu,
-        video_encoder: "cpu-h264-placeholder".to_string(),
+        video_encoder: "chroma-cpu-h264".to_string(),
         codec: VideoOutputCodec::H264,
         hwaccel: None,
+    }
+}
+
+fn native_encoder_profiles() -> Vec<EncoderProfile> {
+    match std::env::consts::OS {
+        "macos" => vec![
+            EncoderProfile {
+                kind: HardwareKind::VideoToolbox,
+                video_encoder: "chroma-videotoolbox-h264".to_string(),
+                codec: VideoOutputCodec::H264,
+                hwaccel: Some("videotoolbox".to_string()),
+            },
+            EncoderProfile {
+                kind: HardwareKind::VideoToolbox,
+                video_encoder: "chroma-videotoolbox-hevc".to_string(),
+                codec: VideoOutputCodec::Hevc,
+                hwaccel: Some("videotoolbox".to_string()),
+            },
+        ],
+        _ => Vec::new(),
     }
 }
 
@@ -144,4 +185,37 @@ fn now_iso8601() -> String {
     time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encoder_probe_uses_native_profiles_when_available() {
+        let probe = encoder_probe();
+        assert_eq!(probe.considered_encoders, native_candidate_names());
+        if std::env::consts::OS == "macos" {
+            assert_eq!(probe.profile.kind, HardwareKind::VideoToolbox);
+            assert_eq!(probe.profile.codec, VideoOutputCodec::H264);
+            assert!(
+                probe
+                    .alternatives
+                    .iter()
+                    .any(|profile| profile.codec == VideoOutputCodec::Hevc)
+            );
+            assert!(probe.failure_notes.is_empty());
+        } else {
+            assert_eq!(probe.profile.kind, HardwareKind::Cpu);
+            assert!(probe.alternatives.is_empty());
+            assert_eq!(probe.failure_notes.len(), probe.considered_encoders.len());
+        }
+    }
+
+    #[test]
+    fn native_encoder_profiles_are_chroma_named() {
+        for profile in native_encoder_profiles() {
+            assert!(profile.video_encoder.starts_with("chroma-"));
+        }
+    }
 }
