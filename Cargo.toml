@@ -35,6 +35,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 assert_cmd = "2.0"
 criterion = "0.7"
 insta = { version = "1.40", features = ["json"] }
+proptest = "1.9"
 tempfile = "3.12"
 
 [[bench]]
