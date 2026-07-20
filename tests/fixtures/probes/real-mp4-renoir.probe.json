@@ -1,0 +1,124 @@
+{
+  "schemaVersion": 1,
+  "engine": {
+    "name": "chroma-engine",
+    "version": "<crate-version>"
+  },
+  "source": {
+    "path": "fixtures://movies/renoir.mp4",
+    "sizeBytes": 0,
+    "container": {
+      "family": "isoBmff",
+      "brand": "mp4",
+      "extensionHint": "mp4"
+    }
+  },
+  "durationMs": 6698275,
+  "tracks": [
+    {
+      "id": "v0",
+      "index": 0,
+      "kind": "video",
+      "codec": {
+        "id": "h264",
+        "family": "h264",
+        "profile": null
+      },
+      "durationMs": 6698274,
+      "language": null,
+      "title": null,
+      "flags": {
+        "default": false,
+        "forced": false
+      },
+      "video": {
+        "width": 1920,
+        "height": 1040,
+        "frameRate": null,
+        "pixelFormat": null,
+        "dynamicRange": "unknown"
+      },
+      "audio": null,
+      "subtitle": null
+    },
+    {
+      "id": "a0",
+      "index": 1,
+      "kind": "audio",
+      "codec": {
+        "id": "aac",
+        "family": "aac",
+        "profile": null
+      },
+      "durationMs": 6697311,
+      "language": null,
+      "title": null,
+      "flags": {
+        "default": false,
+        "forced": false
+      },
+      "video": null,
+      "audio": {
+        "channels": 6,
+        "sampleRate": 48000,
+        "atmos": false,
+        "lossless": false
+      },
+      "subtitle": null
+    },
+    {
+      "id": "s0",
+      "index": 2,
+      "kind": "subtitle",
+      "codec": {
+        "id": "mov_text",
+        "family": "textSubtitle",
+        "profile": null
+      },
+      "durationMs": 6693688,
+      "language": null,
+      "title": null,
+      "flags": {
+        "default": false,
+        "forced": false
+      },
+      "video": null,
+      "audio": null,
+      "subtitle": {
+        "format": "text"
+      }
+    },
+    {
+      "id": "s1",
+      "index": 3,
+      "kind": "subtitle",
+      "codec": {
+        "id": "mov_text",
+        "family": "textSubtitle",
+        "profile": null
+      },
+      "durationMs": 6698275,
+      "language": null,
+      "title": null,
+      "flags": {
+        "default": false,
+        "forced": false
+      },
+      "video": null,
+      "audio": null,
+      "subtitle": {
+        "format": "text"
+      }
+    }
+  ],
+  "attachments": {
+    "count": 0
+  },
+  "capabilities": {
+    "canRemuxWithoutDecode": true,
+    "canSegmentWithoutDecode": true,
+    "requiresVideoDecode": false,
+    "requiresAudioDecode": false,
+    "unsupportedTrackIds": []
+  }
+}
