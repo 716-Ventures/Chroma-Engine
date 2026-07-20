@@ -38,6 +38,11 @@ pub enum Fmp4SampleEntry {
         channel_count: u16,
         sample_rate: u32,
     },
+    Ac3 {
+        dac3: [u8; 3],
+        channel_count: u16,
+        sample_rate: u32,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -244,7 +249,7 @@ fn write_tkhd(out: &mut Vec<u8>, track: &Fmp4Track) {
                 be_u32(out, u32::from(*width) << 16);
                 be_u32(out, u32::from(*height) << 16);
             }
-            Fmp4SampleEntry::Aac { .. } => {
+            Fmp4SampleEntry::Aac { .. } | Fmp4SampleEntry::Ac3 { .. } => {
                 be_u32(out, 0);
                 be_u32(out, 0);
             }
@@ -335,6 +340,13 @@ fn write_stsd(out: &mut Vec<u8>, track: &Fmp4Track) {
                 sample_rate,
             } => write_audio_sample_entry(out, *b"mp4a", *channel_count, *sample_rate, |out| {
                 write_esds(out, decoder_config)
+            }),
+            Fmp4SampleEntry::Ac3 {
+                dac3,
+                channel_count,
+                sample_rate,
+            } => write_audio_sample_entry(out, *b"ac-3", *channel_count, *sample_rate, |out| {
+                write_box(out, *b"dac3", |out| out.extend_from_slice(dac3));
             }),
         }
     });
@@ -605,6 +617,28 @@ mod tests {
                 1, 1, 0x60, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xf3, 0,
             ]
         }));
+    }
+
+    #[test]
+    fn init_segment_writes_ac3_sample_description() {
+        let init = init_segment(&[Fmp4Track {
+            id: 2,
+            kind: Fmp4TrackKind::Audio,
+            timescale: 48_000,
+            default_sample_duration: 1_536,
+            default_sample_size: 0,
+            default_sample_flags: 0x0200_0000,
+            sample_entry: Fmp4SampleEntry::Ac3 {
+                dac3: [0x50, 0x51, 0],
+                channel_count: 2,
+                sample_rate: 48_000,
+            },
+        }])
+        .expect("init segment");
+
+        assert!(init.windows(4).any(|w| w == b"ac-3"));
+        assert!(init.windows(4).any(|w| w == b"dac3"));
+        assert!(init.windows(3).any(|w| w == [0x50, 0x51, 0]));
     }
 
     #[test]
