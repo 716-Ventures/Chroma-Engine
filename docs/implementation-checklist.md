@@ -132,5 +132,5 @@
 - [x] Run Chroma Engine behind an env flag. GenusServer gates playback selection through `CHROMA_ENGINE_PLAYBACK`; the stream/analyzer binary path is overridable with `CHROMA_ENGINE_BIN`.
 - [x] Add side-by-side diagnostics for Chroma Engine vs legacy media path during migration. GenusServer diagnostics now show FFmpeg/ffprobe, Chroma Engine binary/enabled state, analyzer version, analysis ready/stale/failed/missing counts, and active Chroma playback sessions.
 - [x] Switch playback sessions to Chroma Engine. Verified `media_c75bb70a81774a35964021aacb41f675` starts as `directStream`/`hls-fmp4` with `transcodeReasons=["chroma-engine-hls"]`; DTS-in-`mp4a` movie `media_5995bdbc01e74246be61afcf6a986ed6` no longer receives a fake Chroma-native HLS path.
-- [ ] Switch offline MKV remux to Rust engine.
+- [x] Switch offline MKV remux to Rust engine. Chroma Engine `remux-mp4` now writes fragmented MP4 from supported MKV/WebM sources without FFmpeg; GenusServer MKV convert jobs prefer this path and fall back to FFmpeg only when native remux fails and fallback is enabled. Validated with `/Volumes/TVShows/Is It Wrong to Try to Pick Up Girls in a Dungeon!/Season 5/Is.It.Wrong.to.Try.to.Pick.Up.Girls.in.a.Dungeon.S05E10.720p.HEVC.x265-MeGusta.mkv`.
 - [ ] Remove vendored legacy media binaries once Chroma Engine covers the required native paths.
