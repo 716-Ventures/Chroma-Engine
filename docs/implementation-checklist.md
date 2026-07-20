@@ -70,6 +70,7 @@
 - [x] Write MPEG-TS HLS segments for H.264/AAC without decode.
 - [x] Write MPEG-TS HLS segments for HEVC with AC-3/E-AC-3 without decode.
 - [x] Emit HLS master and media playlists from the native segment plan.
+- [x] Estimate HLS variant bandwidth from peak packet-window bitrate instead of a fixed constant.
 - [x] Support demand-driven single segment emission.
 - [x] Support contiguous batch segment emission for read-ahead.
 - [x] Support explicit native HLS audio track selection by stable `aN` track ID.
