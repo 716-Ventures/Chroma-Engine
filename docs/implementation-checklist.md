@@ -40,7 +40,7 @@
 - [ ] Extract video fields: pixel format.
 - [x] Extract Matroska audio fields: codec, channels, language/title, default/forced disposition.
 - [x] Extract MP4 audio fields: codec, channels, sample rate.
-- [ ] Extract MP4 audio title/default/forced disposition.
+- [x] Extract MP4 audio title/default/forced disposition.
 - [x] Extract audio fields: bitrate and MP4 E-AC-3 Atmos/JOC hints.
 - [ ] Extract Matroska E-AC-3 Atmos/JOC hints.
 - [x] Extract subtitles: text vs bitmap classification, language/title, default/forced disposition.

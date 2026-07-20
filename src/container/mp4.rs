@@ -28,6 +28,9 @@ pub struct Mp4Track {
     pub codec: String,
     pub duration_ms: Option<u64>,
     pub language: Option<String>,
+    pub title: Option<String>,
+    pub default: bool,
+    pub forced: bool,
     pub frame_rate: Option<f64>,
     pub bitrate_bps: Option<u64>,
     pub dynamic_range: Mp4DynamicRange,
@@ -343,25 +346,29 @@ fn parse_moov(payload: &[u8], meta: &mut Mp4BasicMetadata) {
 }
 
 fn parse_trak(payload: &[u8], index: u32) -> Option<Mp4Track> {
-    let mut tkhd_size: Option<(u32, u32)> = None;
+    let mut tkhd: Option<TkhdInfo> = None;
     let mut mdia: Option<MdiaInfo> = None;
+    let mut title = None;
 
     for atom in AtomIter::new(payload) {
         if atom.kind == *b"tkhd" {
-            tkhd_size = parse_tkhd_size(atom.payload);
+            tkhd = parse_tkhd(atom.payload);
         } else if atom.kind == *b"mdia" {
             mdia = parse_mdia(atom.payload);
+        } else if atom.kind == *b"udta" {
+            title = title.or_else(|| parse_udta_title(atom.payload));
         }
     }
 
     let mdia = mdia?;
     let stsd = mdia.sample_entry?;
-    let kind = handler_to_track_kind(mdia.handler.as_deref());
+    let kind = handler_to_track_kind(mdia.handler.kind.as_deref());
     let codec = sample_entry_codec(&stsd.codec_fourcc, kind);
     let (width, height) = if stsd.width.is_some() || stsd.height.is_some() {
         (stsd.width, stsd.height)
     } else {
-        tkhd_size
+        tkhd.as_ref()
+            .and_then(|info| info.size)
             .map(|(w, h)| (Some(w), Some(h)))
             .unwrap_or((None, None))
     };
@@ -372,6 +379,9 @@ fn parse_trak(payload: &[u8], index: u32) -> Option<Mp4Track> {
         codec,
         duration_ms: mdia.duration_ms,
         language: mdia.language,
+        title: title.or(mdia.handler.name),
+        default: tkhd.map(|info| info.enabled).unwrap_or(false),
+        forced: false,
         frame_rate: mdia.frame_rate,
         bitrate_bps: mdia.bitrate_bps,
         dynamic_range: stsd.dynamic_range,
@@ -385,12 +395,24 @@ fn parse_trak(payload: &[u8], index: u32) -> Option<Mp4Track> {
 
 #[derive(Debug, Clone)]
 struct MdiaInfo {
-    handler: Option<String>,
+    handler: HandlerInfo,
     duration_ms: Option<u64>,
     language: Option<String>,
     frame_rate: Option<f64>,
     bitrate_bps: Option<u64>,
     sample_entry: Option<SampleEntryInfo>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct HandlerInfo {
+    kind: Option<String>,
+    name: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TkhdInfo {
+    enabled: bool,
+    size: Option<(u32, u32)>,
 }
 
 #[derive(Debug, Clone)]
@@ -405,7 +427,7 @@ struct SampleEntryInfo {
 }
 
 fn parse_mdia(payload: &[u8]) -> Option<MdiaInfo> {
-    let mut handler = None;
+    let mut handler = HandlerInfo::default();
     let mut duration_ms = None;
     let mut language = None;
     let mut timescale = None;
@@ -448,7 +470,7 @@ fn parse_stbl(payload: &[u8]) -> Option<SampleEntryInfo> {
 fn parse_trak_kind(payload: &[u8]) -> Option<Mp4TrackKind> {
     let mdia = find_atom(payload, b"mdia")?;
     Some(handler_to_track_kind(
-        parse_hdlr(find_atom(mdia, b"hdlr")?).as_deref(),
+        parse_hdlr(find_atom(mdia, b"hdlr")?).kind.as_deref(),
     ))
 }
 
@@ -1286,11 +1308,13 @@ fn dynamic_range_from_colr(payload: &[u8]) -> Mp4DynamicRange {
     }
 }
 
-fn parse_hdlr(payload: &[u8]) -> Option<String> {
+fn parse_hdlr(payload: &[u8]) -> HandlerInfo {
     if payload.len() < 12 {
-        return None;
+        return HandlerInfo::default();
     }
-    fourcc_to_string(&payload[8..12])
+    let kind = fourcc_to_string(&payload[8..12]);
+    let name = payload.get(24..).and_then(parse_mp4_string);
+    HandlerInfo { kind, name }
 }
 
 fn parse_chpl(payload: &[u8]) -> Vec<Mp4Chapter> {
@@ -1385,6 +1409,20 @@ fn decode_iso_639_2(bits: u16) -> Option<String> {
     Some(out)
 }
 
+fn parse_tkhd(payload: &[u8]) -> Option<TkhdInfo> {
+    Some(TkhdInfo {
+        enabled: tkhd_enabled(payload)?,
+        size: parse_tkhd_size(payload),
+    })
+}
+
+fn tkhd_enabled(payload: &[u8]) -> Option<bool> {
+    if payload.len() < 4 {
+        return None;
+    }
+    Some((payload[3] & 0x01) != 0)
+}
+
 fn parse_tkhd_size(payload: &[u8]) -> Option<(u32, u32)> {
     let version = *payload.first()?;
     let (width_offset, height_offset) = if version == 1 { (88, 92) } else { (76, 80) };
@@ -1397,6 +1435,68 @@ fn parse_tkhd_size(payload: &[u8]) -> Option<(u32, u32)> {
         return None;
     }
     Some((width, height))
+}
+
+fn parse_udta_title(payload: &[u8]) -> Option<String> {
+    for atom in AtomIter::new(payload) {
+        match atom.kind {
+            kind if kind == *b"name" => {
+                if let Some(title) = parse_mp4_string(atom.payload) {
+                    return Some(title);
+                }
+            }
+            kind if kind == *b"meta" => {
+                let meta_payload = atom.payload.get(4..).unwrap_or(atom.payload);
+                if let Some(title) = parse_udta_title(meta_payload) {
+                    return Some(title);
+                }
+            }
+            kind if kind == *b"ilst" => {
+                if let Some(title) = parse_ilst_title(atom.payload) {
+                    return Some(title);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn parse_ilst_title(payload: &[u8]) -> Option<String> {
+    for atom in AtomIter::new(payload) {
+        if atom.kind != [0xa9, b'n', b'a', b'm'] {
+            continue;
+        }
+        for child in AtomIter::new(atom.payload) {
+            if child.kind == *b"data"
+                && let Some(title_payload) = child.payload.get(8..)
+                && let Some(title) = parse_mp4_string(title_payload)
+            {
+                return Some(title);
+            }
+        }
+    }
+    None
+}
+
+fn parse_mp4_string(payload: &[u8]) -> Option<String> {
+    let mut bytes = payload;
+    if let Some((&len, rest)) = payload.split_first()
+        && usize::from(len) == rest.len()
+    {
+        bytes = rest;
+    }
+    let bytes = bytes
+        .split(|byte| *byte == 0)
+        .next()
+        .unwrap_or_default()
+        .iter()
+        .copied()
+        .skip_while(u8::is_ascii_whitespace)
+        .collect::<Vec<_>>();
+    let text = String::from_utf8(bytes).ok()?;
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_string())
 }
 
 fn fixed_16_16_to_u32(value: u32) -> u32 {
@@ -1608,6 +1708,41 @@ mod tests {
         let meta = parse_basic_metadata(&data);
         assert_eq!(meta.tracks.len(), 1);
         assert_eq!(meta.tracks[0].language.as_deref(), Some("eng"));
+    }
+
+    #[test]
+    fn parses_mp4_track_title_and_default_flag() {
+        let mut data = ftyp();
+        let moov = atom(
+            b"moov",
+            &atom(
+                b"trak",
+                &[
+                    tkhd_with_enabled(true, None),
+                    atom(
+                        b"mdia",
+                        &[
+                            mdhd_with_language(48_000, 144_000, "eng"),
+                            hdlr_with_name(b"soun", "SoundHandler"),
+                            atom(
+                                b"minf",
+                                &atom(b"stbl", &stsd(b"mp4a", None, Some((6, 48_000)))),
+                            ),
+                        ]
+                        .concat(),
+                    ),
+                    atom(b"udta", &atom(b"name", b"English 5.1")),
+                ]
+                .concat(),
+            ),
+        );
+        data.extend_from_slice(&moov);
+
+        let meta = parse_basic_metadata(&data);
+        assert_eq!(meta.tracks.len(), 1);
+        assert_eq!(meta.tracks[0].title.as_deref(), Some("English 5.1"));
+        assert!(meta.tracks[0].default);
+        assert!(!meta.tracks[0].forced);
     }
 
     #[test]
@@ -1919,7 +2054,14 @@ mod tests {
     }
 
     fn tkhd(size: Option<(u32, u32)>) -> Vec<u8> {
+        tkhd_with_enabled(false, size)
+    }
+
+    fn tkhd_with_enabled(enabled: bool, size: Option<(u32, u32)>) -> Vec<u8> {
         let mut payload = vec![0_u8; 84];
+        if enabled {
+            payload[3] = 1;
+        }
         if let Some((w, h)) = size {
             payload[76..80].copy_from_slice(&(w << 16).to_be_bytes());
             payload[80..84].copy_from_slice(&(h << 16).to_be_bytes());
@@ -2074,6 +2216,14 @@ mod tests {
     fn hdlr(handler: &[u8; 4]) -> Vec<u8> {
         let mut payload = vec![0_u8; 12];
         payload[8..12].copy_from_slice(handler);
+        atom(b"hdlr", &payload)
+    }
+
+    fn hdlr_with_name(handler: &[u8; 4], name: &str) -> Vec<u8> {
+        let mut payload = vec![0_u8; 24];
+        payload[8..12].copy_from_slice(handler);
+        payload.extend_from_slice(name.as_bytes());
+        payload.push(0);
         atom(b"hdlr", &payload)
     }
 

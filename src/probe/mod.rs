@@ -423,10 +423,10 @@ fn tracks_from_mp4(meta: &mp4::Mp4BasicMetadata) -> Vec<MediaTrack> {
                 codec: track.codec.clone(),
                 duration_ms: track.duration_ms,
                 language: track.language.clone(),
-                title: None,
+                title: track.title.clone(),
                 flags: TrackFlags {
-                    default: false,
-                    forced: false,
+                    default: track.default,
+                    forced: track.forced,
                 },
                 shape: TrackShape {
                     width: track.width,
@@ -742,6 +742,40 @@ mod tests {
             ProbeError::OpenFailed("nope".to_string()).code(),
             EngineErrorCode::SourceOpenFailed
         );
+    }
+
+    #[test]
+    fn mp4_track_metadata_reaches_probe_tracks() {
+        let meta = mp4::Mp4BasicMetadata {
+            major_brand: Some("isom".to_string()),
+            compatible_brands: Vec::new(),
+            duration_ms: None,
+            tracks: vec![mp4::Mp4Track {
+                index: 0,
+                kind: mp4::Mp4TrackKind::Audio,
+                codec: "aac".to_string(),
+                duration_ms: Some(1_000),
+                language: Some("eng".to_string()),
+                title: Some("English 5.1".to_string()),
+                default: true,
+                forced: false,
+                frame_rate: None,
+                bitrate_bps: Some(192_000),
+                dynamic_range: mp4::Mp4DynamicRange::Unknown,
+                width: None,
+                height: None,
+                channels: Some(6),
+                sample_rate: Some(48_000),
+                atmos: false,
+            }],
+            chapters: Vec::new(),
+        };
+
+        let tracks = tracks_from_mp4(&meta);
+        assert_eq!(tracks[0].language.as_deref(), Some("eng"));
+        assert_eq!(tracks[0].title.as_deref(), Some("English 5.1"));
+        assert!(tracks[0].flags.default);
+        assert!(!tracks[0].flags.forced);
     }
 
     #[test]
