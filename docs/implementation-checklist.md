@@ -25,7 +25,7 @@
 - [x] Add Criterion benchmark harness for initial hot paths.
 - [ ] Add dependency audit policy once `cargo-deny` is installed or CI can install it reproducibly.
 - [x] Add missing-docs policy for the public facade.
-- [ ] Split oversized implementation modules: HLS, MP4, Matroska, CLI.
+- [x] Split oversized implementation modules: HLS, MP4, Matroska, CLI.
 - [ ] Replace broad `anyhow` use in library-facing APIs with typed engine errors.
 - [ ] Add fuzz/property tests for EBML, MP4 atoms, packet range math, and timestamp repair.
 
