@@ -133,14 +133,6 @@ pub fn media_fragment(sequence_number: u32, tracks: &[Fmp4FragmentTrack]) -> Res
     Ok(out)
 }
 
-pub fn samples_from_packets(packets: &[PacketRef]) -> Vec<Fmp4Sample> {
-    let timescale = packets
-        .first()
-        .map(|packet| packet.duration.scale.units_per_second)
-        .unwrap_or(MOVIE_TIMESCALE);
-    samples_from_packets_with_timescale(packets, timescale)
-}
-
 pub fn samples_from_packets_with_timescale(
     packets: &[PacketRef],
     timescale: u32,

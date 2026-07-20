@@ -28,6 +28,7 @@ pub struct Mp4Track {
     pub sample_rate: Option<u32>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mp4PacketIndex {
     pub tracks: Vec<Mp4TrackPacketIndex>,
@@ -98,6 +99,7 @@ pub fn parse_basic_metadata(bytes: &[u8]) -> Mp4BasicMetadata {
     meta
 }
 
+#[cfg(test)]
 pub fn parse_packet_index(bytes: &[u8]) -> Mp4PacketIndex {
     let mut tracks = Vec::new();
     let mut video_index = 0_u32;
