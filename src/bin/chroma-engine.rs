@@ -147,6 +147,17 @@ enum Command {
         #[arg(long, default_value_t = 4_000)]
         segment_ms: u64,
     },
+    /// Write a contiguous run of native HLS VOD segments by index.
+    HlsSegments {
+        input: PathBuf,
+        output_dir: PathBuf,
+        #[arg(long)]
+        start: usize,
+        #[arg(long)]
+        count: usize,
+        #[arg(long, default_value_t = 4_000)]
+        segment_ms: u64,
+    },
     /// Remux a source into faststart MP4.
     RemuxMp4 { input: PathBuf, output: PathBuf },
 }
@@ -485,6 +496,27 @@ fn main() -> Result<()> {
             let segment = plan.write_segment(index, &output)?;
             println!("{}", serde_json::to_string_pretty(&segment)?);
         }
+        Command::HlsSegments {
+            input,
+            output_dir,
+            start,
+            count,
+            segment_ms,
+        } => {
+            let plan = HlsVodPlan::open(
+                &input,
+                HlsOptions {
+                    segment_target_ms: segment_ms,
+                },
+            )?;
+            let segments = plan.write_segments(start, count, &output_dir)?;
+            let output = HlsSegmentsOutput {
+                start,
+                requested_count: count,
+                segments,
+            };
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        }
         Command::RemuxMp4 { input, output } => {
             chroma_engine::remux::remux_mp4(&input, &output)?;
             println!("{}", serde_json::json!({ "ok": true }));
@@ -503,6 +535,14 @@ struct HlsPlanOutput {
     audio_codec: String,
     master_playlist: String,
     media_playlist: String,
+    segments: Vec<HlsSegmentInfo>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HlsSegmentsOutput {
+    start: usize,
+    requested_count: usize,
     segments: Vec<HlsSegmentInfo>,
 }
 

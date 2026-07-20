@@ -184,6 +184,36 @@ impl HlsVodPlan {
             uri: segment_name(window.index),
         })
     }
+
+    pub fn write_segments(
+        &self,
+        start_index: usize,
+        count: usize,
+        output_dir: &Path,
+    ) -> Result<Vec<HlsSegmentInfo>> {
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        if start_index >= self.windows.len() {
+            bail!("HLS segment start index {start_index} is out of range");
+        }
+
+        create_dir_all(output_dir)?;
+        let end_index = start_index.saturating_add(count).min(self.windows.len());
+        let mut written = Vec::with_capacity(end_index.saturating_sub(start_index));
+        for index in start_index..end_index {
+            let window = self.windows[index];
+            let segment = mux_segment(self.source.as_ref(), &self.tracks, window)?;
+            write(output_dir.join(segment_name(window.index)), segment)?;
+            written.push(HlsSegmentInfo {
+                index: window.index,
+                start_ms: window.start_ms,
+                duration_ms: window.end_ms.saturating_sub(window.start_ms).max(1),
+                uri: segment_name(window.index),
+            });
+        }
+        Ok(written)
+    }
 }
 
 #[derive(Debug, Clone)]
