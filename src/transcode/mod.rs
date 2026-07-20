@@ -5,10 +5,15 @@ use crate::platform::EncoderProfile;
 
 mod audio_clock;
 mod audio_encode;
+mod video_encode;
 
 pub use audio_clock::{AudioClockConfig, AudioFrameTiming, AudioSampleClock};
 pub use audio_encode::{
     AudioEncodeError, EncodedAudioOutput, PcmAudioFormat, encode_aac_from_interleaved_i16,
+};
+pub use video_encode::{
+    RawVideoFormat, RawVideoPixelFormat, VideoEncodeError, VideoEncodeSessionInfo,
+    probe_videotoolbox_h264_session,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

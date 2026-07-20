@@ -62,3 +62,7 @@ strip = "none"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 audiotoolbox = "0.4.0"
+core-foundation = "0.10.1"
+core-foundation-sys = "0.8.7"
+core-media = "0.8.1"
+video-toolbox = "0.3.1"

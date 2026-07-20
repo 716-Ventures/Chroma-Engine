@@ -115,7 +115,7 @@
 - [x] Sample-accurate audio output clock for native decode/encode paths. `AudioSampleClock` anchors on source PTS only at startup/discontinuity and advances encoded output timestamps by sample count to avoid container timebase jitter.
 - [x] Encoded audio output contract. `EncodedAudioStream` and `EncodedAudioFrame` define the stable codec/timing/payload boundary native backends must emit before fMP4/HLS muxing.
 - [x] fMP4 adapter for encoded audio frames. Native audio backend output can be packed into fMP4 fragment tracks with contiguous sample-clock validation before player-visible muxing.
-- [ ] macOS VideoToolbox H.264 encode. Planned in the backend matrix, but not reported as executable until Chroma Engine owns a real native encode path.
+- [ ] macOS VideoToolbox H.264 encode. Native raw-video contract and VideoToolbox H.264 session prepare probe are implemented; still open until encoded AVC packets and decoder config are emitted through the stable video output boundary.
 - [ ] macOS VideoToolbox HEVC encode. Planned in the backend matrix, but not reported as executable until Chroma Engine owns a real native encode path.
 - [x] AAC audio encode. macOS AudioToolbox backend encodes interleaved i16 PCM to AAC-LC, emits MPEG-4 AudioSpecificConfig, and returns sample-clocked `EncodedAudioFrame` payloads.
 - [ ] AC-3/E-AC-3 bridge encode. Planned in the backend matrix, but not reported as executable until Chroma Engine owns the decode/bridge/encode path.
