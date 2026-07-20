@@ -122,7 +122,7 @@
 - [x] CPU fallback decision.
 - [x] Linux VAAPI/NVENC/QSV path.
 - [x] Windows NVENC/QSV/AMF path.
-- [ ] Warm encoder session initialization. AAC AudioToolbox warmup now instantiates a native converter with a tiny silent encode before playback; still open until native video and bridge backends have matching warmups.
+- [ ] Warm encoder session initialization. AAC AudioToolbox and VideoToolbox H.264 now run tiny real encodes before playback; still open until HEVC and bridge backends have matching warmups.
 
 ## Integration
 
