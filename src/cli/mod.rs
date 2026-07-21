@@ -12,6 +12,7 @@ use crate::container::{
         parse_chunk_plan as parse_mp4_chunk_plan, parse_codec_config as parse_mp4_codec_config,
     },
 };
+use crate::packet::{ExtractedChunk, TimeDelta, TimePoint, TimeScale};
 use crate::playback_manifest::{
     MatroskaManifestOptions, Mp4ManifestOptions, build_matroska_playback_manifest,
     build_mp4_playback_manifest,
@@ -19,7 +20,10 @@ use crate::playback_manifest::{
 use crate::probe::probe_media_source;
 use crate::session::{AudioSelection, PlaybackConstraints, PlaybackTarget, plan_playback};
 use crate::source::MappedMediaFile;
-use crate::transcode::{HlsTranscodeRequest, plan_hls_transcode};
+use crate::transcode::{
+    HlsTranscodeRequest, RawVideoFormat, RawVideoPixelFormat, VideoCodec, build_video_decode_input,
+    decode_videotoolbox_bgra_frames, plan_hls_transcode,
+};
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 use serde::Serialize;
@@ -151,6 +155,16 @@ enum Command {
     EncoderProbe,
     /// Emit platform decoder backend capabilities.
     DecoderProbe,
+    /// Decode one native packet chunk to BGRA and emit compact decoder health stats.
+    DecodeChunk {
+        input: PathBuf,
+        #[arg(long)]
+        track: Option<String>,
+        #[arg(long, default_value_t = 0)]
+        chunk_index: u32,
+        #[arg(long, default_value_t = 4_000)]
+        target_ms: u64,
+    },
     /// Warm the selected encoder backend.
     Warmup,
     /// Package a source into native HLS VOD output.
@@ -586,6 +600,16 @@ pub fn run() -> Result<()> {
             let probe = crate::platform::decoder_backend_plan();
             println!("{}", serde_json::to_string_pretty(&probe)?);
         }
+        Command::DecodeChunk {
+            input,
+            track,
+            chunk_index,
+            target_ms,
+        } => {
+            let source = MappedMediaFile::open(&input)?;
+            let decoded = decode_chunk(source.as_ref(), track.as_deref(), chunk_index, target_ms)?;
+            println!("{}", serde_json::to_string_pretty(&decoded)?);
+        }
         Command::Warmup => {
             crate::platform::warmup()?;
             println!("{}", serde_json::json!({ "ok": true }));
@@ -689,6 +713,25 @@ struct AacAdtsOutput {
     byte_count: u64,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DecodeChunkOutput {
+    track_id: String,
+    chunk_index: u32,
+    codec: VideoCodec,
+    decoder: String,
+    packet_count: u32,
+    decoded_frame_count: usize,
+    width: u32,
+    height: u32,
+    time_scale: TimeScale,
+    first_pts: Option<TimePoint>,
+    last_pts: Option<TimePoint>,
+    first_duration: Option<TimeDelta>,
+    keyframe_aligned: bool,
+    decoded_bytes: u64,
+}
+
 fn hex_to_bytes(hex: &str) -> Result<Vec<u8>> {
     let clean = hex.trim();
     if !clean.len().is_multiple_of(2) {
@@ -711,6 +754,182 @@ fn hex_nibble(byte: u8) -> Result<u8> {
         b'A'..=b'F' => Ok(byte - b'A' + 10),
         _ => bail!("invalid hex byte"),
     }
+}
+
+fn decode_chunk(
+    bytes: &[u8],
+    requested_track_id: Option<&str>,
+    chunk_index: u32,
+    target_ms: u64,
+) -> Result<DecodeChunkOutput> {
+    if looks_like_mp4(bytes) {
+        decode_mp4_chunk(bytes, requested_track_id, chunk_index, target_ms)
+    } else if looks_like_ebml(bytes) {
+        decode_matroska_chunk(bytes, requested_track_id, chunk_index, target_ms)
+    } else {
+        bail!("decode-chunk currently supports MP4/MOV and Matroska/WebM packet tables");
+    }
+}
+
+fn decode_mp4_chunk(
+    bytes: &[u8],
+    requested_track_id: Option<&str>,
+    chunk_index: u32,
+    target_ms: u64,
+) -> Result<DecodeChunkOutput> {
+    let config = parse_mp4_codec_config(bytes, requested_track_id)
+        .ok_or_else(|| anyhow::anyhow!("no matching MP4 video codec config found"))?;
+    let codec = video_codec_from_label(&config.codec)?;
+    let decoder_config = hex_to_bytes(
+        config
+            .description_hex
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("missing MP4 video decoder config"))?,
+    )?;
+    let (manifest, payload) =
+        extract_mp4_chunk(bytes, Some(&config.track_id), target_ms, chunk_index)?;
+    let meta = crate::container::mp4::parse_basic_metadata(bytes);
+    let selected_video_index = config
+        .track_id
+        .strip_prefix('v')
+        .and_then(|id| id.parse::<u32>().ok());
+    let track = meta
+        .tracks
+        .iter()
+        .find(|track| {
+            track.kind == crate::container::mp4::Mp4TrackKind::Video
+                && Some(track.index) == selected_video_index
+        })
+        .or_else(|| {
+            meta.tracks
+                .iter()
+                .find(|track| track.kind == crate::container::mp4::Mp4TrackKind::Video)
+        });
+    let frame_rate = track.and_then(|track| track.frame_rate);
+    decode_extracted_chunk(
+        config.track_id,
+        codec,
+        decoder_config,
+        manifest,
+        &payload,
+        RawVideoFormat {
+            width: track.and_then(|track| track.width).unwrap_or(1920),
+            height: track.and_then(|track| track.height).unwrap_or(1080),
+            frame_rate_num: frame_rate
+                .map(|rate| (rate * 1000.0).round() as u32)
+                .filter(|rate| *rate > 0)
+                .unwrap_or(24_000),
+            frame_rate_den: 1000,
+            pixel_format: RawVideoPixelFormat::Bgra,
+        },
+    )
+}
+
+fn decode_matroska_chunk(
+    bytes: &[u8],
+    requested_track_id: Option<&str>,
+    chunk_index: u32,
+    target_ms: u64,
+) -> Result<DecodeChunkOutput> {
+    let meta = crate::container::matroska::parse_basic_metadata(bytes);
+    let (track_id, track) = select_matroska_video_track(&meta.tracks, requested_track_id)
+        .ok_or_else(|| anyhow::anyhow!("no matching Matroska video track found"))?;
+    let codec = video_codec_from_label(&track.codec)?;
+    let decoder_config = track
+        .codec_private
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("missing Matroska video decoder config"))?;
+    let (manifest, payload) =
+        crate::container::matroska::extract_chunk(bytes, Some(&track_id), target_ms, chunk_index)?;
+    let frame_duration_ns = track.default_duration_ns.unwrap_or(41_666_667);
+    decode_extracted_chunk(
+        track_id,
+        codec,
+        decoder_config,
+        manifest,
+        &payload,
+        RawVideoFormat {
+            width: track.width.unwrap_or(1920),
+            height: track.height.unwrap_or(1080),
+            frame_rate_num: u32::try_from(1_000_000_000_u64 / frame_duration_ns.max(1))
+                .unwrap_or(24)
+                .max(1),
+            frame_rate_den: 1,
+            pixel_format: RawVideoPixelFormat::Bgra,
+        },
+    )
+}
+
+fn decode_extracted_chunk(
+    track_id: String,
+    codec: VideoCodec,
+    decoder_config: Vec<u8>,
+    manifest: ExtractedChunk,
+    payload: &[u8],
+    output_format: RawVideoFormat,
+) -> Result<DecodeChunkOutput> {
+    let decode_input = build_video_decode_input(
+        codec,
+        manifest
+            .samples
+            .first()
+            .map(|sample| sample.pts.scale)
+            .unwrap_or(TimeScale::MILLIS),
+        Some(&decoder_config),
+        &manifest.samples,
+        payload,
+        true,
+    )?;
+    let decoded = decode_videotoolbox_bgra_frames(&decode_input, output_format)?;
+    Ok(DecodeChunkOutput {
+        track_id,
+        chunk_index: manifest.chunk.index,
+        codec,
+        decoder: decoded.stream.decoder,
+        packet_count: manifest.packet_count,
+        decoded_frame_count: decoded.frames.len(),
+        width: decoded.stream.format.width,
+        height: decoded.stream.format.height,
+        time_scale: decode_input.time_scale,
+        first_pts: decoded.frames.first().map(|frame| frame.pts),
+        last_pts: decoded.frames.last().map(|frame| frame.pts),
+        first_duration: decoded.frames.first().map(|frame| frame.duration),
+        keyframe_aligned: manifest.chunk.key_aligned,
+        decoded_bytes: decoded
+            .frames
+            .iter()
+            .map(|frame| frame.pixels.len() as u64)
+            .sum(),
+    })
+}
+
+fn video_codec_from_label(codec: &str) -> Result<VideoCodec> {
+    match codec {
+        "h264" => Ok(VideoCodec::H264),
+        "hevc" => Ok(VideoCodec::Hevc),
+        _ => bail!("selected video track codec {codec} is not supported by native decode"),
+    }
+}
+
+fn select_matroska_video_track<'a>(
+    tracks: &'a [crate::container::matroska::MatroskaTrack],
+    requested_track_id: Option<&str>,
+) -> Option<(String, &'a crate::container::matroska::MatroskaTrack)> {
+    let mut video_index = 0_u32;
+    for track in tracks {
+        if track.kind != crate::container::matroska::MatroskaTrackKind::Video {
+            continue;
+        }
+        let track_id = format!("v{video_index}");
+        video_index += 1;
+        if requested_track_id
+            .map(|requested| requested == track_id)
+            .unwrap_or(true)
+        {
+            return Some((track_id, track));
+        }
+    }
+    None
 }
 
 fn extract_mp4_window(

@@ -183,14 +183,23 @@ pub fn plan_hls_transcode(
                 height: track.video.as_ref().and_then(|video| video.height),
             }
         } else {
-            let missing = format!("videoDecode:{}", capability_label(track.codec.family));
-            stages.push(missing_stage(
-                "video-decode0",
-                TranscodeStageKind::VideoDecode,
-                vec![track.id.clone()],
-                "compressed source video must decode before target-native HLS encode",
-                missing,
-            ));
+            if native_video_decode_ready(track.codec.family) {
+                stages.push(ready_stage(
+                    "video-decode0",
+                    TranscodeStageKind::VideoDecode,
+                    vec![track.id.clone()],
+                    "native VideoToolbox decode can convert compressed packets into BGRA frames",
+                ));
+            } else {
+                let missing = format!("videoDecode:{}", capability_label(track.codec.family));
+                stages.push(missing_stage(
+                    "video-decode0",
+                    TranscodeStageKind::VideoDecode,
+                    vec![track.id.clone()],
+                    "compressed source video must decode before target-native HLS encode",
+                    missing,
+                ));
+            }
             stages.push(ready_stage(
                 "video-encode0",
                 TranscodeStageKind::VideoEncode,
@@ -325,6 +334,10 @@ fn video_can_copy_for_hls(track: &MediaTrack, target: PlaybackTarget) -> bool {
         }
         PlaybackTarget::Browser => matches!(track.codec.family, CodecFamily::H264),
     }
+}
+
+fn native_video_decode_ready(family: CodecFamily) -> bool {
+    cfg!(target_os = "macos") && matches!(family, CodecFamily::H264 | CodecFamily::Hevc)
 }
 
 fn audio_can_copy_for_hls(track: &MediaTrack, target: PlaybackTarget) -> bool {
@@ -537,7 +550,7 @@ mod tests {
     }
 
     #[test]
-    fn forced_apple_hevc_transcode_reports_missing_video_decoder() {
+    fn forced_apple_hevc_transcode_reports_video_decode_readiness() {
         let probe = probe_with_tracks(vec![
             video_track(
                 "v0",
@@ -552,15 +565,23 @@ mod tests {
 
         let plan = plan_hls_transcode(&probe, request(PlaybackTarget::AppleNative, true, None));
 
-        assert!(!plan.engine_executable);
         assert_eq!(plan.output.video.as_ref().unwrap().codec, VideoCodec::H264);
         assert!(!plan.output.video.as_ref().unwrap().packet_copy);
         assert_eq!(plan.output.video.as_ref().unwrap().bitrate_bps, 16_000_000);
-        assert!(
-            plan.missing_capabilities
-                .iter()
-                .any(|capability| capability == "videoDecode:hevc")
-        );
+        if cfg!(target_os = "macos") {
+            assert!(plan.engine_executable);
+            assert!(plan.stages.iter().any(|stage| {
+                stage.kind == TranscodeStageKind::VideoDecode
+                    && stage.status == TranscodeStageStatus::NativeReady
+            }));
+        } else {
+            assert!(!plan.engine_executable);
+            assert!(
+                plan.missing_capabilities
+                    .iter()
+                    .any(|capability| capability == "videoDecode:hevc")
+            );
+        }
     }
 
     #[test]

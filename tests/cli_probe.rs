@@ -103,7 +103,7 @@ fn plan_cli_reports_browser_decode_for_mkv_hevc_truehd() {
 }
 
 #[test]
-fn transcode_plan_cli_reports_missing_native_decode_capability() {
+fn transcode_plan_cli_reports_native_video_decode_readiness() {
     let dir = tempdir().unwrap();
     let file = dir.path().join("sample.mkv");
     std::fs::write(&file, minimal_browser_unfriendly_mkv()).unwrap();
@@ -127,14 +127,30 @@ fn transcode_plan_cli_reports_missing_native_decode_capability() {
     assert_eq!(json["selectedVideoTrackId"], "v0");
     assert_eq!(json["output"]["transport"], "hlsFmp4");
     assert_eq!(json["output"]["video"]["codec"], "h264");
-    assert_eq!(json["engineExecutable"], false);
-    assert!(
-        json["missingCapabilities"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|capability| capability == "videoDecode:hevc")
-    );
+    if cfg!(target_os = "macos") {
+        assert_eq!(json["engineExecutable"], false);
+        assert!(
+            json["stages"].as_array().unwrap().iter().any(|stage| {
+                stage["kind"] == "videoDecode" && stage["status"] == "nativeReady"
+            })
+        );
+        assert!(
+            json["missingCapabilities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|capability| capability != "videoDecode:hevc")
+        );
+    } else {
+        assert_eq!(json["engineExecutable"], false);
+        assert!(
+            json["missingCapabilities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|capability| capability == "videoDecode:hevc")
+        );
+    }
 }
 
 #[test]
