@@ -82,6 +82,8 @@ pub struct NativeFmp4TranscodeSegmentOutput {
     pub encoded_video_frames: usize,
     /// Encoded audio frame count.
     pub encoded_audio_frames: usize,
+    /// Encoded or copied output audio codec.
+    pub audio_codec: String,
     /// First video timestamp in milliseconds.
     pub first_video_pts_ms: Option<u64>,
     /// First audio timestamp in milliseconds.
@@ -114,6 +116,8 @@ pub struct NativeFmp4TranscodeStartOutput {
     pub encoded_video_frames: usize,
     /// Encoded audio frame count.
     pub encoded_audio_frames: usize,
+    /// Encoded or copied output audio codec.
+    pub audio_codec: String,
 }
 
 impl Default for NativeFmp4TranscodeOptions {
@@ -143,7 +147,7 @@ pub fn write_native_fmp4_transcode_init(
         audio_track_id: segment.audio_track_id,
         byte_count: segment.init_segment.len() as u64,
         video_codec: segment.video_codec,
-        audio_codec: "aac".to_string(),
+        audio_codec: segment.audio_codec,
     })
 }
 
@@ -167,6 +171,7 @@ pub fn write_native_fmp4_transcode_segment(
         video_sample_count: segment.video_sample_count,
         encoded_video_frames: segment.encoded_video_frames,
         encoded_audio_frames: segment.encoded_audio_frames,
+        audio_codec: segment.audio_codec,
         first_video_pts_ms: segment.first_video_pts.map(TimePoint::as_millis),
         first_audio_pts_ms: segment.first_audio_pts.map(TimePoint::as_millis),
     })
@@ -196,6 +201,7 @@ pub fn write_native_fmp4_transcode_start(
         video_sample_count: segment.video_sample_count,
         encoded_video_frames: segment.encoded_video_frames,
         encoded_audio_frames: segment.encoded_audio_frames,
+        audio_codec: segment.audio_codec,
     })
 }
 
@@ -203,6 +209,7 @@ struct TranscodedSegment {
     video_track_id: String,
     audio_track_id: String,
     video_codec: String,
+    audio_codec: String,
     init_segment: Vec<u8>,
     media_segment: Vec<u8>,
     decoded_video_frames: usize,
@@ -216,6 +223,7 @@ struct TranscodedSegment {
 struct AudioSegment {
     fragment: crate::fmp4::Fmp4FragmentTrack,
     sample_entry: Fmp4SampleEntry,
+    codec: String,
     timescale: u32,
     default_sample_duration: u32,
     encoded_frame_count: usize,
@@ -312,6 +320,7 @@ fn transcode_matroska_segment(
         video_track_id,
         audio_track_id,
         video_codec: video_codec_string(video_track),
+        audio_codec: audio_segment.codec,
         init_segment: init,
         media_segment: media,
         decoded_video_frames: 0,
@@ -456,6 +465,7 @@ fn transcode_dts_audio_segment(
             channel_count: bridge_format.channels.min(u32::from(u16::MAX)) as u16,
             sample_rate: bridge_format.sample_rate,
         },
+        codec: "aac".to_string(),
         timescale: bridge_format.sample_rate,
         default_sample_duration: AAC_FRAMES_PER_PACKET,
         encoded_frame_count: encoded_audio.frames.len(),
@@ -477,6 +487,7 @@ fn copy_matroska_audio_segment(
     Ok(AudioSegment {
         fragment,
         sample_entry,
+        codec: fmp4_audio_codec_string(track),
         timescale,
         default_sample_duration,
         encoded_frame_count: 0,
@@ -515,6 +526,15 @@ fn matroska_audio_sample_entry(
             })
         }
         other => bail!("selected audio track codec {other} is not supported by fMP4 packet-copy"),
+    }
+}
+
+fn fmp4_audio_codec_string(track: &MatroskaTrack) -> String {
+    match track.codec.as_str() {
+        "aac" => "aac".to_string(),
+        "ac3" => "ac-3".to_string(),
+        "eac3" => "ec-3".to_string(),
+        other => other.to_string(),
     }
 }
 
