@@ -289,8 +289,15 @@ fn transcode_matroska_segment(
     let segment_ms = options.segment_ms.max(1);
     let (video_manifest, video_payload) =
         crate::container::matroska::extract_chunk(bytes, Some(&video_track_id), segment_ms, index)?;
-    let (audio_manifest, audio_payload) =
-        crate::container::matroska::extract_chunk(bytes, Some(&audio_track_id), segment_ms, index)?;
+    let video_start_ms = video_manifest.chunk.start.as_millis();
+    let video_end_ms = video_start_ms.saturating_add(video_manifest.chunk.duration.as_millis());
+    let (audio_manifest, audio_payload) = crate::container::matroska::extract_time_range(
+        bytes,
+        Some(&audio_track_id),
+        video_start_ms,
+        video_end_ms,
+        index,
+    )?;
 
     let video_segment = matroska_video_segment(
         video_track,
@@ -485,13 +492,12 @@ fn transcode_h264_video_segment(
     bitrate: u32,
 ) -> Result<VideoSegment> {
     let frame_duration_ns = track.default_duration_ns.unwrap_or(41_666_667);
+    let (frame_rate_num, frame_rate_den) = frame_rate_from_duration_ns(frame_duration_ns);
     let decode_format = RawVideoFormat {
         width: track.width.unwrap_or(1920),
         height: track.height.unwrap_or(1080),
-        frame_rate_num: u32::try_from(1_000_000_000_u64 / frame_duration_ns.max(1))
-            .unwrap_or(24)
-            .max(1),
-        frame_rate_den: 1,
+        frame_rate_num,
+        frame_rate_den,
         pixel_format: RawVideoPixelFormat::Bgra,
     };
     let encode_format = constrained_h264_format(decode_format);
@@ -556,6 +562,33 @@ fn transcode_h264_video_segment(
         encoded_frame_count: encoded.frames.len(),
         first_pts: encoded.frames.first().map(|frame| frame.pts),
     })
+}
+
+fn frame_rate_from_duration_ns(duration_ns: u64) -> (u32, u32) {
+    let duration_ns = duration_ns.max(1);
+    if (41_700_000..=41_720_000).contains(&duration_ns) {
+        return (24_000, 1_001);
+    }
+    if (33_360_000..=33_370_000).contains(&duration_ns) {
+        return (30_000, 1_001);
+    }
+    if (16_680_000..=16_690_000).contains(&duration_ns) {
+        return (60_000, 1_001);
+    }
+
+    let gcd = gcd_u64(1_000_000_000, duration_ns);
+    let num = (1_000_000_000 / gcd).min(u64::from(u32::MAX)) as u32;
+    let den = (duration_ns / gcd).min(u64::from(u32::MAX)) as u32;
+    (num.max(1), den.max(1))
+}
+
+fn gcd_u64(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 {
+        let next = a % b;
+        a = b;
+        b = next;
+    }
+    a.max(1)
 }
 
 fn constrained_h264_format(source: RawVideoFormat) -> RawVideoFormat {

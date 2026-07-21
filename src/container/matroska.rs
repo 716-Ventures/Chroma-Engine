@@ -87,6 +87,68 @@ pub fn extract_chunk(
         .ok_or(MatroskaChunkExtractError::NoChunk)
 }
 
+pub fn extract_time_range(
+    bytes: &[u8],
+    requested_track_id: Option<&str>,
+    range_start_ms: u64,
+    range_end_ms: u64,
+    output_index: u32,
+) -> Result<(ExtractedChunk, Vec<u8>), MatroskaChunkExtractError> {
+    let meta = parse_basic_metadata(bytes);
+    let selected = select_chunk_track(&meta.tracks, requested_track_id)
+        .ok_or(MatroskaChunkExtractError::NoTrack)?;
+    let window_start_ms = range_start_ms.saturating_sub(1_000);
+    let mut packets =
+        parse_packet_tracks_in_time_window(bytes, &[&selected.id], window_start_ms, range_end_ms)
+            .and_then(|mut tracks| tracks.pop())
+            .ok_or(MatroskaChunkExtractError::NoChunk)?
+            .packets
+            .into_iter()
+            .filter(|packet| {
+                let start = packet.pts.as_millis();
+                let end = start.saturating_add(packet.duration.as_millis().max(1));
+                end > range_start_ms && start < range_end_ms
+            })
+            .collect::<Vec<_>>();
+
+    if packets.is_empty() {
+        return Err(MatroskaChunkExtractError::NoChunk);
+    }
+
+    let last_duration =
+        infer_last_packet_duration(&packets).unwrap_or_else(|| TimeDelta::millis(0));
+    if let Some(last) = packets.last_mut() {
+        last.duration = last_duration;
+    }
+    let first_packet_ms = packets
+        .first()
+        .map(|packet| packet.pts.as_millis())
+        .unwrap_or(range_start_ms);
+    let last_end_ms = packets
+        .last()
+        .map(|packet| {
+            packet
+                .pts
+                .as_millis()
+                .saturating_add(packet.duration.as_millis())
+        })
+        .unwrap_or(range_end_ms);
+    let chunk = NativeChunk {
+        index: output_index,
+        start: TimePoint::millis(first_packet_ms),
+        duration: TimeDelta::millis(last_end_ms.saturating_sub(first_packet_ms).max(1)),
+        packet_range: PacketRange {
+            start: 0,
+            end: packets.len() as u32,
+        },
+        key_aligned: packets
+            .first()
+            .map(|packet| packet.keyframe)
+            .unwrap_or(false),
+    };
+    extract_packets_as_chunk(bytes, &selected.id, chunk, &packets)
+}
+
 pub fn extract_window(
     bytes: &[u8],
     requested_track_id: Option<&str>,
@@ -128,7 +190,6 @@ pub fn extract_window(
             );
             if !saw_block {
                 chunk_start_ms = timestamp_ms;
-                last_seen_ms = timestamp_ms;
                 key_aligned = block.keyframe;
                 saw_block = true;
             }
@@ -137,11 +198,12 @@ pub fn extract_window(
                 && block.keyframe
                 && timestamp_ms.saturating_sub(chunk_start_ms) >= target_ms;
             if should_cut {
+                let chunk_end_ms = timestamp_ms;
                 if current_index >= start_chunk && current_index < end_chunk {
                     let chunk = NativeChunk {
                         index: current_index,
                         start: TimePoint::millis(chunk_start_ms),
-                        duration: TimeDelta::millis(last_seen_ms.saturating_sub(chunk_start_ms)),
+                        duration: TimeDelta::millis(chunk_end_ms.saturating_sub(chunk_start_ms)),
                         packet_range: PacketRange {
                             start: 0,
                             end: packets.len() as u32,
@@ -187,7 +249,18 @@ pub fn extract_window(
         let chunk = NativeChunk {
             index: current_index,
             start: TimePoint::millis(chunk_start_ms),
-            duration: TimeDelta::millis(last_seen_ms.saturating_sub(chunk_start_ms)),
+            duration: TimeDelta::millis(
+                packets
+                    .last()
+                    .map(|packet| {
+                        packet
+                            .pts
+                            .as_millis()
+                            .saturating_add(packet.duration.as_millis())
+                    })
+                    .unwrap_or(last_seen_ms)
+                    .saturating_sub(chunk_start_ms),
+            ),
             packet_range: PacketRange {
                 start: 0,
                 end: packets.len() as u32,
@@ -324,7 +397,6 @@ pub fn parse_chunk_plan(
             );
             if !saw_block {
                 chunk_start_ms = timestamp_ms;
-                last_seen_ms = timestamp_ms;
                 key_aligned = block.keyframe;
                 saw_block = true;
             }
@@ -336,7 +408,7 @@ pub fn parse_chunk_plan(
                 chunks.push(NativeChunk {
                     index: chunks.len() as u32,
                     start: TimePoint::millis(chunk_start_ms),
-                    duration: TimeDelta::millis(last_seen_ms.saturating_sub(chunk_start_ms)),
+                    duration: TimeDelta::millis(timestamp_ms.saturating_sub(chunk_start_ms)),
                     packet_range: PacketRange {
                         start: chunk_start_block,
                         end: block_index,
@@ -399,7 +471,7 @@ fn parse_cue_chunk_plan(
             chunks.push(NativeChunk {
                 index: chunks.len() as u32,
                 start: TimePoint::millis(chunk_start_ms),
-                duration: TimeDelta::millis(last_start_ms.saturating_sub(chunk_start_ms)),
+                duration: TimeDelta::millis(cue_ms.saturating_sub(chunk_start_ms)),
                 packet_range: PacketRange {
                     start: chunk_start_cue,
                     end: idx as u32,
@@ -1540,6 +1612,50 @@ mod tests {
             plan.chunks[2].packet_range,
             PacketRange { start: 4, end: 5 }
         );
+        let starts = plan
+            .chunks
+            .iter()
+            .map(|chunk| chunk.start.as_millis())
+            .collect::<Vec<_>>();
+        let durations = plan
+            .chunks
+            .iter()
+            .map(|chunk| chunk.duration.as_millis())
+            .collect::<Vec<_>>();
+        assert_eq!(starts, vec![0, 2000, 4000]);
+        assert_eq!(durations, vec![2000, 2000, 0]);
+    }
+
+    #[test]
+    fn extracts_matroska_track_by_time_range() {
+        let info = elem(
+            0x1549_a966,
+            &[elem(0x002a_d7b1, &1_000_000_u64.to_be_bytes()[5..])].concat(),
+        );
+        let video = track_entry(1, 1, "V_MPEG4/ISO/AVC", &[]);
+        let audio = track_entry(2, 2, "A_AC3", &[]);
+        let tracks = elem(0x1654_ae6b, &[video, audio].concat());
+        let cluster0 = cluster(
+            0,
+            &[
+                simple_block_with_payload(2, 3000, true, b"a3000"),
+                simple_block_with_payload(2, 4000, true, b"a4000"),
+                simple_block_with_payload(2, 5000, true, b"a5000"),
+                simple_block_with_payload(2, 6000, true, b"a6000"),
+                simple_block_with_payload(2, 7000, true, b"a7000"),
+                simple_block_with_payload(2, 8000, true, b"a8000"),
+                simple_block_with_payload(2, 9000, true, b"a9000"),
+            ],
+        );
+        let segment = elem(0x1853_8067, &[info, tracks, cluster0].concat());
+        let mut bytes = elem(0x1a45_dfa3, &[]);
+        bytes.extend_from_slice(&segment);
+
+        let (chunk, payload) = extract_time_range(&bytes, Some("a0"), 4671, 8675, 1).unwrap();
+        assert_eq!(chunk.chunk.index, 1);
+        assert_eq!(chunk.chunk.start.as_millis(), 4000);
+        assert_eq!(chunk.packet_count, 5);
+        assert_eq!(payload, b"a4000a5000a6000a7000a8000");
     }
 
     #[test]
@@ -1652,6 +1768,18 @@ mod tests {
             plan.chunks[2].packet_range,
             PacketRange { start: 4, end: 5 }
         );
+        let starts = plan
+            .chunks
+            .iter()
+            .map(|chunk| chunk.start.as_millis())
+            .collect::<Vec<_>>();
+        let durations = plan
+            .chunks
+            .iter()
+            .map(|chunk| chunk.duration.as_millis())
+            .collect::<Vec<_>>();
+        assert_eq!(starts, vec![0, 2200, 4300]);
+        assert_eq!(durations, vec![2200, 2100, 0]);
     }
 
     #[test]
