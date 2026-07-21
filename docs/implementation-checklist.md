@@ -126,6 +126,7 @@
 - [x] Warm encoder session initialization. AAC AudioToolbox, VideoToolbox H.264/HEVC, and AC-3/E-AC-3 bridge backends run tiny real encodes before playback so startup failures surface before the first segment request.
 - [x] Chroma-native HLS transcode execution planning. `transcode-plan` now emits selected tracks, output codecs, stage readiness, and missing native capabilities so hosts can ask the engine what it can run without inheriting FFmpeg command/API shape.
 - [x] Native video decode frame/pump contract. Chroma Engine now has zero-copy compressed packet input, decoded BGRA frame output, and a bounded send/receive/drain action sequence for future HEVC/H.264/AV1 decoder backends.
+- [x] Native video decoder backend matrix. `decoder-probe` now reports planned H.264/HEVC decode backends and output pixel format separately from encoder capabilities, keeping transcode readiness explicit.
 - [ ] Native compressed video decode backend for HEVC/H.264 sources that need target-native HLS output. Preserve the FFmpeg send/receive/drain lesson as a bounded state machine, but expose only Chroma Engine stage events and frames.
 - [ ] Native DTS/TrueHD decode bridge for MKV audio tracks that have no AAC/AC-3/E-AC-3 alternate. Follow the FFmpeg send/receive/drain state-machine shape and AetherEngine's copy-first/bridge-only policy, but keep the API Chroma-native.
 

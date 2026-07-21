@@ -149,6 +149,8 @@ enum Command {
     },
     /// Emit platform encoder capabilities.
     EncoderProbe,
+    /// Emit platform decoder backend capabilities.
+    DecoderProbe,
     /// Warm the selected encoder backend.
     Warmup,
     /// Package a source into native HLS VOD output.
@@ -578,6 +580,10 @@ pub fn run() -> Result<()> {
         }
         Command::EncoderProbe => {
             let probe = crate::platform::encoder_probe();
+            println!("{}", serde_json::to_string_pretty(&probe)?);
+        }
+        Command::DecoderProbe => {
+            let probe = crate::platform::decoder_backend_plan();
             println!("{}", serde_json::to_string_pretty(&probe)?);
         }
         Command::Warmup => {

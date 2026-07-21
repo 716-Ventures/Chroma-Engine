@@ -4,7 +4,7 @@ use thiserror::Error;
 use crate::{
     error::EngineErrorCode,
     transcode::{
-        AudioCodec, PcmAudioFormat, RawVideoFormat, RawVideoPixelFormat,
+        AudioCodec, PcmAudioFormat, RawVideoFormat, RawVideoPixelFormat, VideoCodec,
         encode_aac_from_interleaved_i16, encode_ac3_from_interleaved_i16,
         encode_eac3_from_interleaved_i16, encode_h264_videotoolbox_bgra_frame,
         encode_hevc_videotoolbox_bgra_frame,
@@ -59,6 +59,16 @@ pub struct EncoderBackendPlan {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+/// Full decoder backend matrix for the current host.
+pub struct DecoderBackendPlan {
+    /// Operating system used to choose native backends.
+    pub os: String,
+    /// Video decoder backends Chroma can target.
+    pub video_backends: Vec<VideoDecoderBackend>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 /// One video encoder backend candidate.
 pub struct EncoderBackend {
     /// Hardware acceleration family.
@@ -70,6 +80,26 @@ pub struct EncoderBackend {
     /// Optional hardware acceleration device or mode.
     pub hwaccel: Option<String>,
     /// Whether this backend is available for the current OS target.
+    pub available: bool,
+    /// Diagnostic reason when the backend is not available.
+    pub unavailable_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+/// One video decoder backend candidate.
+pub struct VideoDecoderBackend {
+    /// Hardware acceleration family.
+    pub kind: HardwareKind,
+    /// Source video codec decoded by this backend.
+    pub codec: VideoCodec,
+    /// Backend-specific decoder name.
+    pub decoder: String,
+    /// Optional hardware acceleration device or mode.
+    pub hwaccel: Option<String>,
+    /// Raw pixel format emitted for downstream native encoders.
+    pub output_pixel_format: RawVideoPixelFormat,
+    /// Whether this backend is executable in the current build.
     pub available: bool,
     /// Diagnostic reason when the backend is not available.
     pub unavailable_reason: Option<String>,
@@ -238,6 +268,14 @@ pub fn encoder_backend_plan() -> EncoderBackendPlan {
     }
 }
 
+/// Returns the host decoder backend matrix used by transcode planning.
+pub fn decoder_backend_plan() -> DecoderBackendPlan {
+    DecoderBackendPlan {
+        os: std::env::consts::OS.to_string(),
+        video_backends: video_decoder_backend_matrix(),
+    }
+}
+
 /// Performs lightweight encoder startup work before serving playback.
 pub fn warmup() -> Result<(), EncoderWarmupError> {
     let plan = encoder_backend_plan();
@@ -344,6 +382,86 @@ fn warm_eac3_encoder() -> Result<(), EncoderWarmupError> {
         }
     })?;
     Ok(())
+}
+
+fn video_decoder_backend_matrix() -> Vec<VideoDecoderBackend> {
+    match std::env::consts::OS {
+        "macos" => vec![
+            planned_video_decoder_backend(
+                HardwareKind::VideoToolbox,
+                VideoCodec::H264,
+                "chroma-videotoolbox-h264-decoder",
+            ),
+            planned_video_decoder_backend(
+                HardwareKind::VideoToolbox,
+                VideoCodec::Hevc,
+                "chroma-videotoolbox-hevc-decoder",
+            ),
+        ],
+        "linux" => vec![
+            planned_video_decoder_backend(
+                HardwareKind::Vaapi,
+                VideoCodec::H264,
+                "chroma-vaapi-h264-decoder",
+            ),
+            planned_video_decoder_backend(
+                HardwareKind::Vaapi,
+                VideoCodec::Hevc,
+                "chroma-vaapi-hevc-decoder",
+            ),
+            planned_video_decoder_backend(
+                HardwareKind::Nvenc,
+                VideoCodec::H264,
+                "chroma-nvdec-h264-decoder",
+            ),
+            planned_video_decoder_backend(
+                HardwareKind::Nvenc,
+                VideoCodec::Hevc,
+                "chroma-nvdec-hevc-decoder",
+            ),
+        ],
+        "windows" => vec![
+            planned_video_decoder_backend(
+                HardwareKind::Qsv,
+                VideoCodec::H264,
+                "chroma-qsv-h264-decoder",
+            ),
+            planned_video_decoder_backend(
+                HardwareKind::Qsv,
+                VideoCodec::Hevc,
+                "chroma-qsv-hevc-decoder",
+            ),
+            planned_video_decoder_backend(
+                HardwareKind::Amf,
+                VideoCodec::H264,
+                "chroma-amf-h264-decoder",
+            ),
+            planned_video_decoder_backend(
+                HardwareKind::Amf,
+                VideoCodec::Hevc,
+                "chroma-amf-hevc-decoder",
+            ),
+        ],
+        _ => Vec::new(),
+    }
+}
+
+fn planned_video_decoder_backend(
+    kind: HardwareKind,
+    codec: VideoCodec,
+    decoder: &str,
+) -> VideoDecoderBackend {
+    VideoDecoderBackend {
+        kind,
+        codec,
+        decoder: decoder.to_string(),
+        hwaccel: Some(format!("{kind:?}").to_lowercase()),
+        output_pixel_format: RawVideoPixelFormat::Bgra,
+        available: false,
+        unavailable_reason: Some(
+            "native video decode backend is planned but not executable in this build".to_string(),
+        ),
+    }
 }
 
 fn default_cpu_profile() -> EncoderProfile {
@@ -649,6 +767,33 @@ mod tests {
                     .any(|backend| backend.kind == HardwareKind::Cpu && !backend.available)
             );
         }
+    }
+
+    #[test]
+    fn decoder_backend_plan_models_platform_video_targets() {
+        let plan = decoder_backend_plan();
+
+        assert_eq!(plan.os, std::env::consts::OS);
+        if std::env::consts::OS == "macos" {
+            assert!(plan.video_backends.iter().any(|backend| {
+                backend.kind == HardwareKind::VideoToolbox
+                    && backend.codec == VideoCodec::H264
+                    && backend.decoder == "chroma-videotoolbox-h264-decoder"
+            }));
+            assert!(plan.video_backends.iter().any(|backend| {
+                backend.kind == HardwareKind::VideoToolbox
+                    && backend.codec == VideoCodec::Hevc
+                    && backend.decoder == "chroma-videotoolbox-hevc-decoder"
+            }));
+        }
+        assert!(plan.video_backends.iter().all(|backend| {
+            backend.output_pixel_format == RawVideoPixelFormat::Bgra
+                && !backend.available
+                && backend
+                    .unavailable_reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("planned"))
+        }));
     }
 
     #[test]

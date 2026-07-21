@@ -137,6 +137,34 @@ fn transcode_plan_cli_reports_missing_native_decode_capability() {
     );
 }
 
+#[test]
+fn decoder_probe_cli_reports_video_decode_backends() {
+    let output = Command::cargo_bin("chroma-engine")
+        .unwrap()
+        .arg("decoder-probe")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+
+    assert!(json["os"].is_string());
+    assert!(json["videoBackends"].is_array());
+    if std::env::consts::OS == "macos" {
+        assert!(
+            json["videoBackends"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(
+                    |backend| backend["decoder"] == "chroma-videotoolbox-hevc-decoder"
+                        && backend["codec"] == "hevc"
+                )
+        );
+    }
+}
+
 fn minimal_mp4() -> Vec<u8> {
     let mut out = atom(
         b"ftyp",

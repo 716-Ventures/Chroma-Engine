@@ -16,6 +16,7 @@ The target is a native media architecture, not an FFmpeg-compatible facade. Chro
 - `extract-chunk`: write a native compressed chunk payload and emit its manifest.
 - `remux-mp4`: remux supported sources into an efficient ISO-BMFF output path.
 - `encoder-probe`: report platform encoder capabilities.
+- `decoder-probe`: report platform decoder backend capabilities.
 - `warmup`: initialize selected hardware/software backends before the first playback session.
 
 This crate is intentionally not a general FFmpeg clone. It implements the container, codec, muxing, scheduling, and encoding behavior Chroma actually needs, with room to expose new capabilities instead of inheriting old command-line constraints.
@@ -37,6 +38,7 @@ cargo run -- h264-nalus /path/to/media.mp4 --chunk-index 0
 cargo run -- h264-annex-b /path/to/media.mp4 /tmp/chunk0.h264 --chunk-index 0
 cargo run -- aac-adts /path/to/media.mp4 /tmp/chunk0.aac --track a0 --chunk-index 0
 cargo run -- extract-chunk /path/to/media.mp4 /tmp/chunk0.bin --chunk-index 0
+cargo run -- decoder-probe
 ```
 
 Quality gates:
