@@ -6,6 +6,7 @@ use crate::platform::EncoderProfile;
 mod audio_clock;
 mod audio_encode;
 mod execution_plan;
+mod video_decode;
 mod video_encode;
 
 pub use audio_clock::{AudioClockConfig, AudioFrameTiming, AudioSampleClock};
@@ -17,6 +18,11 @@ pub use execution_plan::{
     HlsTranscodeRequest, TranscodeExecutionPlan, TranscodeOutputAudio, TranscodeOutputPlan,
     TranscodeOutputVideo, TranscodeStage, TranscodeStageKind, TranscodeStageStatus,
     plan_hls_transcode,
+};
+pub use video_decode::{
+    CompressedVideoPacket, DecodedVideoFrame, DecodedVideoOutput, DecodedVideoStream,
+    VideoDecodeError, VideoDecodeInput, VideoDecoderAction, VideoDecoderDrainState,
+    build_video_decode_input, decoder_actions_for_input, validate_decoded_video_format,
 };
 pub use video_encode::{
     EncodedVideoFrame, EncodedVideoOutput, EncodedVideoStream, RawVideoFormat, RawVideoPixelFormat,
