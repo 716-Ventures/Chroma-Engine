@@ -21,8 +21,10 @@ use crate::probe::probe_media_source;
 use crate::session::{AudioSelection, PlaybackConstraints, PlaybackTarget, plan_playback};
 use crate::source::MappedMediaFile;
 use crate::transcode::{
-    HlsTranscodeRequest, RawVideoFormat, RawVideoPixelFormat, VideoCodec, build_video_decode_input,
-    decode_videotoolbox_bgra_frames, plan_hls_transcode,
+    AudioDecodeCodec, HlsTranscodeRequest, RawVideoFormat, RawVideoPixelFormat, VideoCodec,
+    build_audio_decode_input, build_video_decode_input, decode_dts_core_to_interleaved_i16,
+    decode_videotoolbox_bgra_frames, encode_eac3_from_interleaved_i16, plan_hls_transcode,
+    probe_dts_audio_bridge,
 };
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
@@ -164,6 +166,30 @@ enum Command {
         chunk_index: u32,
         #[arg(long, default_value_t = 4_000)]
         target_ms: u64,
+    },
+    /// Decode one native audio packet chunk to PCM and emit compact bridge health stats.
+    DecodeAudioChunk {
+        input: PathBuf,
+        #[arg(long)]
+        track: Option<String>,
+        #[arg(long, default_value_t = 0)]
+        chunk_index: u32,
+        #[arg(long, default_value_t = 4_000)]
+        target_ms: u64,
+        #[arg(long, default_value_t = false)]
+        probe_only: bool,
+    },
+    /// Decode one DTS audio chunk and encode it to bridge E-AC-3.
+    BridgeAudioChunk {
+        input: PathBuf,
+        #[arg(long)]
+        track: Option<String>,
+        #[arg(long, default_value_t = 0)]
+        chunk_index: u32,
+        #[arg(long, default_value_t = 4_000)]
+        target_ms: u64,
+        #[arg(long, default_value_t = 640_000)]
+        bitrate: u32,
     },
     /// Warm the selected encoder backend.
     Warmup,
@@ -610,6 +636,40 @@ pub fn run() -> Result<()> {
             let decoded = decode_chunk(source.as_ref(), track.as_deref(), chunk_index, target_ms)?;
             println!("{}", serde_json::to_string_pretty(&decoded)?);
         }
+        Command::DecodeAudioChunk {
+            input,
+            track,
+            chunk_index,
+            target_ms,
+            probe_only,
+        } => {
+            let source = MappedMediaFile::open(&input)?;
+            let decoded = decode_audio_chunk(
+                source.as_ref(),
+                track.as_deref(),
+                chunk_index,
+                target_ms,
+                probe_only,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&decoded)?);
+        }
+        Command::BridgeAudioChunk {
+            input,
+            track,
+            chunk_index,
+            target_ms,
+            bitrate,
+        } => {
+            let source = MappedMediaFile::open(&input)?;
+            let bridge = bridge_audio_chunk(
+                source.as_ref(),
+                track.as_deref(),
+                chunk_index,
+                target_ms,
+                bitrate,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&bridge)?);
+        }
         Command::Warmup => {
             crate::platform::warmup()?;
             println!("{}", serde_json::json!({ "ok": true }));
@@ -732,6 +792,48 @@ struct DecodeChunkOutput {
     decoded_bytes: u64,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DecodeAudioChunkOutput {
+    track_id: String,
+    chunk_index: u32,
+    codec: AudioDecodeCodec,
+    decoder: String,
+    packet_count: usize,
+    dts_core_frame_count: usize,
+    decoded_pcm_frame_count: usize,
+    sample_rate: u32,
+    channels: u32,
+    time_scale: TimeScale,
+    first_pts: Option<TimePoint>,
+    last_pts: Option<TimePoint>,
+    stable_format: bool,
+    pcm_frames_per_channel: u64,
+    decoded_samples: u64,
+    decoded_bytes: u64,
+    probe_only: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BridgeAudioChunkOutput {
+    track_id: String,
+    chunk_index: u32,
+    source_codec: AudioDecodeCodec,
+    decoder: String,
+    encoder: String,
+    packet_count: usize,
+    decoded_pcm_frame_count: usize,
+    encoded_frame_count: usize,
+    sample_rate: u32,
+    channels: u32,
+    bitrate: u32,
+    decoded_samples: u64,
+    encoded_bytes: u64,
+    first_pts: Option<TimePoint>,
+    last_pts: Option<TimePoint>,
+}
+
 fn hex_to_bytes(hex: &str) -> Result<Vec<u8>> {
     let clean = hex.trim();
     if !clean.len().is_multiple_of(2) {
@@ -769,6 +871,184 @@ fn decode_chunk(
     } else {
         bail!("decode-chunk currently supports MP4/MOV and Matroska/WebM packet tables");
     }
+}
+
+fn decode_audio_chunk(
+    bytes: &[u8],
+    requested_track_id: Option<&str>,
+    chunk_index: u32,
+    target_ms: u64,
+    probe_only: bool,
+) -> Result<DecodeAudioChunkOutput> {
+    if looks_like_ebml(bytes) {
+        decode_matroska_audio_chunk(
+            bytes,
+            requested_track_id,
+            chunk_index,
+            target_ms,
+            probe_only,
+        )
+    } else {
+        bail!("decode-audio-chunk currently supports Matroska/WebM DTS packet tables");
+    }
+}
+
+fn decode_matroska_audio_chunk(
+    bytes: &[u8],
+    requested_track_id: Option<&str>,
+    chunk_index: u32,
+    target_ms: u64,
+    probe_only: bool,
+) -> Result<DecodeAudioChunkOutput> {
+    let meta = crate::container::matroska::parse_basic_metadata(bytes);
+    let (track_id, track) = select_matroska_audio_track(&meta.tracks, requested_track_id)
+        .ok_or_else(|| anyhow::anyhow!("no matching Matroska audio track found"))?;
+    if track.codec != "dts" {
+        bail!(
+            "selected audio track {} uses {}, not DTS",
+            track_id,
+            track.codec
+        );
+    }
+    let (manifest, payload) =
+        crate::container::matroska::extract_chunk(bytes, Some(&track_id), target_ms, chunk_index)?;
+    let time_scale = manifest
+        .samples
+        .first()
+        .map(|sample| sample.pts.scale)
+        .unwrap_or(TimeScale::MILLIS);
+    let decode_input = build_audio_decode_input(
+        AudioDecodeCodec::Dts,
+        time_scale,
+        &manifest.samples,
+        &payload,
+        true,
+    )?;
+    let probe = probe_dts_audio_bridge(&decode_input)?;
+    let decoded = if probe_only {
+        None
+    } else {
+        Some(decode_dts_core_to_interleaved_i16(&decode_input)?)
+    };
+
+    let (decoder, decoded_pcm_frame_count, decoded_samples, decoded_bytes) = if let Some(decoded) =
+        decoded
+    {
+        let samples = decoded
+            .frames
+            .iter()
+            .map(|frame| u64::from(frame.sample_count) * u64::from(decoded.stream.format.channels))
+            .sum::<u64>();
+        let bytes = decoded
+            .frames
+            .iter()
+            .map(|frame| (frame.pcm.len() * std::mem::size_of::<i16>()) as u64)
+            .sum::<u64>();
+        (decoded.stream.decoder, decoded.frames.len(), samples, bytes)
+    } else {
+        ("dts-core-probe".to_string(), 0, 0, 0)
+    };
+
+    Ok(DecodeAudioChunkOutput {
+        track_id,
+        chunk_index: manifest.chunk.index,
+        codec: AudioDecodeCodec::Dts,
+        decoder,
+        packet_count: probe.packet_count,
+        dts_core_frame_count: probe.dts_core_frame_count,
+        decoded_pcm_frame_count,
+        sample_rate: probe.pcm_format.sample_rate,
+        channels: probe.pcm_format.channels,
+        time_scale,
+        first_pts: probe.first_pts,
+        last_pts: probe.last_pts,
+        stable_format: probe.stable_format,
+        pcm_frames_per_channel: probe.pcm_frame_count,
+        decoded_samples,
+        decoded_bytes,
+        probe_only,
+    })
+}
+
+fn bridge_audio_chunk(
+    bytes: &[u8],
+    requested_track_id: Option<&str>,
+    chunk_index: u32,
+    target_ms: u64,
+    bitrate: u32,
+) -> Result<BridgeAudioChunkOutput> {
+    if !looks_like_ebml(bytes) {
+        bail!("bridge-audio-chunk currently supports Matroska/WebM DTS packet tables");
+    }
+    let meta = crate::container::matroska::parse_basic_metadata(bytes);
+    let (track_id, track) = select_matroska_audio_track(&meta.tracks, requested_track_id)
+        .ok_or_else(|| anyhow::anyhow!("no matching Matroska audio track found"))?;
+    if track.codec != "dts" {
+        bail!(
+            "selected audio track {} uses {}, not DTS",
+            track_id,
+            track.codec
+        );
+    }
+    let (manifest, payload) =
+        crate::container::matroska::extract_chunk(bytes, Some(&track_id), target_ms, chunk_index)?;
+    let time_scale = manifest
+        .samples
+        .first()
+        .map(|sample| sample.pts.scale)
+        .unwrap_or(TimeScale::MILLIS);
+    let decode_input = build_audio_decode_input(
+        AudioDecodeCodec::Dts,
+        time_scale,
+        &manifest.samples,
+        &payload,
+        true,
+    )?;
+    let decoded = decode_dts_core_to_interleaved_i16(&decode_input)?;
+    let decoded_pcm = decoded
+        .frames
+        .iter()
+        .flat_map(|frame| frame.pcm.iter().copied())
+        .collect::<Vec<_>>();
+    let bridge_channels = eac3_bridge_channel_count(decoded.stream.format.channels);
+    let bridge_pcm = normalize_interleaved_channels(
+        &decoded_pcm,
+        decoded.stream.format.channels,
+        bridge_channels,
+    )?;
+    let bridge_format = crate::transcode::PcmAudioFormat {
+        sample_rate: decoded.stream.format.sample_rate,
+        channels: bridge_channels,
+    };
+    let encoded = encode_eac3_from_interleaved_i16(bridge_format, &bridge_pcm, bitrate)?;
+    let decoded_samples = decoded
+        .frames
+        .iter()
+        .map(|frame| u64::from(frame.sample_count) * u64::from(decoded.stream.format.channels))
+        .sum::<u64>();
+    let encoded_bytes = encoded
+        .frames
+        .iter()
+        .map(|frame| frame.payload.len() as u64)
+        .sum::<u64>();
+
+    Ok(BridgeAudioChunkOutput {
+        track_id,
+        chunk_index: manifest.chunk.index,
+        source_codec: decoded.stream.source_codec,
+        decoder: decoded.stream.decoder,
+        encoder: "oxideav-eac3".to_string(),
+        packet_count: decode_input.packets.len(),
+        decoded_pcm_frame_count: decoded.frames.len(),
+        encoded_frame_count: encoded.frames.len(),
+        sample_rate: encoded.stream.sample_rate,
+        channels: encoded.stream.channels,
+        bitrate,
+        decoded_samples,
+        encoded_bytes,
+        first_pts: decoded.frames.first().map(|frame| frame.pts),
+        last_pts: decoded.frames.last().map(|frame| frame.pts),
+    })
 }
 
 fn decode_mp4_chunk(
@@ -930,6 +1210,71 @@ fn select_matroska_video_track<'a>(
         }
     }
     None
+}
+
+fn eac3_bridge_channel_count(decoded_channels: u32) -> u32 {
+    match decoded_channels {
+        0 | 1 => 1,
+        2 => 2,
+        3..=6 => 6,
+        _ => 8,
+    }
+}
+
+fn normalize_interleaved_channels(
+    pcm: &[i16],
+    source_channels: u32,
+    target_channels: u32,
+) -> Result<Vec<i16>> {
+    if source_channels == 0 || target_channels == 0 {
+        bail!("audio bridge channel count must be greater than zero");
+    }
+    if !pcm.len().is_multiple_of(source_channels as usize) {
+        bail!("decoded PCM sample count does not align to source channels");
+    }
+    if source_channels == target_channels {
+        return Ok(pcm.to_vec());
+    }
+
+    let source_channels = source_channels as usize;
+    let target_channels = target_channels as usize;
+    let frame_count = pcm.len() / source_channels;
+    let mut out = Vec::with_capacity(frame_count * target_channels);
+    for frame in pcm.chunks_exact(source_channels) {
+        let copied = source_channels.min(target_channels);
+        out.extend_from_slice(&frame[..copied]);
+        out.resize(out.len() + target_channels - copied, 0);
+    }
+    Ok(out)
+}
+
+fn select_matroska_audio_track<'a>(
+    tracks: &'a [crate::container::matroska::MatroskaTrack],
+    requested_track_id: Option<&str>,
+) -> Option<(String, &'a crate::container::matroska::MatroskaTrack)> {
+    let mut fallback = None;
+    let mut audio_index = 0_u32;
+    for track in tracks {
+        if track.kind != crate::container::matroska::MatroskaTrackKind::Audio {
+            continue;
+        }
+        let track_id = format!("a{audio_index}");
+        audio_index += 1;
+        if fallback.is_none() {
+            fallback = Some((track_id.clone(), track));
+        }
+        if requested_track_id
+            .map(|requested| requested == track_id)
+            .unwrap_or(track.default)
+        {
+            return Some((track_id, track));
+        }
+    }
+    if requested_track_id.is_some() {
+        None
+    } else {
+        fallback
+    }
 }
 
 fn extract_mp4_window(

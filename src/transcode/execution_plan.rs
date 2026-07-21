@@ -239,14 +239,23 @@ pub fn plan_hls_transcode(
             }
         } else {
             let target_codec = audio_transcode_codec(request.target, track.codec.family);
-            let missing = format!("audioDecode:{}", capability_label(track.codec.family));
-            stages.push(missing_stage(
-                "audio-decode0",
-                TranscodeStageKind::AudioDecode,
-                vec![track.id.clone()],
-                "compressed source audio must decode before target-native HLS encode",
-                missing,
-            ));
+            if native_audio_decode_ready(track.codec.family) {
+                stages.push(ready_stage(
+                    "audio-decode0",
+                    TranscodeStageKind::AudioDecode,
+                    vec![track.id.clone()],
+                    "native DTS core decode can feed the target-native audio bridge",
+                ));
+            } else {
+                let missing = format!("audioDecode:{}", capability_label(track.codec.family));
+                stages.push(missing_stage(
+                    "audio-decode0",
+                    TranscodeStageKind::AudioDecode,
+                    vec![track.id.clone()],
+                    "compressed source audio must decode before target-native HLS encode",
+                    missing,
+                ));
+            }
             stages.push(ready_stage(
                 "audio-encode0",
                 TranscodeStageKind::AudioEncode,
@@ -338,6 +347,10 @@ fn video_can_copy_for_hls(track: &MediaTrack, target: PlaybackTarget) -> bool {
 
 fn native_video_decode_ready(family: CodecFamily) -> bool {
     cfg!(target_os = "macos") && matches!(family, CodecFamily::H264 | CodecFamily::Hevc)
+}
+
+fn native_audio_decode_ready(family: CodecFamily) -> bool {
+    matches!(family, CodecFamily::Dts)
 }
 
 fn audio_can_copy_for_hls(track: &MediaTrack, target: PlaybackTarget) -> bool {
@@ -585,7 +598,7 @@ mod tests {
     }
 
     #[test]
-    fn dts_audio_routes_to_eac3_bridge_and_reports_missing_decoder() {
+    fn dts_audio_routes_to_eac3_bridge_with_native_core_decoder() {
         let probe = probe_with_tracks(vec![
             video_track("v0", CodecFamily::H264, 1_920, 1_080, 8_000_000, None),
             audio_track("a0", CodecFamily::Dts, true, 8, 48_000, Some(1_536_000)),
@@ -593,15 +606,15 @@ mod tests {
 
         let plan = plan_hls_transcode(&probe, request(PlaybackTarget::AppleNative, false, None));
 
-        assert!(!plan.engine_executable);
+        assert!(plan.engine_executable);
         let audio = plan.output.audio.as_ref().unwrap();
         assert_eq!(audio.codec, AudioCodec::Eac3);
         assert_eq!(audio.channels, 6);
-        assert!(
-            plan.missing_capabilities
-                .iter()
-                .any(|capability| capability == "audioDecode:dts")
-        );
+        assert!(plan.missing_capabilities.is_empty());
+        assert!(plan.stages.iter().any(|stage| {
+            stage.kind == TranscodeStageKind::AudioDecode
+                && stage.status == TranscodeStageStatus::NativeReady
+        }));
     }
 
     #[test]
@@ -634,7 +647,7 @@ mod tests {
 
         assert_eq!(plan.selected_audio_track_id.as_deref(), Some("a0"));
         assert_eq!(plan.output.audio.as_ref().unwrap().codec, AudioCodec::Eac3);
-        assert!(!plan.engine_executable);
+        assert!(plan.engine_executable);
     }
 
     fn request(

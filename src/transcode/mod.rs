@@ -4,12 +4,18 @@ use crate::packet::TimeScale;
 use crate::platform::EncoderProfile;
 
 mod audio_clock;
+mod audio_decode;
 mod audio_encode;
 mod execution_plan;
 mod video_decode;
 mod video_encode;
 
 pub use audio_clock::{AudioClockConfig, AudioFrameTiming, AudioSampleClock};
+pub use audio_decode::{
+    AudioDecodeCodec, AudioDecodeError, AudioDecodeInput, CompressedAudioPacket, DecodedPcmFrame,
+    DecodedPcmOutput, DecodedPcmStream, DtsAudioBridgeProbe, DtsAudioPacketProbe,
+    build_audio_decode_input, decode_dts_core_to_interleaved_i16, probe_dts_audio_bridge,
+};
 pub use audio_encode::{
     AudioEncodeError, EncodedAudioOutput, PcmAudioFormat, encode_aac_from_interleaved_i16,
     encode_ac3_from_interleaved_i16, encode_eac3_from_interleaved_i16,

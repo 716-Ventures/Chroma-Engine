@@ -200,6 +200,7 @@ dependencies = [
  "memmap2",
  "oxideav-ac3",
  "oxideav-core",
+ "oxideav-dts",
  "proptest",
  "serde",
  "serde_json",
@@ -736,6 +737,13 @@ dependencies = [
  "bytemuck",
  "serde_json",
  "thiserror 2.0.19",
+]
+
+[[package]]
+name = "oxideav-dts"
+version = "0.0.1"
+dependencies = [
+ "oxideav-core",
 ]
 
 [[package]]
