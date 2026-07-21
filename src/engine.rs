@@ -13,6 +13,7 @@ use crate::{
         mp4::{self, Mp4TrackPacketIndex},
         sniff_container,
     },
+    error::{EngineError, EngineErrorCode, RetryAdvice},
     packet::{
         ChunkPlan, ExtractedChunk, PacketExtractError, PacketRef, extract_packet_payload,
         packet_samples_for_range, plan_track_chunks,
@@ -31,6 +32,12 @@ impl Engine {
     }
 
     /// Opens a packet-copy playback session and retains source/index state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineSessionError`] when the source cannot be opened, the
+    /// container is unsupported, no requested track exists, or the target
+    /// segment duration is invalid.
     pub fn open_playback_session(
         self,
         input: &Path,
@@ -111,6 +118,12 @@ struct PlaybackSessionCounters {
 
 impl PlaybackSession {
     /// Opens a source once and parses the selected packet index once.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineSessionError`] when opening or snapshotting the source
+    /// fails, the container cannot be packet-indexed, no requested track exists,
+    /// or `options.target_ms` is zero.
     pub fn open(input: &Path, options: PlaybackSessionOptions) -> Result<Self, EngineSessionError> {
         if options.target_ms == 0 {
             return Err(EngineSessionError::InvalidTargetDuration);
@@ -162,6 +175,12 @@ impl PlaybackSession {
     }
 
     /// Extracts one packet-copy chunk from the retained source and packet index.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineSessionError`] when the source identity changed after
+    /// session creation, the requested chunk is absent, or payload/sample
+    /// extraction detects an inconsistent packet range.
     pub fn segment(&self, index: u32) -> Result<(ExtractedChunk, Vec<u8>), EngineSessionError> {
         self.stats.segment_requests.fetch_add(1, Ordering::Relaxed);
         self.source
@@ -263,6 +282,44 @@ pub enum EngineSessionError {
     Packet(#[from] PacketExtractError),
 }
 
+impl EngineSessionError {
+    /// Returns the stable machine-readable error code for this session failure.
+    pub fn code(&self) -> EngineErrorCode {
+        match self {
+            Self::Source { .. } => EngineErrorCode::SourceOpenFailed,
+            Self::SourceChanged { .. } => EngineErrorCode::SourceChanged,
+            Self::UnsupportedContainer => EngineErrorCode::UnsupportedContainer,
+            Self::NoTrack => EngineErrorCode::NoMatchingTrack,
+            Self::InvalidTargetDuration => EngineErrorCode::MalformedInput,
+            Self::NoChunk { .. } => EngineErrorCode::NoMatchingTrack,
+            Self::Packet(_) => EngineErrorCode::SourceReadFailed,
+        }
+    }
+
+    /// Converts this typed session failure into the structured engine error envelope.
+    pub fn into_engine_error(self, operation: impl Into<String>) -> EngineError {
+        let retry = match &self {
+            Self::SourceChanged { .. } => RetryAdvice::RetryAfterRefresh,
+            Self::Source { .. } | Self::Packet(_) => RetryAdvice::RetryLater,
+            Self::UnsupportedContainer
+            | Self::NoTrack
+            | Self::InvalidTargetDuration
+            | Self::NoChunk { .. } => RetryAdvice::DoNotRetry,
+        };
+        let segment_index = match &self {
+            Self::NoChunk { index } => Some(*index),
+            _ => None,
+        };
+        let code = self.code();
+        let message = self.to_string();
+        let mut error = EngineError::new(code, operation, message).with_retry(retry);
+        if let Some(index) = segment_index {
+            error = error.with_segment_index(index);
+        }
+        error.with_cause(self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -316,6 +373,20 @@ mod tests {
             session.segment(0),
             Err(EngineSessionError::SourceChanged { .. })
         ));
+    }
+
+    #[test]
+    fn session_errors_convert_to_structured_engine_errors() {
+        let error = EngineSessionError::NoChunk { index: 42 }
+            .into_engine_error("playback.segment")
+            .with_track_id("v0");
+
+        assert_eq!(error.code(), EngineErrorCode::NoMatchingTrack);
+        assert_eq!(error.operation(), "playback.segment");
+        assert_eq!(error.track_id(), Some("v0"));
+        assert_eq!(error.segment_index(), Some(42));
+        assert_eq!(error.retry(), RetryAdvice::DoNotRetry);
+        assert!(std::error::Error::source(&error).is_some());
     }
 
     fn indexed_mp4() -> Vec<u8> {

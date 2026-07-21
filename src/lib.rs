@@ -40,7 +40,7 @@ pub use engine::{
     Engine, EngineSessionError, PlaybackSession, PlaybackSessionOptions, PlaybackSessionPlan,
     PlaybackSessionStats,
 };
-pub use error::EngineErrorCode;
+pub use error::{EngineError, EngineErrorCode, RetryAdvice};
 pub use hls::{
     HlsAudioRendition, HlsAudioRenditionInput, HlsError, HlsMultiAudioOutputPlan, HlsOptions,
     HlsOutput, HlsSegmentInfo, HlsVodPlan, HlsVodPlaylistPlan, plan_multi_audio_hls_outputs,
