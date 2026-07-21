@@ -48,8 +48,8 @@ pub use pipeline::{PipelineError, PipelineStageChunk, PipelineStagePayload, emit
 pub use platform::{
     AudioEncoderBackend, DecoderBackendPlan, EncoderBackend, EncoderBackendPlan,
     EncoderFailureNote, EncoderProbe, EncoderProfile, EncoderWarmupError, EncoderWarmupKind,
-    EncoderWarmupTask, HardwareKind, VideoDecoderBackend, VideoOutputCodec, decoder_backend_plan,
-    encoder_backend_plan, encoder_probe, warmup,
+    EncoderWarmupTask, HardwareKind, VideoDecodeSurfaceFormat, VideoDecoderBackend,
+    VideoOutputCodec, decoder_backend_plan, encoder_backend_plan, encoder_probe, warmup,
 };
 pub use playback_manifest::{
     ManifestTrack, MatroskaManifestOptions, Mp4ManifestOptions, NativePlaybackManifest,

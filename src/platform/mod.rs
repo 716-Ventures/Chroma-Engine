@@ -99,6 +99,10 @@ pub struct VideoDecoderBackend {
     pub hwaccel: Option<String>,
     /// Raw pixel format emitted for downstream native encoders.
     pub output_pixel_format: RawVideoPixelFormat,
+    /// Native hardware surface formats this backend is designed to receive before download/convert.
+    pub native_surface_formats: Vec<VideoDecodeSurfaceFormat>,
+    /// True when the backend can keep decoded surfaces on the device for a compatible encoder path.
+    pub zero_copy_capable: bool,
     /// Whether this backend is executable in the current build.
     pub available: bool,
     /// Diagnostic reason when the backend is not available.
@@ -155,20 +159,56 @@ pub struct EncoderFailureNote {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-/// Hardware encoder family.
+/// Native hardware backend family.
 pub enum HardwareKind {
     /// Apple VideoToolbox.
     VideoToolbox,
     /// NVIDIA NVENC.
     Nvenc,
+    /// NVIDIA NVDEC/CUDA video decode.
+    Nvdec,
     /// Intel Quick Sync Video.
     Qsv,
     /// AMD Advanced Media Framework.
     Amf,
     /// Linux VA-API.
     Vaapi,
+    /// Windows Direct3D 11 Video Acceleration.
+    D3d11Va,
+    /// Windows Direct3D 12 Video Acceleration.
+    D3d12Va,
+    /// Windows DirectX Video Acceleration 2.
+    Dxva2,
     /// CPU encoder fallback.
     Cpu,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+/// Native decoded video surface formats used by hardware decoder backends.
+pub enum VideoDecodeSurfaceFormat {
+    /// Apple VideoToolbox/CoreVideo pixel-buffer surface.
+    VideoToolboxPixelBuffer,
+    /// 8-bit BGRA system-memory frames.
+    Bgra,
+    /// 8-bit NV12 luma/chroma surfaces.
+    Nv12,
+    /// 10-bit P010 luma/chroma surfaces.
+    P010,
+    /// Linux VA-API device surface.
+    VaapiSurface,
+    /// NVIDIA CUDA/NVDEC device surface.
+    CudaSurface,
+    /// Intel Quick Sync device surface.
+    QsvSurface,
+    /// AMD AMF device surface.
+    AmfSurface,
+    /// Direct3D 11 texture surface.
+    D3d11Texture,
+    /// Direct3D 12 texture surface.
+    D3d12Texture,
+    /// DXVA2 decoder surface.
+    Dxva2Surface,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -385,97 +425,307 @@ fn warm_eac3_encoder() -> Result<(), EncoderWarmupError> {
 }
 
 fn video_decoder_backend_matrix() -> Vec<VideoDecoderBackend> {
-    match std::env::consts::OS {
+    video_decoder_backend_matrix_for_os(std::env::consts::OS)
+}
+
+fn video_decoder_backend_matrix_for_os(os: &str) -> Vec<VideoDecoderBackend> {
+    match os {
         "macos" => vec![
-            planned_video_decoder_backend(
+            video_decoder_backend(
+                "macos",
                 HardwareKind::VideoToolbox,
                 VideoCodec::H264,
                 "chroma-videotoolbox-h264-decoder",
+                &[
+                    VideoDecodeSurfaceFormat::VideoToolboxPixelBuffer,
+                    VideoDecodeSurfaceFormat::Bgra,
+                    VideoDecodeSurfaceFormat::Nv12,
+                ],
             ),
-            planned_video_decoder_backend(
+            video_decoder_backend(
+                "macos",
                 HardwareKind::VideoToolbox,
                 VideoCodec::Hevc,
                 "chroma-videotoolbox-hevc-decoder",
+                &[
+                    VideoDecodeSurfaceFormat::VideoToolboxPixelBuffer,
+                    VideoDecodeSurfaceFormat::Bgra,
+                    VideoDecodeSurfaceFormat::Nv12,
+                    VideoDecodeSurfaceFormat::P010,
+                ],
             ),
         ],
         "linux" => vec![
-            planned_video_decoder_backend(
+            video_decoder_backend(
+                "linux",
                 HardwareKind::Vaapi,
                 VideoCodec::H264,
                 "chroma-vaapi-h264-decoder",
+                &[
+                    VideoDecodeSurfaceFormat::VaapiSurface,
+                    VideoDecodeSurfaceFormat::Nv12,
+                ],
             ),
-            planned_video_decoder_backend(
+            video_decoder_backend(
+                "linux",
                 HardwareKind::Vaapi,
                 VideoCodec::Hevc,
                 "chroma-vaapi-hevc-decoder",
+                &[
+                    VideoDecodeSurfaceFormat::VaapiSurface,
+                    VideoDecodeSurfaceFormat::Nv12,
+                    VideoDecodeSurfaceFormat::P010,
+                ],
             ),
-            planned_video_decoder_backend(
-                HardwareKind::Nvenc,
+            video_decoder_backend(
+                "linux",
+                HardwareKind::Nvdec,
                 VideoCodec::H264,
                 "chroma-nvdec-h264-decoder",
+                &[
+                    VideoDecodeSurfaceFormat::CudaSurface,
+                    VideoDecodeSurfaceFormat::Nv12,
+                ],
             ),
-            planned_video_decoder_backend(
-                HardwareKind::Nvenc,
+            video_decoder_backend(
+                "linux",
+                HardwareKind::Nvdec,
                 VideoCodec::Hevc,
                 "chroma-nvdec-hevc-decoder",
+                &[
+                    VideoDecodeSurfaceFormat::CudaSurface,
+                    VideoDecodeSurfaceFormat::Nv12,
+                    VideoDecodeSurfaceFormat::P010,
+                ],
             ),
-        ],
-        "windows" => vec![
-            planned_video_decoder_backend(
+            video_decoder_backend(
+                "linux",
                 HardwareKind::Qsv,
                 VideoCodec::H264,
                 "chroma-qsv-h264-decoder",
+                &[
+                    VideoDecodeSurfaceFormat::QsvSurface,
+                    VideoDecodeSurfaceFormat::Nv12,
+                ],
             ),
-            planned_video_decoder_backend(
+            video_decoder_backend(
+                "linux",
                 HardwareKind::Qsv,
                 VideoCodec::Hevc,
                 "chroma-qsv-hevc-decoder",
+                &[
+                    VideoDecodeSurfaceFormat::QsvSurface,
+                    VideoDecodeSurfaceFormat::Nv12,
+                    VideoDecodeSurfaceFormat::P010,
+                ],
             ),
-            planned_video_decoder_backend(
+        ],
+        "windows" => vec![
+            video_decoder_backend(
+                "windows",
+                HardwareKind::D3d11Va,
+                VideoCodec::H264,
+                "chroma-d3d11va-h264-decoder",
+                &[
+                    VideoDecodeSurfaceFormat::D3d11Texture,
+                    VideoDecodeSurfaceFormat::Nv12,
+                ],
+            ),
+            video_decoder_backend(
+                "windows",
+                HardwareKind::D3d11Va,
+                VideoCodec::Hevc,
+                "chroma-d3d11va-hevc-decoder",
+                &[
+                    VideoDecodeSurfaceFormat::D3d11Texture,
+                    VideoDecodeSurfaceFormat::Nv12,
+                    VideoDecodeSurfaceFormat::P010,
+                ],
+            ),
+            video_decoder_backend(
+                "windows",
+                HardwareKind::D3d12Va,
+                VideoCodec::H264,
+                "chroma-d3d12va-h264-decoder",
+                &[
+                    VideoDecodeSurfaceFormat::D3d12Texture,
+                    VideoDecodeSurfaceFormat::Nv12,
+                ],
+            ),
+            video_decoder_backend(
+                "windows",
+                HardwareKind::D3d12Va,
+                VideoCodec::Hevc,
+                "chroma-d3d12va-hevc-decoder",
+                &[
+                    VideoDecodeSurfaceFormat::D3d12Texture,
+                    VideoDecodeSurfaceFormat::Nv12,
+                    VideoDecodeSurfaceFormat::P010,
+                ],
+            ),
+            video_decoder_backend(
+                "windows",
+                HardwareKind::Dxva2,
+                VideoCodec::H264,
+                "chroma-dxva2-h264-decoder",
+                &[
+                    VideoDecodeSurfaceFormat::Dxva2Surface,
+                    VideoDecodeSurfaceFormat::Nv12,
+                ],
+            ),
+            video_decoder_backend(
+                "windows",
+                HardwareKind::Dxva2,
+                VideoCodec::Hevc,
+                "chroma-dxva2-hevc-decoder",
+                &[
+                    VideoDecodeSurfaceFormat::Dxva2Surface,
+                    VideoDecodeSurfaceFormat::Nv12,
+                    VideoDecodeSurfaceFormat::P010,
+                ],
+            ),
+            video_decoder_backend(
+                "windows",
+                HardwareKind::Qsv,
+                VideoCodec::H264,
+                "chroma-qsv-h264-decoder",
+                &[
+                    VideoDecodeSurfaceFormat::QsvSurface,
+                    VideoDecodeSurfaceFormat::Nv12,
+                ],
+            ),
+            video_decoder_backend(
+                "windows",
+                HardwareKind::Qsv,
+                VideoCodec::Hevc,
+                "chroma-qsv-hevc-decoder",
+                &[
+                    VideoDecodeSurfaceFormat::QsvSurface,
+                    VideoDecodeSurfaceFormat::Nv12,
+                    VideoDecodeSurfaceFormat::P010,
+                ],
+            ),
+            video_decoder_backend(
+                "windows",
                 HardwareKind::Amf,
                 VideoCodec::H264,
                 "chroma-amf-h264-decoder",
+                &[
+                    VideoDecodeSurfaceFormat::AmfSurface,
+                    VideoDecodeSurfaceFormat::Nv12,
+                ],
             ),
-            planned_video_decoder_backend(
+            video_decoder_backend(
+                "windows",
                 HardwareKind::Amf,
                 VideoCodec::Hevc,
                 "chroma-amf-hevc-decoder",
+                &[
+                    VideoDecodeSurfaceFormat::AmfSurface,
+                    VideoDecodeSurfaceFormat::Nv12,
+                    VideoDecodeSurfaceFormat::P010,
+                ],
+            ),
+            video_decoder_backend(
+                "windows",
+                HardwareKind::Nvdec,
+                VideoCodec::H264,
+                "chroma-nvdec-h264-decoder",
+                &[
+                    VideoDecodeSurfaceFormat::CudaSurface,
+                    VideoDecodeSurfaceFormat::Nv12,
+                ],
+            ),
+            video_decoder_backend(
+                "windows",
+                HardwareKind::Nvdec,
+                VideoCodec::Hevc,
+                "chroma-nvdec-hevc-decoder",
+                &[
+                    VideoDecodeSurfaceFormat::CudaSurface,
+                    VideoDecodeSurfaceFormat::Nv12,
+                    VideoDecodeSurfaceFormat::P010,
+                ],
             ),
         ],
         _ => Vec::new(),
     }
 }
 
-fn planned_video_decoder_backend(
+fn video_decoder_backend(
+    os: &str,
     kind: HardwareKind,
     codec: VideoCodec,
     decoder: &str,
+    native_surface_formats: &[VideoDecodeSurfaceFormat],
 ) -> VideoDecoderBackend {
-    let available = video_decode_backend_available(kind, codec);
+    let available = video_decode_backend_available(os, kind, codec);
     VideoDecoderBackend {
         kind,
         codec,
         decoder: decoder.to_string(),
         hwaccel: Some(format!("{kind:?}").to_lowercase()),
         output_pixel_format: RawVideoPixelFormat::Bgra,
+        native_surface_formats: native_surface_formats.to_vec(),
+        zero_copy_capable: native_surface_formats
+            .iter()
+            .any(|format| hardware_surface_format(*format)),
         available,
-        unavailable_reason: (!available).then(|| video_decode_unavailable_reason(kind, codec)),
+        unavailable_reason: (!available).then(|| video_decode_unavailable_reason(os, kind, codec)),
     }
 }
 
-fn video_decode_unavailable_reason(kind: HardwareKind, codec: VideoCodec) -> String {
-    if cfg!(target_os = "macos") && kind == HardwareKind::VideoToolbox {
+fn hardware_surface_format(format: VideoDecodeSurfaceFormat) -> bool {
+    matches!(
+        format,
+        VideoDecodeSurfaceFormat::VideoToolboxPixelBuffer
+            | VideoDecodeSurfaceFormat::VaapiSurface
+            | VideoDecodeSurfaceFormat::CudaSurface
+            | VideoDecodeSurfaceFormat::QsvSurface
+            | VideoDecodeSurfaceFormat::AmfSurface
+            | VideoDecodeSurfaceFormat::D3d11Texture
+            | VideoDecodeSurfaceFormat::D3d12Texture
+            | VideoDecodeSurfaceFormat::Dxva2Surface
+    )
+}
+
+fn video_decode_unavailable_reason(os: &str, kind: HardwareKind, codec: VideoCodec) -> String {
+    if os != std::env::consts::OS {
+        return format!(
+            "{kind:?} {codec:?} decode is modeled for {os}, not the current {} runtime",
+            std::env::consts::OS
+        );
+    }
+    if kind == HardwareKind::VideoToolbox {
         format!("VideoToolbox hardware decode support was not reported for {codec:?}")
+    } else if matches!(kind, HardwareKind::Vaapi | HardwareKind::Qsv) && os == "linux" {
+        "Linux hardware decode device was not detected under /dev/dri".to_string()
+    } else if kind == HardwareKind::Nvdec && os == "linux" {
+        "NVIDIA decode device was not detected under /dev/nvidiactl".to_string()
+    } else if os == "windows" {
+        "Windows hardware decode runtime probing is modeled but not executable in this build"
+            .to_string()
     } else {
         "native video decode backend is planned but not executable in this build".to_string()
     }
 }
 
-fn video_decode_backend_available(kind: HardwareKind, codec: VideoCodec) -> bool {
-    if kind != HardwareKind::VideoToolbox {
+fn video_decode_backend_available(os: &str, kind: HardwareKind, codec: VideoCodec) -> bool {
+    if os != std::env::consts::OS {
         return false;
     }
-    video_toolbox_decode_supported(codec)
+    match (os, kind) {
+        ("macos", HardwareKind::VideoToolbox) => video_toolbox_decode_supported(codec),
+        ("linux", HardwareKind::Vaapi | HardwareKind::Qsv) => linux_dri_decode_device_present(),
+        ("linux", HardwareKind::Nvdec) => linux_nvidia_decode_device_present(),
+        ("windows", HardwareKind::D3d11Va | HardwareKind::D3d12Va | HardwareKind::Dxva2) => {
+            windows_directx_decode_runtime_present()
+        }
+        ("windows", HardwareKind::Qsv | HardwareKind::Amf | HardwareKind::Nvdec) => {
+            windows_vendor_decode_runtime_present(kind)
+        }
+        _ => false,
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -492,6 +742,50 @@ fn video_toolbox_decode_supported(codec: VideoCodec) -> bool {
 
 #[cfg(not(target_os = "macos"))]
 fn video_toolbox_decode_supported(_codec: VideoCodec) -> bool {
+    false
+}
+
+#[cfg(target_os = "linux")]
+fn linux_dri_decode_device_present() -> bool {
+    std::fs::read_dir("/dev/dri")
+        .ok()
+        .into_iter()
+        .flat_map(|entries| entries.flatten())
+        .any(|entry| entry.file_name().to_string_lossy().starts_with("renderD"))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn linux_dri_decode_device_present() -> bool {
+    false
+}
+
+#[cfg(target_os = "linux")]
+fn linux_nvidia_decode_device_present() -> bool {
+    std::path::Path::new("/dev/nvidiactl").exists()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn linux_nvidia_decode_device_present() -> bool {
+    false
+}
+
+#[cfg(target_os = "windows")]
+fn windows_directx_decode_runtime_present() -> bool {
+    true
+}
+
+#[cfg(not(target_os = "windows"))]
+fn windows_directx_decode_runtime_present() -> bool {
+    false
+}
+
+#[cfg(target_os = "windows")]
+fn windows_vendor_decode_runtime_present(_kind: HardwareKind) -> bool {
+    false
+}
+
+#[cfg(not(target_os = "windows"))]
+fn windows_vendor_decode_runtime_present(_kind: HardwareKind) -> bool {
     false
 }
 
@@ -824,11 +1118,90 @@ mod tests {
                 .iter()
                 .all(|backend| backend.output_pixel_format == RawVideoPixelFormat::Bgra)
         );
+        assert!(plan.video_backends.iter().all(|backend| {
+            backend
+                .native_surface_formats
+                .iter()
+                .any(|format| matches!(format, VideoDecodeSurfaceFormat::Nv12))
+                || backend.kind == HardwareKind::VideoToolbox
+        }));
         assert!(
             plan.video_backends
                 .iter()
                 .all(|backend| { backend.available == backend.unavailable_reason.is_none() })
         );
+    }
+
+    #[test]
+    fn decoder_backend_matrix_models_linux_hardware_decode_targets() {
+        let backends = video_decoder_backend_matrix_for_os("linux");
+
+        assert!(backends.iter().any(|backend| {
+            backend.kind == HardwareKind::Vaapi
+                && backend.codec == VideoCodec::H264
+                && backend
+                    .native_surface_formats
+                    .contains(&VideoDecodeSurfaceFormat::VaapiSurface)
+        }));
+        assert!(backends.iter().any(|backend| {
+            backend.kind == HardwareKind::Nvdec
+                && backend.codec == VideoCodec::Hevc
+                && backend
+                    .native_surface_formats
+                    .contains(&VideoDecodeSurfaceFormat::CudaSurface)
+                && backend
+                    .native_surface_formats
+                    .contains(&VideoDecodeSurfaceFormat::P010)
+        }));
+        assert!(backends.iter().any(|backend| {
+            backend.kind == HardwareKind::Qsv
+                && backend.codec == VideoCodec::Hevc
+                && backend.zero_copy_capable
+        }));
+    }
+
+    #[test]
+    fn decoder_backend_matrix_models_windows_hardware_decode_targets() {
+        let backends = video_decoder_backend_matrix_for_os("windows");
+
+        assert!(backends.iter().any(|backend| {
+            backend.kind == HardwareKind::D3d11Va
+                && backend.codec == VideoCodec::H264
+                && backend
+                    .native_surface_formats
+                    .contains(&VideoDecodeSurfaceFormat::D3d11Texture)
+        }));
+        assert!(backends.iter().any(|backend| {
+            backend.kind == HardwareKind::D3d12Va
+                && backend.codec == VideoCodec::Hevc
+                && backend
+                    .native_surface_formats
+                    .contains(&VideoDecodeSurfaceFormat::D3d12Texture)
+                && backend
+                    .native_surface_formats
+                    .contains(&VideoDecodeSurfaceFormat::P010)
+        }));
+        assert!(backends.iter().any(|backend| {
+            backend.kind == HardwareKind::Dxva2
+                && backend.codec == VideoCodec::H264
+                && backend
+                    .native_surface_formats
+                    .contains(&VideoDecodeSurfaceFormat::Dxva2Surface)
+        }));
+        assert!(backends.iter().any(|backend| {
+            backend.kind == HardwareKind::Amf
+                && backend.codec == VideoCodec::Hevc
+                && backend
+                    .native_surface_formats
+                    .contains(&VideoDecodeSurfaceFormat::AmfSurface)
+        }));
+        assert!(backends.iter().any(|backend| {
+            backend.kind == HardwareKind::Nvdec
+                && backend.codec == VideoCodec::Hevc
+                && backend
+                    .native_surface_formats
+                    .contains(&VideoDecodeSurfaceFormat::CudaSurface)
+        }));
     }
 
     #[test]
