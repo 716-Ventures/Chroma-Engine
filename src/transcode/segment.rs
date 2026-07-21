@@ -4,12 +4,13 @@ use anyhow::{Result, bail};
 use serde::Serialize;
 
 use crate::{
+    codec::ac3::{parse_ac3_specific_box, parse_eac3_specific_box},
     container::matroska::{MatroskaTrack, MatroskaTrackKind, looks_like_ebml},
     fmp4::{
         Fmp4SampleEntry, Fmp4Track, Fmp4TrackKind, fragment_track_from_chunk_samples,
         fragment_track_from_encoded_audio_frames, init_segment, media_fragment,
     },
-    packet::{ExtractedChunk, TimePoint, TimeScale},
+    packet::{ChunkSample, ExtractedChunk, TimePoint, TimeScale},
     source::MappedMediaFile,
     transcode::{
         AudioDecodeCodec, AudioFrameTiming, EncodedAudioFrame, VideoCodec,
@@ -212,6 +213,15 @@ struct TranscodedSegment {
     first_audio_pts: Option<TimePoint>,
 }
 
+struct AudioSegment {
+    fragment: crate::fmp4::Fmp4FragmentTrack,
+    sample_entry: Fmp4SampleEntry,
+    timescale: u32,
+    default_sample_duration: u32,
+    encoded_frame_count: usize,
+    first_pts: Option<TimePoint>,
+}
+
 fn transcode_matroska_segment(
     bytes: &[u8],
     index: u32,
@@ -234,13 +244,6 @@ fn transcode_matroska_segment(
         options.audio_track_id.as_deref(),
     )
     .ok_or_else(|| anyhow::anyhow!("no matching Matroska audio track found"))?;
-    if audio_track.codec != "dts" {
-        bail!(
-            "selected audio track {} uses {}, not DTS",
-            audio_track_id,
-            audio_track.codec
-        );
-    }
     let _video_codec = video_codec_from_label(&video_track.codec)?;
     let decoder_config = video_track
         .codec_private
@@ -260,78 +263,50 @@ fn transcode_matroska_segment(
         video_timescale,
     )?;
 
-    let audio_decode_input = build_audio_decode_input(
-        AudioDecodeCodec::Dts,
-        chunk_time_scale(&audio_manifest),
-        &audio_manifest.samples,
-        &audio_payload,
-        true,
+    let audio_segment = matroska_audio_segment(
+        audio_track,
+        audio_manifest,
+        audio_payload,
+        options.audio_bitrate,
     )?;
-    let decoded_audio = decode_dts_core_to_interleaved_i16(&audio_decode_input)?;
-    let decoded_pcm = decoded_audio
-        .frames
-        .iter()
-        .flat_map(|frame| frame.pcm.iter().copied())
-        .collect::<Vec<_>>();
-    let bridge_format = crate::transcode::PcmAudioFormat {
-        sample_rate: decoded_audio.stream.format.sample_rate,
-        channels: decoded_audio.stream.format.channels.min(2),
-    };
-    let bridge_pcm = stereo_pcm_from_interleaved(
-        &decoded_pcm,
-        decoded_audio.stream.format.channels,
-        bridge_format.channels,
-    )?;
-    let mut encoded_audio =
-        encode_aac_from_interleaved_i16(bridge_format, &bridge_pcm, options.audio_bitrate)?;
-    rebase_audio_frames(
-        &mut encoded_audio.frames,
-        first_sample_time(&audio_manifest, bridge_format.sample_rate),
-    );
-    let audio_fragment =
-        fragment_track_from_encoded_audio_frames(AUDIO_TRACK_ID, &encoded_audio.frames)?;
 
-    let tracks =
-        vec![
-            Fmp4Track {
-                id: VIDEO_TRACK_ID,
-                kind: Fmp4TrackKind::Video,
-                timescale: video_timescale,
-                default_sample_duration: video_manifest
-                    .samples
-                    .first()
-                    .map(|sample| {
-                        rescale_units(
-                            sample.duration.units,
-                            sample.duration.scale,
-                            video_timescale,
-                        )
-                        .max(1)
-                        .min(u64::from(u32::MAX)) as u32
-                    })
-                    .unwrap_or(1),
-                default_sample_size: 0,
-                default_sample_flags: 0x0101_0000,
-                sample_entry: matroska_video_sample_entry(video_track, decoder_config)?,
-            },
-            Fmp4Track {
-                id: AUDIO_TRACK_ID,
-                kind: Fmp4TrackKind::Audio,
-                timescale: bridge_format.sample_rate,
-                default_sample_duration: AAC_FRAMES_PER_PACKET,
-                default_sample_size: 0,
-                default_sample_flags: 0x0200_0000,
-                sample_entry: Fmp4SampleEntry::Aac {
-                    decoder_config: encoded_audio.stream.decoder_config.clone().ok_or_else(
-                        || anyhow::anyhow!("AAC encoder did not return decoder config"),
-                    )?,
-                    channel_count: bridge_format.channels.min(u32::from(u16::MAX)) as u16,
-                    sample_rate: bridge_format.sample_rate,
-                },
-            },
-        ];
+    let tracks = vec![
+        Fmp4Track {
+            id: VIDEO_TRACK_ID,
+            kind: Fmp4TrackKind::Video,
+            timescale: video_timescale,
+            default_sample_duration: video_manifest
+                .samples
+                .first()
+                .map(|sample| {
+                    rescale_units(
+                        sample.duration.units,
+                        sample.duration.scale,
+                        video_timescale,
+                    )
+                    .max(1)
+                    .min(u64::from(u32::MAX)) as u32
+                })
+                .unwrap_or(1),
+            default_sample_size: 0,
+            default_sample_flags: 0x0101_0000,
+            sample_entry: matroska_video_sample_entry(video_track, decoder_config)?,
+        },
+        Fmp4Track {
+            id: AUDIO_TRACK_ID,
+            kind: Fmp4TrackKind::Audio,
+            timescale: audio_segment.timescale,
+            default_sample_duration: audio_segment.default_sample_duration,
+            default_sample_size: 0,
+            default_sample_flags: 0x0200_0000,
+            sample_entry: audio_segment.sample_entry,
+        },
+    ];
     let init = init_segment(&tracks)?;
-    let media = media_fragment(index.saturating_add(1), &[video_fragment, audio_fragment])?;
+    let media = media_fragment(
+        index.saturating_add(1),
+        &[video_fragment, audio_segment.fragment],
+    )?;
 
     Ok(TranscodedSegment {
         video_track_id,
@@ -342,9 +317,9 @@ fn transcode_matroska_segment(
         decoded_video_frames: 0,
         video_sample_count: video_manifest.samples.len(),
         encoded_video_frames: 0,
-        encoded_audio_frames: encoded_audio.frames.len(),
+        encoded_audio_frames: audio_segment.encoded_frame_count,
         first_video_pts: video_manifest.samples.first().map(|sample| sample.pts),
-        first_audio_pts: encoded_audio.frames.first().map(|frame| frame.timing.pts),
+        first_audio_pts: audio_segment.first_pts,
     })
 }
 
@@ -423,6 +398,150 @@ fn video_codec_string(track: &MatroskaTrack) -> String {
         "hevc" => "hevc".to_string(),
         other => other.to_string(),
     }
+}
+
+fn matroska_audio_segment(
+    track: &MatroskaTrack,
+    manifest: ExtractedChunk,
+    payload: Vec<u8>,
+    bitrate: u32,
+) -> Result<AudioSegment> {
+    match track.codec.as_str() {
+        "dts" => transcode_dts_audio_segment(&manifest, &payload, bitrate),
+        "aac" | "ac3" | "eac3" => copy_matroska_audio_segment(track, manifest, payload),
+        other => bail!("selected audio track codec {other} is not supported by native fMP4 output"),
+    }
+}
+
+fn transcode_dts_audio_segment(
+    manifest: &ExtractedChunk,
+    payload: &[u8],
+    bitrate: u32,
+) -> Result<AudioSegment> {
+    let audio_decode_input = build_audio_decode_input(
+        AudioDecodeCodec::Dts,
+        chunk_time_scale(manifest),
+        &manifest.samples,
+        payload,
+        true,
+    )?;
+    let decoded_audio = decode_dts_core_to_interleaved_i16(&audio_decode_input)?;
+    let decoded_pcm = decoded_audio
+        .frames
+        .iter()
+        .flat_map(|frame| frame.pcm.iter().copied())
+        .collect::<Vec<_>>();
+    let bridge_format = crate::transcode::PcmAudioFormat {
+        sample_rate: decoded_audio.stream.format.sample_rate,
+        channels: decoded_audio.stream.format.channels.min(2),
+    };
+    let bridge_pcm = stereo_pcm_from_interleaved(
+        &decoded_pcm,
+        decoded_audio.stream.format.channels,
+        bridge_format.channels,
+    )?;
+    let mut encoded_audio = encode_aac_from_interleaved_i16(bridge_format, &bridge_pcm, bitrate)?;
+    rebase_audio_frames(
+        &mut encoded_audio.frames,
+        first_sample_time(manifest, bridge_format.sample_rate),
+    );
+    let fragment = fragment_track_from_encoded_audio_frames(AUDIO_TRACK_ID, &encoded_audio.frames)?;
+    let decoder_config = encoded_audio.stream.decoder_config.clone().ok_or_else(|| {
+        anyhow::anyhow!("AAC encoder did not return decoder config for DTS bridge")
+    })?;
+    Ok(AudioSegment {
+        fragment,
+        sample_entry: Fmp4SampleEntry::Aac {
+            decoder_config,
+            channel_count: bridge_format.channels.min(u32::from(u16::MAX)) as u16,
+            sample_rate: bridge_format.sample_rate,
+        },
+        timescale: bridge_format.sample_rate,
+        default_sample_duration: AAC_FRAMES_PER_PACKET,
+        encoded_frame_count: encoded_audio.frames.len(),
+        first_pts: encoded_audio.frames.first().map(|frame| frame.timing.pts),
+    })
+}
+
+fn copy_matroska_audio_segment(
+    track: &MatroskaTrack,
+    manifest: ExtractedChunk,
+    payload: Vec<u8>,
+) -> Result<AudioSegment> {
+    let timescale = chunk_time_scale(&manifest).units_per_second;
+    let sample_entry = matroska_audio_sample_entry(track, &manifest.samples, &payload)?;
+    let default_sample_duration = default_sample_duration(&manifest, timescale);
+    let first_pts = manifest.samples.first().map(|sample| sample.pts);
+    let fragment =
+        fragment_track_from_chunk_samples(AUDIO_TRACK_ID, &manifest.samples, payload, timescale)?;
+    Ok(AudioSegment {
+        fragment,
+        sample_entry,
+        timescale,
+        default_sample_duration,
+        encoded_frame_count: 0,
+        first_pts,
+    })
+}
+
+fn matroska_audio_sample_entry(
+    track: &MatroskaTrack,
+    samples: &[ChunkSample],
+    payload: &[u8],
+) -> Result<Fmp4SampleEntry> {
+    match track.codec.as_str() {
+        "aac" => Ok(Fmp4SampleEntry::Aac {
+            decoder_config: track
+                .codec_private
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("missing Matroska AAC private data"))?,
+            channel_count: track.channels.unwrap_or(2).min(u32::from(u16::MAX)) as u16,
+            sample_rate: track.sample_rate.unwrap_or(48_000),
+        }),
+        "ac3" => {
+            let frame = first_sample_payload(samples, payload)?;
+            Ok(Fmp4SampleEntry::Ac3 {
+                dac3: parse_ac3_specific_box(frame)?.dac3_payload(),
+                channel_count: track.channels.unwrap_or(2).min(u32::from(u16::MAX)) as u16,
+                sample_rate: track.sample_rate.unwrap_or(48_000),
+            })
+        }
+        "eac3" => {
+            let access_unit = first_sample_payload(samples, payload)?;
+            Ok(Fmp4SampleEntry::Eac3 {
+                dec3: parse_eac3_specific_box(access_unit)?.dec3_payload(),
+                channel_count: track.channels.unwrap_or(2).min(u32::from(u16::MAX)) as u16,
+                sample_rate: track.sample_rate.unwrap_or(48_000),
+            })
+        }
+        other => bail!("selected audio track codec {other} is not supported by fMP4 packet-copy"),
+    }
+}
+
+fn first_sample_payload<'a>(samples: &[ChunkSample], payload: &'a [u8]) -> Result<&'a [u8]> {
+    let sample = samples
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("audio chunk has no samples"))?;
+    let start = usize::try_from(sample.payload_offset)?;
+    let size = usize::try_from(sample.byte_count)?;
+    let end = start
+        .checked_add(size)
+        .ok_or_else(|| anyhow::anyhow!("audio sample byte range overflowed"))?;
+    payload
+        .get(start..end)
+        .ok_or_else(|| anyhow::anyhow!("audio sample byte range is outside chunk payload"))
+}
+
+fn default_sample_duration(chunk: &ExtractedChunk, timescale: u32) -> u32 {
+    chunk
+        .samples
+        .first()
+        .map(|sample| {
+            rescale_units(sample.duration.units, sample.duration.scale, timescale)
+                .max(1)
+                .min(u64::from(u32::MAX)) as u32
+        })
+        .unwrap_or(1)
 }
 
 fn chunk_time_scale(chunk: &ExtractedChunk) -> TimeScale {
