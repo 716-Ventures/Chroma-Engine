@@ -1,9 +1,9 @@
 use std::hint::black_box;
 
 use chroma_engine::{
-    AudioSelection, PacketRef, PlaybackConstraints, PlaybackTarget, TimeDelta, TimePoint,
-    TimeScale, parse_subrip, plan_fixed_chunks, plan_playback, probe_media_source, render_webvtt,
-    segment_webvtt,
+    AudioSelection, Engine, PacketRef, PlaybackConstraints, PlaybackSessionOptions, PlaybackTarget,
+    TimeDelta, TimePoint, TimeScale, parse_subrip, plan_fixed_chunks, plan_playback,
+    probe_media_source, render_webvtt, segment_webvtt,
 };
 use criterion::{Criterion, criterion_group, criterion_main};
 use tempfile::NamedTempFile;
@@ -37,6 +37,48 @@ fn bench_packet_planning(c: &mut Criterion) {
     let packets = synthetic_packets(12_000);
     c.bench_function("packet_plan/12000_packets", |b| {
         b.iter(|| plan_fixed_chunks(black_box(&packets), black_box(4_000)));
+    });
+}
+
+fn bench_stateful_segments(c: &mut Criterion) {
+    let sample = NamedTempFile::new().expect("temp file");
+    std::fs::write(sample.path(), indexed_mp4()).expect("write indexed mp4");
+
+    c.bench_function("session/open_indexed_mp4", |b| {
+        b.iter(|| {
+            Engine::new()
+                .open_playback_session(
+                    black_box(sample.path()),
+                    PlaybackSessionOptions {
+                        track_id: Some("v0".to_string()),
+                        target_ms: 1_000,
+                    },
+                )
+                .expect("open playback session")
+        });
+    });
+
+    let session = Engine::new()
+        .open_playback_session(
+            sample.path(),
+            PlaybackSessionOptions {
+                track_id: Some("v0".to_string()),
+                target_ms: 1_000,
+            },
+        )
+        .expect("open playback session");
+
+    c.bench_function("session/first_segment_indexed_mp4", |b| {
+        b.iter(|| session.segment(black_box(0)).expect("segment 0"));
+    });
+
+    c.bench_function("session/sequential_segments_indexed_mp4", |b| {
+        b.iter(|| {
+            for index in 0..black_box(session.plan().chunks.chunks.len() as u32) {
+                let _ = session.segment(index).expect("segment");
+            }
+            black_box(session.stats())
+        });
     });
 }
 
@@ -120,6 +162,151 @@ fn minimal_mp4() -> Vec<u8> {
         ]
         .concat(),
     ));
+    out
+}
+
+fn indexed_mp4() -> Vec<u8> {
+    let mut out = atom_ref(
+        b"ftyp",
+        &[
+            b"isom".as_slice(),
+            &0_u32.to_be_bytes(),
+            b"isom".as_slice(),
+            b"mp42".as_slice(),
+        ]
+        .concat(),
+    );
+    out.extend_from_slice(&atom_ref(b"moov", &indexed_trak()));
+    out.resize(800, 0);
+    out[700..704].copy_from_slice(b"aaaa");
+    out[704..708].copy_from_slice(b"bbbb");
+    out
+}
+
+fn indexed_trak() -> Vec<u8> {
+    atom_ref(
+        b"trak",
+        &[
+            indexed_tkhd(),
+            atom_ref(
+                b"mdia",
+                &[
+                    indexed_mdhd(1_000, 2_000),
+                    indexed_hdlr(b"vide"),
+                    atom_ref(
+                        b"minf",
+                        &atom_ref(
+                            b"stbl",
+                            &[
+                                indexed_stsd(),
+                                indexed_stts(&[1_000, 1_000]),
+                                indexed_stss(&[1, 2]),
+                                indexed_stsc(&[(1, 2)]),
+                                indexed_stsz(&[4, 4]),
+                                indexed_stco(&[700]),
+                            ]
+                            .concat(),
+                        ),
+                    ),
+                ]
+                .concat(),
+            ),
+        ]
+        .concat(),
+    )
+}
+
+fn indexed_tkhd() -> Vec<u8> {
+    let mut payload = vec![0_u8; 84];
+    payload[76..80].copy_from_slice(&(1920_u32 << 16).to_be_bytes());
+    payload[80..84].copy_from_slice(&(1080_u32 << 16).to_be_bytes());
+    atom_ref(b"tkhd", &payload)
+}
+
+fn indexed_mdhd(timescale: u32, duration: u32) -> Vec<u8> {
+    let mut payload = vec![0_u8; 20];
+    payload[12..16].copy_from_slice(&timescale.to_be_bytes());
+    payload[16..20].copy_from_slice(&duration.to_be_bytes());
+    atom_ref(b"mdhd", &payload)
+}
+
+fn indexed_hdlr(handler: &[u8; 4]) -> Vec<u8> {
+    let mut payload = vec![0_u8; 12];
+    payload[8..12].copy_from_slice(handler);
+    atom_ref(b"hdlr", &payload)
+}
+
+fn indexed_stsd() -> Vec<u8> {
+    let mut entry_payload = vec![0_u8; 28];
+    entry_payload[24..26].copy_from_slice(&1920_u16.to_be_bytes());
+    entry_payload[26..28].copy_from_slice(&1080_u16.to_be_bytes());
+    let entry = atom_ref(b"avc1", &entry_payload);
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&[0, 0, 0, 0]);
+    payload.extend_from_slice(&1_u32.to_be_bytes());
+    payload.extend_from_slice(&entry);
+    atom_ref(b"stsd", &payload)
+}
+
+fn indexed_stts(sample_durations: &[u32]) -> Vec<u8> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&[0, 0, 0, 0]);
+    payload.extend_from_slice(&(sample_durations.len() as u32).to_be_bytes());
+    for duration in sample_durations {
+        payload.extend_from_slice(&1_u32.to_be_bytes());
+        payload.extend_from_slice(&duration.to_be_bytes());
+    }
+    atom_ref(b"stts", &payload)
+}
+
+fn indexed_stss(sync_samples: &[u32]) -> Vec<u8> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&[0, 0, 0, 0]);
+    payload.extend_from_slice(&(sync_samples.len() as u32).to_be_bytes());
+    for sample in sync_samples {
+        payload.extend_from_slice(&sample.to_be_bytes());
+    }
+    atom_ref(b"stss", &payload)
+}
+
+fn indexed_stsc(entries: &[(u32, u32)]) -> Vec<u8> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&[0, 0, 0, 0]);
+    payload.extend_from_slice(&(entries.len() as u32).to_be_bytes());
+    for (first_chunk, samples_per_chunk) in entries {
+        payload.extend_from_slice(&first_chunk.to_be_bytes());
+        payload.extend_from_slice(&samples_per_chunk.to_be_bytes());
+        payload.extend_from_slice(&1_u32.to_be_bytes());
+    }
+    atom_ref(b"stsc", &payload)
+}
+
+fn indexed_stsz(sample_sizes: &[u32]) -> Vec<u8> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&[0, 0, 0, 0]);
+    payload.extend_from_slice(&0_u32.to_be_bytes());
+    payload.extend_from_slice(&(sample_sizes.len() as u32).to_be_bytes());
+    for size in sample_sizes {
+        payload.extend_from_slice(&size.to_be_bytes());
+    }
+    atom_ref(b"stsz", &payload)
+}
+
+fn indexed_stco(chunk_offsets: &[u32]) -> Vec<u8> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&[0, 0, 0, 0]);
+    payload.extend_from_slice(&(chunk_offsets.len() as u32).to_be_bytes());
+    for offset in chunk_offsets {
+        payload.extend_from_slice(&offset.to_be_bytes());
+    }
+    atom_ref(b"stco", &payload)
+}
+
+fn atom_ref(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(payload.len() + 8);
+    out.extend_from_slice(&((payload.len() + 8) as u32).to_be_bytes());
+    out.extend_from_slice(kind);
+    out.extend_from_slice(payload);
     out
 }
 
@@ -220,6 +407,7 @@ criterion_group!(
     benches,
     bench_probe_and_plan,
     bench_packet_planning,
+    bench_stateful_segments,
     bench_subtitles
 );
 criterion_main!(benches);
