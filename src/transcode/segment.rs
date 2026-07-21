@@ -27,6 +27,8 @@ const DEFAULT_VIDEO_BITRATE: u32 = 16_000_000;
 const DEFAULT_AUDIO_BITRATE: u32 = 384_000;
 const DEFAULT_SEGMENT_MS: u64 = 4_000;
 const AAC_FRAMES_PER_PACKET: u32 = 1_024;
+const H264_WEB_MAX_WIDTH: u32 = 1_920;
+const H264_WEB_MAX_HEIGHT: u32 = 1_080;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -483,7 +485,7 @@ fn transcode_h264_video_segment(
     bitrate: u32,
 ) -> Result<VideoSegment> {
     let frame_duration_ns = track.default_duration_ns.unwrap_or(41_666_667);
-    let output_format = RawVideoFormat {
+    let decode_format = RawVideoFormat {
         width: track.width.unwrap_or(1920),
         height: track.height.unwrap_or(1080),
         frame_rate_num: u32::try_from(1_000_000_000_u64 / frame_duration_ns.max(1))
@@ -492,6 +494,7 @@ fn transcode_h264_video_segment(
         frame_rate_den: 1,
         pixel_format: RawVideoPixelFormat::Bgra,
     };
+    let encode_format = constrained_h264_format(decode_format);
     let decode_input = build_video_decode_input(
         codec,
         chunk_time_scale(manifest),
@@ -500,19 +503,33 @@ fn transcode_h264_video_segment(
         payload,
         true,
     )?;
-    let decoded = decode_videotoolbox_bgra_frames(&decode_input, output_format)?;
+    let decoded = decode_videotoolbox_bgra_frames(&decode_input, decode_format)?;
+    let frame_buffers = decoded
+        .frames
+        .iter()
+        .map(|frame| {
+            scale_bgra_nearest(
+                &frame.pixels,
+                decode_format.width,
+                decode_format.height,
+                encode_format.width,
+                encode_format.height,
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
     let raw_frames = decoded
         .frames
         .iter()
-        .map(|frame| RawVideoFrameRef {
+        .zip(frame_buffers.iter())
+        .map(|(frame, pixels)| RawVideoFrameRef {
             pts: frame.pts,
             dts: frame.dts,
             duration: frame.duration,
-            bytes: frame.pixels.as_slice(),
+            bytes: pixels.as_slice(),
             keyframe: frame.keyframe,
         })
         .collect::<Vec<_>>();
-    let encoded = encode_h264_videotoolbox_bgra_frames(output_format, &raw_frames, bitrate)?;
+    let encoded = encode_h264_videotoolbox_bgra_frames(encode_format, &raw_frames, bitrate)?;
     let decoder_config = encoded
         .stream
         .decoder_config
@@ -528,8 +545,8 @@ fn transcode_h264_video_segment(
         fragment,
         sample_entry: Fmp4SampleEntry::Avc {
             codec_config: decoder_config,
-            width: output_format.width.min(u32::from(u16::MAX)) as u16,
-            height: output_format.height.min(u32::from(u16::MAX)) as u16,
+            width: encode_format.width.min(u32::from(u16::MAX)) as u16,
+            height: encode_format.height.min(u32::from(u16::MAX)) as u16,
         },
         timescale: encoded.stream.time_scale.units_per_second,
         default_sample_duration,
@@ -539,6 +556,111 @@ fn transcode_h264_video_segment(
         encoded_frame_count: encoded.frames.len(),
         first_pts: encoded.frames.first().map(|frame| frame.pts),
     })
+}
+
+fn constrained_h264_format(source: RawVideoFormat) -> RawVideoFormat {
+    let width_scale = H264_WEB_MAX_WIDTH as f64 / source.width.max(1) as f64;
+    let height_scale = H264_WEB_MAX_HEIGHT as f64 / source.height.max(1) as f64;
+    let scale = width_scale.min(height_scale).min(1.0);
+    let width = even_dimension((source.width as f64 * scale).round() as u32).max(2);
+    let height = even_dimension((source.height as f64 * scale).round() as u32).max(2);
+    RawVideoFormat {
+        width,
+        height,
+        frame_rate_num: source.frame_rate_num,
+        frame_rate_den: source.frame_rate_den,
+        pixel_format: source.pixel_format,
+    }
+}
+
+fn even_dimension(value: u32) -> u32 {
+    if value <= 2 { 2 } else { value & !1 }
+}
+
+fn scale_bgra_nearest(
+    src: &[u8],
+    src_width: u32,
+    src_height: u32,
+    dst_width: u32,
+    dst_height: u32,
+) -> Result<Vec<u8>> {
+    let src_stride = usize::try_from(src_width)?
+        .checked_mul(4)
+        .ok_or_else(|| anyhow::anyhow!("source BGRA stride overflowed"))?;
+    let src_len = src_stride
+        .checked_mul(usize::try_from(src_height)?)
+        .ok_or_else(|| anyhow::anyhow!("source BGRA frame size overflowed"))?;
+    if src.len() != src_len {
+        bail!("source BGRA frame size does not match declared dimensions");
+    }
+    if src_width == dst_width && src_height == dst_height {
+        return Ok(src.to_vec());
+    }
+    if src_width == dst_width.saturating_mul(2) && src_height == dst_height.saturating_mul(2) {
+        return scale_bgra_half_nearest(src, src_width, src_height, dst_width, dst_height);
+    }
+    let dst_stride = usize::try_from(dst_width)?
+        .checked_mul(4)
+        .ok_or_else(|| anyhow::anyhow!("destination BGRA stride overflowed"))?;
+    let mut out =
+        vec![
+            0;
+            dst_stride
+                .checked_mul(usize::try_from(dst_height)?)
+                .ok_or_else(|| anyhow::anyhow!("destination BGRA frame size overflowed"))?
+        ];
+    for y in 0..dst_height {
+        let src_y = ((u64::from(y) * u64::from(src_height)) / u64::from(dst_height)) as usize;
+        for x in 0..dst_width {
+            let src_x = ((u64::from(x) * u64::from(src_width)) / u64::from(dst_width)) as usize;
+            let src_offset = src_y * src_stride + src_x * 4;
+            let dst_offset = usize::try_from(y)? * dst_stride + usize::try_from(x)? * 4;
+            out[dst_offset..dst_offset + 4].copy_from_slice(&src[src_offset..src_offset + 4]);
+        }
+    }
+    Ok(out)
+}
+
+fn scale_bgra_half_nearest(
+    src: &[u8],
+    src_width: u32,
+    src_height: u32,
+    dst_width: u32,
+    dst_height: u32,
+) -> Result<Vec<u8>> {
+    let src_stride = usize::try_from(src_width)?
+        .checked_mul(4)
+        .ok_or_else(|| anyhow::anyhow!("source BGRA stride overflowed"))?;
+    let dst_stride = usize::try_from(dst_width)?
+        .checked_mul(4)
+        .ok_or_else(|| anyhow::anyhow!("destination BGRA stride overflowed"))?;
+    let src_len = src_stride
+        .checked_mul(usize::try_from(src_height)?)
+        .ok_or_else(|| anyhow::anyhow!("source BGRA frame size overflowed"))?;
+    if src.len() != src_len {
+        bail!("source BGRA frame size does not match declared dimensions");
+    }
+    let mut out =
+        vec![
+            0;
+            dst_stride
+                .checked_mul(usize::try_from(dst_height)?)
+                .ok_or_else(|| anyhow::anyhow!("destination BGRA frame size overflowed"))?
+        ];
+    for y in 0..usize::try_from(dst_height)? {
+        let src_row = (y * 2)
+            .checked_mul(src_stride)
+            .ok_or_else(|| anyhow::anyhow!("source BGRA row offset overflowed"))?;
+        let dst_row = y
+            .checked_mul(dst_stride)
+            .ok_or_else(|| anyhow::anyhow!("destination BGRA row offset overflowed"))?;
+        for x in 0..usize::try_from(dst_width)? {
+            let src_offset = src_row + x * 8;
+            let dst_offset = dst_row + x * 4;
+            out[dst_offset..dst_offset + 4].copy_from_slice(&src[src_offset..src_offset + 4]);
+        }
+    }
+    Ok(out)
 }
 
 fn matroska_audio_segment(
