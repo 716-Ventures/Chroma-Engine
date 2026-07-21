@@ -129,6 +129,7 @@
 - [x] Native video decoder backend matrix. `decoder-probe` now reports H.264/HEVC decode backends and BGRA output format separately from encoder capabilities, with macOS VideoToolbox availability backed by native hardware decode support checks.
 - [x] Native VideoToolbox decoder session probes. H.264 and HEVC probes parse avcC/hvcC decoder config into parameter sets, create CoreMedia format descriptions, and open real VTDecompressionSession instances before the engine trusts a source for native decode.
 - [x] Cross-platform hardware decode contract. Decoder probes now model macOS VideoToolbox, Linux VAAPI/NVDEC/QSV, and Windows D3D11VA/D3D12VA/DXVA2/QSV/AMF/NVDEC paths with native surface formats and zero-copy capability flags instead of flattening every platform to BGRA-only placeholders.
+- [x] macOS VideoToolbox BGRA decode primitive. Chroma Engine can now accept H.264/HEVC compressed packet batches plus avcC/hvcC config and return owned decoded BGRA frames through a Rust-first API.
 - [ ] Native compressed video decode backend for HEVC/H.264 sources that need target-native HLS output. Preserve the FFmpeg send/receive/drain lesson as a bounded state machine, but expose only Chroma Engine stage events and frames.
 - [ ] Native DTS/TrueHD decode bridge for MKV audio tracks that have no AAC/AC-3/E-AC-3 alternate. Follow the FFmpeg send/receive/drain state-machine shape and AetherEngine's copy-first/bridge-only policy, but keep the API Chroma-native.
 
