@@ -36,6 +36,7 @@ pub use codec::subtitles::{
 pub use container::{ContainerKind, sniff_container};
 pub use engine::{
     Engine, EngineSessionError, PlaybackSession, PlaybackSessionOptions, PlaybackSessionPlan,
+    PlaybackSessionStats,
 };
 pub use error::EngineErrorCode;
 pub use hls::{

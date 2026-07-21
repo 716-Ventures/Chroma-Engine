@@ -1,4 +1,7 @@
-use std::path::Path;
+use std::{
+    path::Path,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -69,12 +72,41 @@ pub struct PlaybackSessionPlan {
     pub packet_count: usize,
 }
 
+/// Snapshot of measured lifecycle counters for a playback session.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaybackSessionStats {
+    /// Number of source opens performed for this session.
+    pub source_opens: u64,
+    /// Number of container/index parse passes performed for this session.
+    pub index_parses: u64,
+    /// Number of native codec sessions created for this session.
+    pub codec_session_creations: u64,
+    /// Number of segment requests served by this session.
+    pub segment_requests: u64,
+    /// Number of source identity validations performed before segmenting.
+    pub source_validations: u64,
+    /// Packet payload bytes returned by this session.
+    pub payload_bytes_served: u64,
+}
+
 /// Stateful packet-copy playback session with retained source bytes and packet index.
 #[derive(Debug)]
 pub struct PlaybackSession {
     source: MediaSource,
     plan: PlaybackSessionPlan,
     packets: Vec<PacketRef>,
+    stats: PlaybackSessionCounters,
+}
+
+#[derive(Debug, Default)]
+struct PlaybackSessionCounters {
+    source_opens: AtomicU64,
+    index_parses: AtomicU64,
+    codec_session_creations: AtomicU64,
+    segment_requests: AtomicU64,
+    source_validations: AtomicU64,
+    payload_bytes_served: AtomicU64,
 }
 
 impl PlaybackSession {
@@ -86,6 +118,7 @@ impl PlaybackSession {
         let source = MediaSource::open(input).map_err(|error| EngineSessionError::Source {
             reason: error.to_string(),
         })?;
+        let stats = PlaybackSessionCounters::opened_packet_copy();
         let container = sniff_container(source.as_ref());
         let (track_id, packets) = match container {
             ContainerKind::Mp4 | ContainerKind::Mov => {
@@ -114,6 +147,7 @@ impl PlaybackSession {
             source,
             plan,
             packets,
+            stats,
         })
     }
 
@@ -122,13 +156,22 @@ impl PlaybackSession {
         &self.plan
     }
 
+    /// Returns a point-in-time snapshot of measured session lifecycle counters.
+    pub fn stats(&self) -> PlaybackSessionStats {
+        self.stats.snapshot()
+    }
+
     /// Extracts one packet-copy chunk from the retained source and packet index.
     pub fn segment(&self, index: u32) -> Result<(ExtractedChunk, Vec<u8>), EngineSessionError> {
+        self.stats.segment_requests.fetch_add(1, Ordering::Relaxed);
         self.source
             .validate_current()
             .map_err(|error| EngineSessionError::SourceChanged {
                 reason: error.to_string(),
             })?;
+        self.stats
+            .source_validations
+            .fetch_add(1, Ordering::Relaxed);
         let chunk = self
             .plan
             .chunks
@@ -145,6 +188,9 @@ impl PlaybackSession {
             .end
             .saturating_sub(chunk.packet_range.start);
         let byte_count = payload.len() as u64;
+        self.stats
+            .payload_bytes_served
+            .fetch_add(byte_count, Ordering::Relaxed);
         Ok((
             ExtractedChunk {
                 track_id: self.plan.track_id.clone(),
@@ -155,6 +201,30 @@ impl PlaybackSession {
             },
             payload,
         ))
+    }
+}
+
+impl PlaybackSessionCounters {
+    fn opened_packet_copy() -> Self {
+        Self {
+            source_opens: AtomicU64::new(1),
+            index_parses: AtomicU64::new(1),
+            codec_session_creations: AtomicU64::new(0),
+            segment_requests: AtomicU64::new(0),
+            source_validations: AtomicU64::new(0),
+            payload_bytes_served: AtomicU64::new(0),
+        }
+    }
+
+    fn snapshot(&self) -> PlaybackSessionStats {
+        PlaybackSessionStats {
+            source_opens: self.source_opens.load(Ordering::Relaxed),
+            index_parses: self.index_parses.load(Ordering::Relaxed),
+            codec_session_creations: self.codec_session_creations.load(Ordering::Relaxed),
+            segment_requests: self.segment_requests.load(Ordering::Relaxed),
+            source_validations: self.source_validations.load(Ordering::Relaxed),
+            payload_bytes_served: self.payload_bytes_served.load(Ordering::Relaxed),
+        }
     }
 }
 
@@ -218,6 +288,17 @@ mod tests {
         assert_eq!(session.plan().packet_count, 2);
         assert_eq!(chunk.packet_count, 1);
         assert_eq!(payload, b"aaaa");
+        assert_eq!(
+            session.stats(),
+            PlaybackSessionStats {
+                source_opens: 1,
+                index_parses: 1,
+                codec_session_creations: 0,
+                segment_requests: 1,
+                source_validations: 1,
+                payload_bytes_served: 4,
+            }
+        );
     }
 
     #[test]
