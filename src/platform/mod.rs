@@ -451,17 +451,48 @@ fn planned_video_decoder_backend(
     codec: VideoCodec,
     decoder: &str,
 ) -> VideoDecoderBackend {
+    let available = video_decode_backend_available(kind, codec);
     VideoDecoderBackend {
         kind,
         codec,
         decoder: decoder.to_string(),
         hwaccel: Some(format!("{kind:?}").to_lowercase()),
         output_pixel_format: RawVideoPixelFormat::Bgra,
-        available: false,
-        unavailable_reason: Some(
-            "native video decode backend is planned but not executable in this build".to_string(),
-        ),
+        available,
+        unavailable_reason: (!available).then(|| video_decode_unavailable_reason(kind, codec)),
     }
+}
+
+fn video_decode_unavailable_reason(kind: HardwareKind, codec: VideoCodec) -> String {
+    if cfg!(target_os = "macos") && kind == HardwareKind::VideoToolbox {
+        format!("VideoToolbox hardware decode support was not reported for {codec:?}")
+    } else {
+        "native video decode backend is planned but not executable in this build".to_string()
+    }
+}
+
+fn video_decode_backend_available(kind: HardwareKind, codec: VideoCodec) -> bool {
+    if kind != HardwareKind::VideoToolbox {
+        return false;
+    }
+    video_toolbox_decode_supported(codec)
+}
+
+#[cfg(target_os = "macos")]
+fn video_toolbox_decode_supported(codec: VideoCodec) -> bool {
+    use core_media::format_description::{kCMVideoCodecType_H264, kCMVideoCodecType_HEVC};
+    use video_toolbox::decompression_session::VTDecompressionSession;
+
+    let codec_type = match codec {
+        VideoCodec::H264 => kCMVideoCodecType_H264,
+        VideoCodec::Hevc => kCMVideoCodecType_HEVC,
+    };
+    VTDecompressionSession::is_hardware_decode_supported(codec_type)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn video_toolbox_decode_supported(_codec: VideoCodec) -> bool {
+    false
 }
 
 fn default_cpu_profile() -> EncoderProfile {
@@ -779,21 +810,25 @@ mod tests {
                 backend.kind == HardwareKind::VideoToolbox
                     && backend.codec == VideoCodec::H264
                     && backend.decoder == "chroma-videotoolbox-h264-decoder"
+                    && backend.available == video_toolbox_decode_supported(VideoCodec::H264)
             }));
             assert!(plan.video_backends.iter().any(|backend| {
                 backend.kind == HardwareKind::VideoToolbox
                     && backend.codec == VideoCodec::Hevc
                     && backend.decoder == "chroma-videotoolbox-hevc-decoder"
+                    && backend.available == video_toolbox_decode_supported(VideoCodec::Hevc)
             }));
         }
-        assert!(plan.video_backends.iter().all(|backend| {
-            backend.output_pixel_format == RawVideoPixelFormat::Bgra
-                && !backend.available
-                && backend
-                    .unavailable_reason
-                    .as_deref()
-                    .is_some_and(|reason| reason.contains("planned"))
-        }));
+        assert!(
+            plan.video_backends
+                .iter()
+                .all(|backend| backend.output_pixel_format == RawVideoPixelFormat::Bgra)
+        );
+        assert!(
+            plan.video_backends
+                .iter()
+                .all(|backend| { backend.available == backend.unavailable_reason.is_none() })
+        );
     }
 
     #[test]

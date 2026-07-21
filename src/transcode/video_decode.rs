@@ -78,6 +78,26 @@ pub struct DecodedVideoOutput {
     pub frames: Vec<DecodedVideoFrame>,
 }
 
+/// Successful native video decoder session initialization.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoDecodeSessionInfo {
+    /// Source codec accepted by the backend.
+    pub codec: VideoCodec,
+    /// Backend-specific decoder name.
+    pub decoder: String,
+    /// Session width in pixels.
+    pub width: u32,
+    /// Session height in pixels.
+    pub height: u32,
+    /// Raw format requested for decoded frames.
+    pub output_format: RawVideoFormat,
+    /// Whether the platform reports hardware decode support for the codec.
+    pub hardware_supported: bool,
+    /// Whether the native decompression session was created.
+    pub session_created: bool,
+}
+
 /// Decoder pump action used by native video decoder implementations.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", tag = "kind")]
@@ -122,6 +142,51 @@ pub enum VideoDecodeError {
         /// Diagnostic reason.
         reason: String,
     },
+    /// Required codec-specific decoder configuration was not supplied.
+    #[error("missing video decoder configuration")]
+    MissingDecoderConfig,
+    /// Codec-specific decoder configuration could not be parsed.
+    #[error("invalid video decoder configuration: {reason}")]
+    InvalidDecoderConfig {
+        /// Diagnostic reason.
+        reason: String,
+    },
+    /// No native video decode backend is available on this platform.
+    #[error("native video decode backend is unavailable: {reason}")]
+    BackendUnavailable {
+        /// Diagnostic reason.
+        reason: String,
+    },
+    /// The native backend returned an error.
+    #[error("native video decode failed: {reason}")]
+    BackendFailed {
+        /// Diagnostic reason.
+        reason: String,
+    },
+}
+
+/// Creates a native VideoToolbox H.264 decode session from an AVC decoder config.
+pub fn probe_videotoolbox_h264_decoder_session(
+    format: RawVideoFormat,
+    decoder_config: &[u8],
+) -> Result<VideoDecodeSessionInfo, VideoDecodeError> {
+    validate_decoded_video_format(format)?;
+    if decoder_config.is_empty() {
+        return Err(VideoDecodeError::MissingDecoderConfig);
+    }
+    platform_probe_videotoolbox_h264_decoder_session(format, decoder_config)
+}
+
+/// Creates a native VideoToolbox HEVC decode session from an HEVC decoder config.
+pub fn probe_videotoolbox_hevc_decoder_session(
+    format: RawVideoFormat,
+    decoder_config: &[u8],
+) -> Result<VideoDecodeSessionInfo, VideoDecodeError> {
+    validate_decoded_video_format(format)?;
+    if decoder_config.is_empty() {
+        return Err(VideoDecodeError::MissingDecoderConfig);
+    }
+    platform_probe_videotoolbox_hevc_decoder_session(format, decoder_config)
 }
 
 /// Builds zero-copy compressed video packets from extracted chunk metadata.
@@ -201,6 +266,131 @@ pub fn validate_decoded_video_format(format: RawVideoFormat) -> Result<(), Video
         });
     }
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn platform_probe_videotoolbox_h264_decoder_session(
+    format: RawVideoFormat,
+    decoder_config: &[u8],
+) -> Result<VideoDecodeSessionInfo, VideoDecodeError> {
+    use core_media::format_description::{CMVideoFormatDescription, kCMVideoCodecType_H264};
+    use video_toolbox::decompression_session::VTDecompressionSession;
+
+    let config = crate::codec::h264::parse_avc_decoder_config(decoder_config).map_err(|error| {
+        VideoDecodeError::InvalidDecoderConfig {
+            reason: error.to_string(),
+        }
+    })?;
+    let parameter_sets = config
+        .sps
+        .iter()
+        .chain(config.pps.iter())
+        .map(Vec::as_slice)
+        .collect::<Vec<_>>();
+    if parameter_sets.is_empty() {
+        return Err(VideoDecodeError::InvalidDecoderConfig {
+            reason: "AVC decoder configuration does not contain SPS/PPS parameter sets".to_string(),
+        });
+    }
+
+    let description = CMVideoFormatDescription::from_h264_parameter_sets(
+        &parameter_sets,
+        config.nalu_length_size.into(),
+    )
+    .map_err(|status| VideoDecodeError::BackendFailed {
+        reason: format!("CMVideoFormatDescriptionCreateFromH264ParameterSets returned {status}"),
+    })?;
+    VTDecompressionSession::new(description, None, None).map_err(|status| {
+        VideoDecodeError::BackendFailed {
+            reason: format!("VTDecompressionSessionCreate(H.264) returned {status}"),
+        }
+    })?;
+
+    Ok(VideoDecodeSessionInfo {
+        codec: VideoCodec::H264,
+        decoder: "chroma-videotoolbox-h264-decoder".to_string(),
+        width: format.width,
+        height: format.height,
+        output_format: format,
+        hardware_supported: VTDecompressionSession::is_hardware_decode_supported(
+            kCMVideoCodecType_H264,
+        ),
+        session_created: true,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn platform_probe_videotoolbox_hevc_decoder_session(
+    format: RawVideoFormat,
+    decoder_config: &[u8],
+) -> Result<VideoDecodeSessionInfo, VideoDecodeError> {
+    use core_media::format_description::{CMVideoFormatDescription, kCMVideoCodecType_HEVC};
+    use video_toolbox::decompression_session::VTDecompressionSession;
+
+    let config =
+        crate::codec::hevc::parse_hevc_decoder_config(decoder_config).map_err(|error| {
+            VideoDecodeError::InvalidDecoderConfig {
+                reason: error.to_string(),
+            }
+        })?;
+    let parameter_sets = config
+        .arrays
+        .iter()
+        .filter(|array| matches!(array.nal_unit_type, 32..=34))
+        .flat_map(|array| array.units.iter().map(Vec::as_slice))
+        .collect::<Vec<_>>();
+    if parameter_sets.is_empty() {
+        return Err(VideoDecodeError::InvalidDecoderConfig {
+            reason: "HEVC decoder configuration does not contain VPS/SPS/PPS parameter sets"
+                .to_string(),
+        });
+    }
+
+    let description = CMVideoFormatDescription::from_hevc_parameter_sets(
+        &parameter_sets,
+        config.nalu_length_size.into(),
+        None,
+    )
+    .map_err(|status| VideoDecodeError::BackendFailed {
+        reason: format!("CMVideoFormatDescriptionCreateFromHEVCParameterSets returned {status}"),
+    })?;
+    VTDecompressionSession::new(description, None, None).map_err(|status| {
+        VideoDecodeError::BackendFailed {
+            reason: format!("VTDecompressionSessionCreate(HEVC) returned {status}"),
+        }
+    })?;
+
+    Ok(VideoDecodeSessionInfo {
+        codec: VideoCodec::Hevc,
+        decoder: "chroma-videotoolbox-hevc-decoder".to_string(),
+        width: format.width,
+        height: format.height,
+        output_format: format,
+        hardware_supported: VTDecompressionSession::is_hardware_decode_supported(
+            kCMVideoCodecType_HEVC,
+        ),
+        session_created: true,
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn platform_probe_videotoolbox_h264_decoder_session(
+    _format: RawVideoFormat,
+    _decoder_config: &[u8],
+) -> Result<VideoDecodeSessionInfo, VideoDecodeError> {
+    Err(VideoDecodeError::BackendUnavailable {
+        reason: "VideoToolbox H.264 decode is only available on macOS".to_string(),
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn platform_probe_videotoolbox_hevc_decoder_session(
+    _format: RawVideoFormat,
+    _decoder_config: &[u8],
+) -> Result<VideoDecodeSessionInfo, VideoDecodeError> {
+    Err(VideoDecodeError::BackendUnavailable {
+        reason: "VideoToolbox HEVC decode is only available on macOS".to_string(),
+    })
 }
 
 #[cfg(test)]
@@ -292,6 +482,32 @@ mod tests {
         };
 
         assert!(validate_decoded_video_format(format).is_ok());
+    }
+
+    #[test]
+    fn decoder_session_probe_rejects_missing_config_before_backend() {
+        let err = probe_videotoolbox_h264_decoder_session(valid_format(), &[]).unwrap_err();
+
+        assert_eq!(err, VideoDecodeError::MissingDecoderConfig);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn decoder_session_probe_rejects_truncated_config() {
+        let err = probe_videotoolbox_hevc_decoder_session(valid_format(), &[1, 2, 3])
+            .expect_err("truncated hvcC must not reach VideoToolbox");
+
+        assert!(matches!(err, VideoDecodeError::InvalidDecoderConfig { .. }));
+    }
+
+    fn valid_format() -> RawVideoFormat {
+        RawVideoFormat {
+            width: 128,
+            height: 72,
+            frame_rate_num: 24,
+            frame_rate_den: 1,
+            pixel_format: RawVideoPixelFormat::Bgra,
+        }
     }
 
     fn sample(index: u32, offset: u64, size: u32, pts_ms: u64, keyframe: bool) -> ChunkSample {

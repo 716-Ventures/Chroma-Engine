@@ -21,8 +21,10 @@ pub use execution_plan::{
 };
 pub use video_decode::{
     CompressedVideoPacket, DecodedVideoFrame, DecodedVideoOutput, DecodedVideoStream,
-    VideoDecodeError, VideoDecodeInput, VideoDecoderAction, VideoDecoderDrainState,
-    build_video_decode_input, decoder_actions_for_input, validate_decoded_video_format,
+    VideoDecodeError, VideoDecodeInput, VideoDecodeSessionInfo, VideoDecoderAction,
+    VideoDecoderDrainState, build_video_decode_input, decoder_actions_for_input,
+    probe_videotoolbox_h264_decoder_session, probe_videotoolbox_hevc_decoder_session,
+    validate_decoded_video_format,
 };
 pub use video_encode::{
     EncodedVideoFrame, EncodedVideoOutput, EncodedVideoStream, RawVideoFormat, RawVideoPixelFormat,
