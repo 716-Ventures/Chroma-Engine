@@ -108,3 +108,32 @@ jobs:
         run: cargo +nightly fuzz run subtitles -- -runs=1
       - name: Smoke fuzz fmp4
         run: cargo +nightly fuzz run fmp4 -- -runs=1
+
+  release-build:
+    name: Auditable release build / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
+        with:
+          toolchain: "1.97.1"
+      - name: Cache cargo
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: release-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+      - name: Install cargo-auditable
+        run: cargo install cargo-auditable --locked --version 0.7.5
+      - name: Build auditable binary
+        env:
+          RUSTFLAGS: -A linker-messages
+        run: cargo auditable build --locked --release --bin chroma-engine

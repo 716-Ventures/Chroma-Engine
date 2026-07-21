@@ -10,3 +10,4 @@
 - Added generated fMP4 media-fragment validation for sample counts, sync starts, decode timing, payload offsets, and payload sizes.
 - Added multi-platform Rust CI, dependency hygiene checks, cargo-deny scheduling, fuzz target smoke checks, and a private security policy.
 - Added structured `EngineError` envelopes with stable codes, operation context, retry advice, and Rust error chaining.
+- Added auditable release-build CI scaffolding for macOS, Linux, and Windows binaries.
