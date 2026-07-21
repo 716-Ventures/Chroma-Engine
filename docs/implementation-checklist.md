@@ -46,7 +46,7 @@
 - [x] Extract subtitles: text vs bitmap classification, language/title, default/forced disposition.
 - [x] Extract chapters.
 - [x] Extract duration.
-- [x] Use memory-mapped probing instead of whole-file reads.
+- [x] Snapshot source bytes behind `MediaSource` and validate source identity before segment reads. Safe owned snapshots replaced the earlier mmap plan to keep parser access bounded and replacement-aware.
 - [x] Define Chroma-native error taxonomy.
 
 ## Remux MP4
@@ -119,16 +119,16 @@
 - [x] macOS VideoToolbox H.264 encode. Native BGRA frames encode through VideoToolbox to length-prefixed AVC access units with avcC decoder config and stable frame timing.
 - [x] macOS VideoToolbox HEVC encode. Native BGRA frames encode through VideoToolbox to length-prefixed HEVC access units with hvcC decoder config and stable frame timing.
 - [x] AAC audio encode. macOS AudioToolbox backend encodes interleaved i16 PCM to AAC-LC, emits MPEG-4 AudioSpecificConfig, and returns sample-clocked `EncodedAudioFrame` payloads.
-- [x] AC-3/E-AC-3 bridge encode. Pure-Rust oxideav bridge encodes interleaved S16 PCM to AC-3/E-AC-3 syncframes with sample-clocked 1536-sample output packets.
+- [ ] AC-3/E-AC-3 bridge encode. The previous oxideav experiment was removed because it was not suitable for real playback latency; this remains a native backend gap.
 - [x] CPU fallback decision.
-- [x] Linux VAAPI/NVENC/QSV path.
-- [x] Windows NVENC/QSV/AMF path.
+- [ ] Linux executable VAAPI/NVENC/QSV path. Capability models exist, but no Linux decode/encode backend is executable or verified yet.
+- [ ] Windows executable NVENC/QSV/AMF/D3D path. Capability models exist, but no Windows decode/encode backend is executable or verified yet.
 - [x] Warm encoder session initialization. AAC AudioToolbox, VideoToolbox H.264/HEVC, and AC-3/E-AC-3 bridge backends run tiny real encodes before playback so startup failures surface before the first segment request.
 - [x] Chroma-native HLS transcode execution planning. `transcode-plan` now emits selected tracks, output codecs, stage readiness, and missing native capabilities so hosts can ask the engine what it can run without inheriting FFmpeg command/API shape.
 - [x] Native video decode frame/pump contract. Chroma Engine now has zero-copy compressed packet input, decoded BGRA frame output, and a bounded send/receive/drain action sequence for future HEVC/H.264/AV1 decoder backends.
 - [x] Native video decoder backend matrix. `decoder-probe` now reports H.264/HEVC decode backends and BGRA output format separately from encoder capabilities, with macOS VideoToolbox availability backed by native hardware decode support checks.
 - [x] Native VideoToolbox decoder session probes. H.264 and HEVC probes parse avcC/hvcC decoder config into parameter sets, create CoreMedia format descriptions, and open real VTDecompressionSession instances before the engine trusts a source for native decode.
-- [x] Cross-platform hardware decode contract. Decoder probes now model macOS VideoToolbox, Linux VAAPI/NVDEC/QSV, and Windows D3D11VA/D3D12VA/DXVA2/QSV/AMF/NVDEC paths with native surface formats and zero-copy capability flags instead of flattening every platform to BGRA-only placeholders.
+- [x] Cross-platform hardware decode contract. Decoder probes now model macOS VideoToolbox, Linux VAAPI/NVDEC/QSV, and Windows D3D11VA/D3D12VA/DXVA2/QSV/AMF/NVDEC paths with explicit `designed`, `detected`, `available`, and `verified` capability states instead of marking modeled placeholders as executable.
 - [x] macOS VideoToolbox BGRA decode primitive. Chroma Engine can now accept H.264/HEVC compressed packet batches plus avcC/hvcC config and return owned decoded BGRA frames through a Rust-first API.
 - [ ] Native compressed video decode backend for HEVC/H.264 sources that need target-native HLS output. Preserve the FFmpeg send/receive/drain lesson as a bounded state machine, but expose only Chroma Engine stage events and frames.
 - [ ] Native DTS/TrueHD decode bridge for MKV audio tracks that have no AAC/AC-3/E-AC-3 alternate. Follow the FFmpeg send/receive/drain state-machine shape and AetherEngine's copy-first/bridge-only policy, but keep the API Chroma-native.
