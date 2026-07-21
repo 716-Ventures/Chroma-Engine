@@ -4,25 +4,107 @@ on:
   pull_request:
   push:
     branches: [main]
+  schedule:
+    - cron: "17 9 * * 1"
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -Dwarnings
 
 jobs:
-  check:
-    runs-on: macos-latest
+  test:
+    name: ${{ matrix.os }} / Rust ${{ matrix.toolchain }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+        toolchain: ["1.90.0", "1.97.1"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
         with:
-          toolchain: 1.97.1
+          toolchain: ${{ matrix.toolchain }}
           components: clippy,rustfmt
+      - name: Cache cargo
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ matrix.toolchain }}-${{ hashFiles('**/Cargo.lock') }}
       - name: Format
+        if: matrix.os == 'ubuntu-latest' && matrix.toolchain == '1.97.1'
         run: cargo fmt --check
+      - name: Check all features
+        run: cargo check --locked --all-targets --all-features
       - name: Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - name: Test
-        run: cargo test --all-features
+        run: cargo test --locked --all-targets --all-features
+      - name: Docs
+        if: matrix.toolchain == '1.97.1'
+        run: cargo doc --locked --no-deps --all-features
+
+  security:
+    name: Security and dependency hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
+        with:
+          toolchain: "1.97.1"
+      - name: Cache cargo
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: security-${{ hashFiles('**/Cargo.lock') }}
       - name: Install cargo-deny
         run: cargo install cargo-deny --locked --version 0.20.2
       - name: Dependency audit
         run: cargo deny check
-      - name: Docs
-        run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
+      - name: Install cargo-machete
+        run: cargo install cargo-machete --locked --version 0.9.1
+      - name: Unused dependency check
+        run: cargo machete
+      - name: Future incompatibility report
+        run: cargo check --locked --future-incompat-report
+
+  fuzz-smoke:
+    name: Fuzz target smoke
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Rust nightly
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
+        with:
+          toolchain: nightly
+      - name: Cache cargo
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: fuzz-${{ hashFiles('**/Cargo.lock', 'fuzz/Cargo.toml') }}
+      - name: Install cargo-fuzz
+        run: cargo +nightly install cargo-fuzz --locked
+      - name: Compile fuzz targets
+        run: cargo +nightly check --manifest-path fuzz/Cargo.toml
+      - name: Smoke fuzz containers
+        run: cargo +nightly fuzz run containers -- -runs=1
+      - name: Smoke fuzz codecs
+        run: cargo +nightly fuzz run codecs -- -runs=1
+      - name: Smoke fuzz subtitles
+        run: cargo +nightly fuzz run subtitles -- -runs=1
+      - name: Smoke fuzz fmp4
+        run: cargo +nightly fuzz run fmp4 -- -runs=1

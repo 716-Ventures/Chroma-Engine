@@ -14,6 +14,8 @@ pub(crate) mod container;
 pub(crate) mod engine;
 pub(crate) mod error;
 pub(crate) mod fmp4;
+#[cfg(feature = "fuzzing")]
+pub mod fuzzing;
 pub(crate) mod hls;
 pub(crate) mod output;
 pub(crate) mod packet;

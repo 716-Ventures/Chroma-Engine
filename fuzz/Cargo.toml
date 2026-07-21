@@ -1,0 +1,40 @@
+[package]
+name = "chroma-engine-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+chroma-engine = { path = "..", features = ["fuzzing"] }
+libfuzzer-sys = "0.4"
+
+[[bin]]
+name = "containers"
+path = "fuzz_targets/containers.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "codecs"
+path = "fuzz_targets/codecs.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "subtitles"
+path = "fuzz_targets/subtitles.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fmp4"
+path = "fuzz_targets/fmp4.rs"
+test = false
+doc = false
+bench = false
