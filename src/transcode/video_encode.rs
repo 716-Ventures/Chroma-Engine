@@ -383,8 +383,10 @@ fn platform_encode_h264_videotoolbox_bgra_frame(
     let image_buffer = image_buffer_from_pixel_buffer(&pixel_buffer);
     let frames = Arc::new(Mutex::new(Vec::<EncodedVideoFrame>::new()));
     let decoder_config = Arc::new(Mutex::new(None::<Vec<u8>>));
+    let callback_error = Arc::new(Mutex::new(None::<VideoEncodeError>));
     let frames_out = Arc::clone(&frames);
     let config_out = Arc::clone(&decoder_config);
+    let error_out = Arc::clone(&callback_error);
     let time_scale = TimeScale {
         units_per_second: format.frame_rate_num,
     };
@@ -401,10 +403,32 @@ fn platform_encode_h264_videotoolbox_bgra_frame(
             CMTime::make(format.frame_rate_den as i64, format.frame_rate_num as i32),
             None,
             move |status, _flags, sample_buffer_ref| {
-                if status != 0 || sample_buffer_ref.is_null() {
+                if status != 0 {
+                    set_encode_callback_error(
+                        &error_out,
+                        VideoEncodeError::BackendFailed {
+                            reason: format!("VideoToolbox H.264 encode callback returned {status}"),
+                        },
+                    );
+                    return;
+                }
+                if sample_buffer_ref.is_null() {
+                    set_encode_callback_error(
+                        &error_out,
+                        VideoEncodeError::BackendFailed {
+                            reason: "VideoToolbox H.264 encode callback returned no sample buffer"
+                                .to_string(),
+                        },
+                    );
                     return;
                 }
                 let Some((payload, config)) = copy_h264_sample(sample_buffer_ref) else {
+                    set_encode_callback_error(
+                        &error_out,
+                        VideoEncodeError::BackendFailed {
+                            reason: "VideoToolbox H.264 sample buffer copy failed".to_string(),
+                        },
+                    );
                     return;
                 };
                 if let Ok(mut guard) = config_out.lock()
@@ -412,8 +436,8 @@ fn platform_encode_h264_videotoolbox_bgra_frame(
                 {
                     *guard = config;
                 }
-                if let Ok(mut guard) = frames_out.lock() {
-                    guard.push(EncodedVideoFrame {
+                match frames_out.lock() {
+                    Ok(mut guard) => guard.push(EncodedVideoFrame {
                         pts: TimePoint {
                             units: 0,
                             scale: time_scale,
@@ -425,7 +449,13 @@ fn platform_encode_h264_videotoolbox_bgra_frame(
                         duration,
                         payload,
                         keyframe: true,
-                    });
+                    }),
+                    Err(_) => set_encode_callback_error(
+                        &error_out,
+                        VideoEncodeError::BackendFailed {
+                            reason: "VideoToolbox H.264 frame output lock was poisoned".to_string(),
+                        },
+                    ),
                 }
             },
         )
@@ -438,6 +468,9 @@ fn platform_encode_h264_videotoolbox_bgra_frame(
             reason: format!("VTCompressionSessionCompleteFrames(H.264) returned {status}"),
         })?;
     session.invalidate();
+    if let Some(error) = take_encode_callback_error(&callback_error)? {
+        return Err(error);
+    }
 
     let frames = frames
         .lock()
@@ -522,11 +555,13 @@ fn platform_encode_h264_videotoolbox_bgra_frames(
 
     let frames = Arc::new(Mutex::new(Vec::<EncodedVideoFrame>::new()));
     let decoder_config = Arc::new(Mutex::new(None::<Vec<u8>>));
+    let callback_error = Arc::new(Mutex::new(None::<VideoEncodeError>));
     for (index, input) in input_frames.iter().enumerate() {
         let pixel_buffer = bgra_pixel_buffer(format, input.bytes)?;
         let image_buffer = image_buffer_from_pixel_buffer(&pixel_buffer);
         let frames_out = Arc::clone(&frames);
         let config_out = Arc::clone(&decoder_config);
+        let error_out = Arc::clone(&callback_error);
         let pts = input.pts;
         let dts = input.dts;
         let duration = input.duration;
@@ -546,10 +581,36 @@ fn platform_encode_h264_videotoolbox_bgra_frames(
                 ),
                 frame_properties.as_ref(),
                 move |status, _flags, sample_buffer_ref| {
-                    if status != 0 || sample_buffer_ref.is_null() {
+                    if status != 0 {
+                        set_encode_callback_error(
+                            &error_out,
+                            VideoEncodeError::BackendFailed {
+                                reason: format!(
+                                    "VideoToolbox H.264 batch encode callback returned {status}"
+                                ),
+                            },
+                        );
+                        return;
+                    }
+                    if sample_buffer_ref.is_null() {
+                        set_encode_callback_error(
+                            &error_out,
+                            VideoEncodeError::BackendFailed {
+                                reason:
+                                    "VideoToolbox H.264 batch encode callback returned no sample buffer"
+                                        .to_string(),
+                            },
+                        );
                         return;
                     }
                     let Some((payload, config)) = copy_h264_sample(sample_buffer_ref) else {
+                        set_encode_callback_error(
+                            &error_out,
+                            VideoEncodeError::BackendFailed {
+                                reason: "VideoToolbox H.264 batch sample buffer copy failed"
+                                    .to_string(),
+                            },
+                        );
                         return;
                     };
                     if let Ok(mut guard) = config_out.lock()
@@ -557,14 +618,22 @@ fn platform_encode_h264_videotoolbox_bgra_frames(
                     {
                         *guard = config;
                     }
-                    if let Ok(mut guard) = frames_out.lock() {
-                        guard.push(EncodedVideoFrame {
-                            pts,
-                            dts,
-                            duration,
-                            payload,
-                            keyframe,
-                        });
+                    match frames_out.lock() {
+                        Ok(mut guard) => guard.push(EncodedVideoFrame {
+                                pts,
+                                dts,
+                                duration,
+                                payload,
+                                keyframe,
+                            }),
+                        Err(_) => set_encode_callback_error(
+                            &error_out,
+                            VideoEncodeError::BackendFailed {
+                                reason:
+                                    "VideoToolbox H.264 batch frame output lock was poisoned"
+                                        .to_string(),
+                            },
+                        ),
                     }
                 },
             )
@@ -581,6 +650,9 @@ fn platform_encode_h264_videotoolbox_bgra_frames(
             reason: format!("VTCompressionSessionCompleteFrames(H.264 batch) returned {status}"),
         })?;
     session.invalidate();
+    if let Some(error) = take_encode_callback_error(&callback_error)? {
+        return Err(error);
+    }
 
     let mut frames = frames
         .lock()
@@ -652,6 +724,30 @@ fn ignore_unsupported_vt_property(error: VideoEncodeError) -> Result<(), VideoEn
 }
 
 #[cfg(target_os = "macos")]
+fn set_encode_callback_error(
+    error_slot: &std::sync::Arc<std::sync::Mutex<Option<VideoEncodeError>>>,
+    error: VideoEncodeError,
+) {
+    if let Ok(mut slot) = error_slot.lock()
+        && slot.is_none()
+    {
+        *slot = Some(error);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn take_encode_callback_error(
+    error_slot: &std::sync::Arc<std::sync::Mutex<Option<VideoEncodeError>>>,
+) -> Result<Option<VideoEncodeError>, VideoEncodeError> {
+    error_slot
+        .lock()
+        .map_err(|_| VideoEncodeError::BackendFailed {
+            reason: "VideoToolbox encode callback error lock was poisoned".to_string(),
+        })
+        .map(|mut slot| slot.take())
+}
+
+#[cfg(target_os = "macos")]
 fn force_keyframe_dictionary() -> core_foundation::dictionary::CFDictionary<
     core_foundation::string::CFString,
     core_foundation::base::CFType,
@@ -698,8 +794,10 @@ fn platform_encode_hevc_videotoolbox_bgra_frame(
     let image_buffer = image_buffer_from_pixel_buffer(&pixel_buffer);
     let frames = Arc::new(Mutex::new(Vec::<EncodedVideoFrame>::new()));
     let decoder_config = Arc::new(Mutex::new(None::<Vec<u8>>));
+    let callback_error = Arc::new(Mutex::new(None::<VideoEncodeError>));
     let frames_out = Arc::clone(&frames);
     let config_out = Arc::clone(&decoder_config);
+    let error_out = Arc::clone(&callback_error);
     let time_scale = TimeScale {
         units_per_second: format.frame_rate_num,
     };
@@ -715,10 +813,32 @@ fn platform_encode_hevc_videotoolbox_bgra_frame(
             CMTime::make(format.frame_rate_den as i64, format.frame_rate_num as i32),
             None,
             move |status, _flags, sample_buffer_ref| {
-                if status != 0 || sample_buffer_ref.is_null() {
+                if status != 0 {
+                    set_encode_callback_error(
+                        &error_out,
+                        VideoEncodeError::BackendFailed {
+                            reason: format!("VideoToolbox HEVC encode callback returned {status}"),
+                        },
+                    );
+                    return;
+                }
+                if sample_buffer_ref.is_null() {
+                    set_encode_callback_error(
+                        &error_out,
+                        VideoEncodeError::BackendFailed {
+                            reason: "VideoToolbox HEVC encode callback returned no sample buffer"
+                                .to_string(),
+                        },
+                    );
                     return;
                 }
                 let Some((payload, config)) = copy_hevc_sample(sample_buffer_ref) else {
+                    set_encode_callback_error(
+                        &error_out,
+                        VideoEncodeError::BackendFailed {
+                            reason: "VideoToolbox HEVC sample buffer copy failed".to_string(),
+                        },
+                    );
                     return;
                 };
                 if let Ok(mut guard) = config_out.lock()
@@ -726,8 +846,8 @@ fn platform_encode_hevc_videotoolbox_bgra_frame(
                 {
                     *guard = config;
                 }
-                if let Ok(mut guard) = frames_out.lock() {
-                    guard.push(EncodedVideoFrame {
+                match frames_out.lock() {
+                    Ok(mut guard) => guard.push(EncodedVideoFrame {
                         pts: TimePoint {
                             units: 0,
                             scale: time_scale,
@@ -739,7 +859,13 @@ fn platform_encode_hevc_videotoolbox_bgra_frame(
                         duration,
                         payload,
                         keyframe: true,
-                    });
+                    }),
+                    Err(_) => set_encode_callback_error(
+                        &error_out,
+                        VideoEncodeError::BackendFailed {
+                            reason: "VideoToolbox HEVC frame output lock was poisoned".to_string(),
+                        },
+                    ),
                 }
             },
         )
@@ -752,6 +878,9 @@ fn platform_encode_hevc_videotoolbox_bgra_frame(
             reason: format!("VTCompressionSessionCompleteFrames(HEVC) returned {status}"),
         })?;
     session.invalidate();
+    if let Some(error) = take_encode_callback_error(&callback_error)? {
+        return Err(error);
+    }
 
     let frames = frames
         .lock()

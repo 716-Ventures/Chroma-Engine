@@ -393,16 +393,18 @@ fn platform_decode_videotoolbox_bgra_frames(
             }
         })?;
 
-    let timing_by_pts = input
-        .packets
-        .iter()
-        .map(|packet| {
-            (
-                packet.pts.as_millis(),
-                (packet.dts, packet.duration, packet.keyframe),
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
+    let timing_by_pts = Arc::new(
+        input
+            .packets
+            .iter()
+            .map(|packet| {
+                (
+                    DecodeTimestampKey::from(packet.pts),
+                    (packet.dts, packet.duration, packet.keyframe),
+                )
+            })
+            .collect::<BTreeMap<_, _>>(),
+    );
     let frames = Arc::new(Mutex::new(Vec::<DecodedVideoFrame>::new()));
     let callback_error = Arc::new(Mutex::new(None::<VideoDecodeError>));
     let callback_format = output_format;
@@ -427,7 +429,7 @@ fn platform_decode_videotoolbox_bgra_frames(
         })?;
         let out_frames = Arc::clone(&frames);
         let out_error = Arc::clone(&callback_error);
-        let timing_by_pts = timing_by_pts.clone();
+        let timing_by_pts = Arc::clone(&timing_by_pts);
         let flags = VTDecodeFrameFlags::Frame_EnableAsynchronousDecompression
             | VTDecodeFrameFlags::Frame_EnableTemporalProcessing;
 
@@ -455,31 +457,46 @@ fn platform_decode_videotoolbox_bgra_frames(
                         );
                         return;
                     };
-                    let pts_point =
-                        time_point_from_cm_time(pts).unwrap_or_else(|_| TimePoint::millis(0));
-                    let duration_delta =
-                        time_delta_from_cm_time(duration).unwrap_or_else(|_| TimeDelta::millis(0));
+                    let pts_point = match time_point_from_cm_time(pts) {
+                        Ok(pts) => pts,
+                        Err(error) => {
+                            set_callback_error(&out_error, error);
+                            return;
+                        }
+                    };
+                    let duration_delta = match time_delta_from_cm_time(duration) {
+                        Ok(duration) => duration,
+                        Err(error) => {
+                            set_callback_error(&out_error, error);
+                            return;
+                        }
+                    };
                     let timing = timing_by_pts
-                        .get(&pts_point.as_millis())
+                        .get(&DecodeTimestampKey::from(pts_point))
                         .copied()
                         .unwrap_or((pts_point, duration_delta, false));
                     match copy_bgra_pixel_buffer(&pixel_buffer, callback_format) {
-                        Ok(pixels) => {
-                            if let Ok(mut frames) = out_frames.lock() {
-                                frames.push(DecodedVideoFrame {
-                                    pts: pts_point,
-                                    dts: timing.0,
-                                    duration: if duration_delta.units == 0 {
-                                        timing.1
-                                    } else {
-                                        duration_delta
-                                    },
-                                    format: callback_format,
-                                    pixels,
-                                    keyframe: timing.2,
-                                });
-                            }
-                        }
+                        Ok(pixels) => match out_frames.lock() {
+                            Ok(mut frames) => frames.push(DecodedVideoFrame {
+                                pts: pts_point,
+                                dts: timing.0,
+                                duration: if duration_delta.units == 0 {
+                                    timing.1
+                                } else {
+                                    duration_delta
+                                },
+                                format: callback_format,
+                                pixels,
+                                keyframe: timing.2,
+                            }),
+                            Err(_) => set_callback_error(
+                                &out_error,
+                                VideoDecodeError::BackendFailed {
+                                    reason: "VideoToolbox decoded frame output lock was poisoned"
+                                        .to_string(),
+                                },
+                            ),
+                        },
                         Err(error) => set_callback_error(&out_error, error),
                     }
                 },
@@ -487,22 +504,6 @@ fn platform_decode_videotoolbox_bgra_frames(
             .map_err(|status| VideoDecodeError::BackendFailed {
                 reason: format!("VTDecompressionSessionDecodeFrame returned {status}"),
             })?;
-        session.wait_for_asynchronous_frames().map_err(|status| {
-            VideoDecodeError::BackendFailed {
-                reason: format!(
-                    "VTDecompressionSessionWaitForAsynchronousFrames returned {status}"
-                ),
-            }
-        })?;
-        if let Some(error) = callback_error
-            .lock()
-            .map_err(|_| VideoDecodeError::BackendFailed {
-                reason: "VideoToolbox decode callback error lock was poisoned".to_string(),
-            })?
-            .take()
-        {
-            return Err(error);
-        }
     }
 
     if input.end_of_stream {
@@ -511,13 +512,14 @@ fn platform_decode_videotoolbox_bgra_frames(
             .map_err(|status| VideoDecodeError::BackendFailed {
                 reason: format!("VTDecompressionSessionFinishDelayedFrames returned {status}"),
             })?;
-        session.wait_for_asynchronous_frames().map_err(|status| {
-            VideoDecodeError::BackendFailed {
-                reason: format!(
-                    "VTDecompressionSessionWaitForAsynchronousFrames returned {status}"
-                ),
-            }
+    }
+    session
+        .wait_for_asynchronous_frames()
+        .map_err(|status| VideoDecodeError::BackendFailed {
+            reason: format!("VTDecompressionSessionWaitForAsynchronousFrames returned {status}"),
         })?;
+    if let Some(error) = take_decode_callback_error(&callback_error)? {
+        return Err(error);
     }
 
     let mut frames = Arc::try_unwrap(frames)
@@ -544,6 +546,23 @@ fn platform_decode_videotoolbox_bgra_frames(
 }
 
 #[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct DecodeTimestampKey {
+    units: u64,
+    units_per_second: u32,
+}
+
+#[cfg(target_os = "macos")]
+impl From<TimePoint> for DecodeTimestampKey {
+    fn from(point: TimePoint) -> Self {
+        Self {
+            units: point.units,
+            units_per_second: point.scale.units_per_second,
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
 fn set_callback_error(
     error_slot: &std::sync::Arc<std::sync::Mutex<Option<VideoDecodeError>>>,
     error: VideoDecodeError,
@@ -553,6 +572,18 @@ fn set_callback_error(
     {
         *slot = Some(error);
     }
+}
+
+#[cfg(target_os = "macos")]
+fn take_decode_callback_error(
+    error_slot: &std::sync::Arc<std::sync::Mutex<Option<VideoDecodeError>>>,
+) -> Result<Option<VideoDecodeError>, VideoDecodeError> {
+    error_slot
+        .lock()
+        .map_err(|_| VideoDecodeError::BackendFailed {
+            reason: "VideoToolbox decode callback error lock was poisoned".to_string(),
+        })
+        .map(|mut slot| slot.take())
 }
 
 #[cfg(target_os = "macos")]
