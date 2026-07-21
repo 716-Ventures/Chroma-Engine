@@ -269,7 +269,7 @@ pub fn plan_hls_transcode(
             TranscodeOutputAudio {
                 codec: target_codec,
                 packet_copy: false,
-                channels: audio_channels(track).min(6),
+                channels: audio_transcode_channels(track, target_codec),
                 sample_rate: audio_sample_rate(track),
                 bitrate_bps: audio_bitrate_bps(track, false),
             }
@@ -386,13 +386,17 @@ fn audio_codec_for_family(family: CodecFamily) -> Option<AudioCodec> {
     }
 }
 
-fn audio_transcode_codec(target: PlaybackTarget, family: CodecFamily) -> AudioCodec {
+fn audio_transcode_codec(target: PlaybackTarget, _family: CodecFamily) -> AudioCodec {
     match target {
         PlaybackTarget::Browser => AudioCodec::Aac,
-        PlaybackTarget::AppleNative | PlaybackTarget::NativeChroma => match family {
-            CodecFamily::Dts | CodecFamily::TrueHd | CodecFamily::Flac => AudioCodec::Eac3,
-            _ => AudioCodec::Aac,
-        },
+        PlaybackTarget::AppleNative | PlaybackTarget::NativeChroma => AudioCodec::Aac,
+    }
+}
+
+fn audio_transcode_channels(track: &MediaTrack, codec: AudioCodec) -> u32 {
+    match codec {
+        AudioCodec::Aac => audio_channels(track).min(2),
+        AudioCodec::Ac3 | AudioCodec::Eac3 => audio_channels(track).min(6),
     }
 }
 
@@ -598,7 +602,7 @@ mod tests {
     }
 
     #[test]
-    fn dts_audio_routes_to_eac3_bridge_with_native_core_decoder() {
+    fn dts_audio_routes_to_aac_bridge_with_native_core_decoder() {
         let probe = probe_with_tracks(vec![
             video_track("v0", CodecFamily::H264, 1_920, 1_080, 8_000_000, None),
             audio_track("a0", CodecFamily::Dts, true, 8, 48_000, Some(1_536_000)),
@@ -608,8 +612,8 @@ mod tests {
 
         assert!(plan.engine_executable);
         let audio = plan.output.audio.as_ref().unwrap();
-        assert_eq!(audio.codec, AudioCodec::Eac3);
-        assert_eq!(audio.channels, 6);
+        assert_eq!(audio.codec, AudioCodec::Aac);
+        assert_eq!(audio.channels, 2);
         assert!(plan.missing_capabilities.is_empty());
         assert!(plan.stages.iter().any(|stage| {
             stage.kind == TranscodeStageKind::AudioDecode
@@ -646,7 +650,7 @@ mod tests {
         );
 
         assert_eq!(plan.selected_audio_track_id.as_deref(), Some("a0"));
-        assert_eq!(plan.output.audio.as_ref().unwrap().codec, AudioCodec::Eac3);
+        assert_eq!(plan.output.audio.as_ref().unwrap().codec, AudioCodec::Aac);
         assert!(plan.engine_executable);
     }
 

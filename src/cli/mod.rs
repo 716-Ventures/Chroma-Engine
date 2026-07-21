@@ -23,8 +23,8 @@ use crate::source::MappedMediaFile;
 use crate::transcode::{
     AudioDecodeCodec, HlsTranscodeRequest, NativeFmp4TranscodeOptions, RawVideoFormat,
     RawVideoPixelFormat, VideoCodec, build_audio_decode_input, build_video_decode_input,
-    decode_dts_core_to_interleaved_i16, decode_videotoolbox_bgra_frames, eac3_bridge_channel_count,
-    encode_eac3_from_interleaved_i16, normalize_interleaved_channels, plan_hls_transcode,
+    decode_dts_core_to_interleaved_i16, decode_videotoolbox_bgra_frames,
+    encode_aac_from_interleaved_i16, normalize_interleaved_channels, plan_hls_transcode,
     probe_dts_audio_bridge, write_native_fmp4_transcode_init, write_native_fmp4_transcode_segment,
     write_native_fmp4_transcode_start,
 };
@@ -1134,7 +1134,7 @@ fn bridge_audio_chunk(
         .iter()
         .flat_map(|frame| frame.pcm.iter().copied())
         .collect::<Vec<_>>();
-    let bridge_channels = eac3_bridge_channel_count(decoded.stream.format.channels);
+    let bridge_channels = decoded.stream.format.channels.min(2);
     let bridge_pcm = normalize_interleaved_channels(
         &decoded_pcm,
         decoded.stream.format.channels,
@@ -1144,7 +1144,7 @@ fn bridge_audio_chunk(
         sample_rate: decoded.stream.format.sample_rate,
         channels: bridge_channels,
     };
-    let encoded = encode_eac3_from_interleaved_i16(bridge_format, &bridge_pcm, bitrate)?;
+    let encoded = encode_aac_from_interleaved_i16(bridge_format, &bridge_pcm, bitrate)?;
     let decoded_samples = decoded
         .frames
         .iter()
@@ -1161,7 +1161,7 @@ fn bridge_audio_chunk(
         chunk_index: manifest.chunk.index,
         source_codec: decoded.stream.source_codec,
         decoder: decoded.stream.decoder,
-        encoder: "oxideav-eac3".to_string(),
+        encoder: "chroma-audiotoolbox-aac".to_string(),
         packet_count: decode_input.packets.len(),
         decoded_pcm_frame_count: decoded.frames.len(),
         encoded_frame_count: encoded.frames.len(),

@@ -1,6 +1,6 @@
 use anyhow::{Result, bail};
 
-use crate::packet::PacketRef;
+use crate::packet::{ChunkSample, PacketRef};
 use crate::transcode::{EncodedAudioFrame, EncodedVideoFrame};
 
 const MOVIE_TIMESCALE: u32 = 1_000;
@@ -305,6 +305,69 @@ pub fn fragment_track_from_encoded_video_frames(
         track_id,
         base_decode_time: first.dts.units,
         samples,
+        payload,
+    })
+}
+
+/// Builds one fMP4 fragment track from extracted packet-copy chunk samples.
+pub fn fragment_track_from_chunk_samples(
+    track_id: u32,
+    samples: &[ChunkSample],
+    payload: Vec<u8>,
+    timescale: u32,
+) -> Result<Fmp4FragmentTrack> {
+    let first = samples
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("fMP4 packet-copy fragment requires at least one sample"))?;
+    let mut out_samples = Vec::with_capacity(samples.len());
+    let mut expected_offset = 0_u64;
+    for sample in samples {
+        if sample.payload_offset != expected_offset {
+            bail!("packet-copy samples must be contiguous inside one fMP4 fragment");
+        }
+        let duration = rescale_time(
+            sample.duration.units,
+            sample.duration.scale.units_per_second,
+            timescale,
+        )
+        .max(1)
+        .min(u64::from(u32::MAX)) as u32;
+        let pts = rescale_time(
+            sample.pts.units,
+            sample.pts.scale.units_per_second,
+            timescale,
+        );
+        let dts = rescale_time(
+            sample.dts.units,
+            sample.dts.scale.units_per_second,
+            timescale,
+        );
+        out_samples.push(Fmp4Sample {
+            duration,
+            size: sample.byte_count,
+            flags: if sample.keyframe {
+                0x0200_0000
+            } else {
+                0x0101_0000
+            },
+            composition_time_offset: (pts as i128 - dts as i128)
+                .clamp(i128::from(i32::MIN), i128::from(i32::MAX))
+                as i32,
+        });
+        expected_offset = expected_offset.saturating_add(u64::from(sample.byte_count));
+    }
+    if expected_offset != payload.len() as u64 {
+        bail!("packet-copy sample bytes do not match fMP4 fragment payload bytes");
+    }
+
+    Ok(Fmp4FragmentTrack {
+        track_id,
+        base_decode_time: rescale_time(
+            first.dts.units,
+            first.dts.scale.units_per_second,
+            timescale,
+        ),
+        samples: out_samples,
         payload,
     })
 }
@@ -1238,6 +1301,40 @@ mod tests {
         assert_eq!(track.track_id, 1);
         assert_eq!(track.base_decode_time, 90_000);
         assert_eq!(track.payload, b"idrp");
+        assert_eq!(track.samples[0].flags, 0x0200_0000);
+        assert_eq!(track.samples[1].flags, 0x0101_0000);
+    }
+
+    #[test]
+    fn builds_fragment_track_from_packet_copy_chunk_samples() {
+        let samples = vec![
+            ChunkSample {
+                index: 0,
+                payload_offset: 0,
+                byte_count: 3,
+                pts: TimePoint::millis(40),
+                dts: TimePoint::millis(0),
+                duration: TimeDelta::millis(40),
+                keyframe: true,
+            },
+            ChunkSample {
+                index: 1,
+                payload_offset: 3,
+                byte_count: 2,
+                pts: TimePoint::millis(80),
+                dts: TimePoint::millis(40),
+                duration: TimeDelta::millis(40),
+                keyframe: false,
+            },
+        ];
+
+        let track = fragment_track_from_chunk_samples(1, &samples, b"aaabb".to_vec(), 1_000)
+            .expect("packet-copy fragment track");
+
+        assert_eq!(track.track_id, 1);
+        assert_eq!(track.base_decode_time, 0);
+        assert_eq!(track.payload, b"aaabb");
+        assert_eq!(track.samples[0].composition_time_offset, 40);
         assert_eq!(track.samples[0].flags, 0x0200_0000);
         assert_eq!(track.samples[1].flags, 0x0101_0000);
     }

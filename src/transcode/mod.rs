@@ -20,7 +20,6 @@ pub use audio_decode::{
 };
 pub use audio_encode::{
     AudioEncodeError, EncodedAudioOutput, PcmAudioFormat, encode_aac_from_interleaved_i16,
-    encode_ac3_from_interleaved_i16, encode_eac3_from_interleaved_i16,
 };
 pub use execution_plan::{
     HlsTranscodeRequest, TranscodeExecutionPlan, TranscodeOutputAudio, TranscodeOutputPlan,

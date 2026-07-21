@@ -198,7 +198,6 @@ dependencies = [
  "criterion",
  "insta",
  "memmap2",
- "oxideav-ac3",
  "oxideav-core",
  "oxideav-dts",
  "proptest",
@@ -718,15 +717,6 @@ name = "oorandom"
 version = "11.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
-
-[[package]]
-name = "oxideav-ac3"
-version = "0.0.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4c60744c9688507efb6849b1bff197fb17e742b56f8a7f914129464bc86197ad"
-dependencies = [
- "oxideav-core",
-]
 
 [[package]]
 name = "oxideav-core"
