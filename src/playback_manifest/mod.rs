@@ -19,6 +19,7 @@ pub struct NativePlaybackManifest {
     /// Manifest schema version.
     pub schema_version: u32,
     /// Source path represented by the manifest.
+    #[serde(default)]
     pub source_path: String,
     /// Source duration in milliseconds when known.
     pub duration_ms: Option<u64>,

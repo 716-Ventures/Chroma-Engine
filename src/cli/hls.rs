@@ -1,12 +1,19 @@
-use std::path::PathBuf;
+use std::{
+    fs::{create_dir_all, read_to_string, write},
+    path::PathBuf,
+};
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use serde::Serialize;
 
-use crate::hls::{
-    HlsOptions, HlsSegmentInfo, HlsVodPlaylistPlan, write_hls_fmp4_init, write_hls_fmp4_segment,
-    write_hls_fmp4_segments, write_hls_fmp4_vod, write_hls_segment, write_hls_segments,
-    write_hls_vod,
+use crate::{
+    NativePlaybackManifest,
+    fmp4::{Fmp4SampleEntry, Fmp4Track, Fmp4TrackKind, init_segment},
+    hls::{
+        HlsOptions, HlsSegmentInfo, HlsVodPlaylistPlan, write_hls_fmp4_init,
+        write_hls_fmp4_segment, write_hls_fmp4_segment_window, write_hls_fmp4_segments,
+        write_hls_fmp4_vod, write_hls_segment, write_hls_segments, write_hls_vod,
+    },
 };
 
 #[derive(Debug, Serialize)]
@@ -66,6 +73,65 @@ pub(super) fn run_hls_fmp4_init(
     Ok(())
 }
 
+pub(super) fn run_hls_fmp4_init_from_manifest(
+    manifest: PathBuf,
+    output: PathBuf,
+    audio_track: Option<String>,
+    width: Option<u16>,
+    height: Option<u16>,
+) -> Result<()> {
+    let manifest: NativePlaybackManifest = serde_json::from_str(&read_to_string(manifest)?)?;
+    let video = manifest
+        .tracks
+        .iter()
+        .find(|track| track.kind == "video")
+        .ok_or_else(|| anyhow!("manifest has no video track"))?;
+    let audio = audio_track
+        .as_deref()
+        .and_then(|id| {
+            manifest
+                .tracks
+                .iter()
+                .find(|track| track.kind == "audio" && track.id == id)
+        })
+        .or_else(|| {
+            manifest
+                .tracks
+                .iter()
+                .find(|track| track.kind == "audio" && track.default)
+        })
+        .or_else(|| manifest.tracks.iter().find(|track| track.kind == "audio"))
+        .ok_or_else(|| anyhow!("manifest has no audio track"))?;
+    let video_entry = manifest_video_sample_entry(video, width, height)?;
+    let audio_entry = manifest_audio_sample_entry(audio)?;
+    let init = init_segment(&[
+        Fmp4Track {
+            id: 1,
+            kind: Fmp4TrackKind::Video,
+            timescale: 90_000,
+            default_sample_duration: 0,
+            default_sample_size: 0,
+            default_sample_flags: 0x0101_0000,
+            sample_entry: video_entry,
+        },
+        Fmp4Track {
+            id: 2,
+            kind: Fmp4TrackKind::Audio,
+            timescale: audio.sample_rate.unwrap_or(48_000),
+            default_sample_duration: 0,
+            default_sample_size: 0,
+            default_sample_flags: 0x0200_0000,
+            sample_entry: audio_entry,
+        },
+    ])?;
+    if let Some(parent) = output.parent() {
+        create_dir_all(parent)?;
+    }
+    write(&output, init)?;
+    println!("{}", serde_json::json!({ "ok": true, "output": output }));
+    Ok(())
+}
+
 pub(super) fn run_hls_fmp4_segment(
     input: PathBuf,
     output: PathBuf,
@@ -75,6 +141,26 @@ pub(super) fn run_hls_fmp4_segment(
 ) -> Result<()> {
     let segment =
         write_hls_fmp4_segment(&input, index, &output, hls_options(audio_track, segment_ms))?;
+    println!("{}", serde_json::to_string_pretty(&segment)?);
+    Ok(())
+}
+
+pub(super) fn run_hls_fmp4_segment_window(
+    input: PathBuf,
+    output: PathBuf,
+    index: usize,
+    start_ms: u64,
+    end_ms: u64,
+    audio_track: Option<String>,
+) -> Result<()> {
+    let segment = write_hls_fmp4_segment_window(
+        &input,
+        &output,
+        hls_options(audio_track, 4_000),
+        index,
+        start_ms,
+        end_ms,
+    )?;
     println!("{}", serde_json::to_string_pretty(&segment)?);
     Ok(())
 }
@@ -154,6 +240,90 @@ fn hls_options(audio_track: Option<String>, segment_ms: u64) -> HlsOptions {
     HlsOptions {
         segment_target_ms: segment_ms,
         audio_track_id: audio_track,
+    }
+}
+
+fn manifest_video_sample_entry(
+    track: &crate::ManifestTrack,
+    width: Option<u16>,
+    height: Option<u16>,
+) -> Result<Fmp4SampleEntry> {
+    let config = decode_hex(
+        track
+            .decoder_config_hex
+            .as_deref()
+            .ok_or_else(|| anyhow!("manifest video track has no decoder config"))?,
+    )?;
+    let width = width.unwrap_or(1920);
+    let height = height.unwrap_or(1080);
+    match track.codec.as_str() {
+        "h264" => Ok(Fmp4SampleEntry::Avc {
+            codec_config: config,
+            width,
+            height,
+        }),
+        "hevc" => Ok(Fmp4SampleEntry::Hevc {
+            codec_config: config,
+            width,
+            height,
+        }),
+        other => Err(anyhow!(
+            "manifest video codec {other} is not supported for fMP4 init"
+        )),
+    }
+}
+
+fn manifest_audio_sample_entry(track: &crate::ManifestTrack) -> Result<Fmp4SampleEntry> {
+    let channels = u16::try_from(track.channels.unwrap_or(2)).unwrap_or(2);
+    let sample_rate = track.sample_rate.unwrap_or(48_000);
+    match track.codec.as_str() {
+        "aac" => Ok(Fmp4SampleEntry::Aac {
+            decoder_config: decode_hex(
+                track
+                    .decoder_config_hex
+                    .as_deref()
+                    .ok_or_else(|| anyhow!("manifest AAC track has no decoder config"))?,
+            )?,
+            channel_count: channels,
+            sample_rate,
+        }),
+        "ac3" => Ok(Fmp4SampleEntry::Ac3 {
+            dac3: [0x50, 0x51, 0x00],
+            channel_count: channels,
+            sample_rate,
+        }),
+        "eac3" => Ok(Fmp4SampleEntry::Eac3 {
+            dec3: vec![0x00, 0x10, 0x20, 0x0f, 0x00],
+            channel_count: channels,
+            sample_rate,
+        }),
+        other => Err(anyhow!(
+            "manifest audio codec {other} is not supported for fMP4 init"
+        )),
+    }
+}
+
+fn decode_hex(raw: &str) -> Result<Vec<u8>> {
+    let s = raw.trim();
+    if !s.len().is_multiple_of(2) {
+        return Err(anyhow!("hex string has odd length"));
+    }
+    let mut out = Vec::with_capacity(s.len() / 2);
+    let bytes = s.as_bytes();
+    for i in (0..bytes.len()).step_by(2) {
+        let hi = hex_nibble(bytes[i]).ok_or_else(|| anyhow!("invalid hex digit"))?;
+        let lo = hex_nibble(bytes[i + 1]).ok_or_else(|| anyhow!("invalid hex digit"))?;
+        out.push((hi << 4) | lo);
+    }
+    Ok(out)
+}
+
+fn hex_nibble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
     }
 }
 

@@ -1031,6 +1031,42 @@ impl From<Mp4TrackKind> for HlsTrackKind {
     }
 }
 
+pub fn write_hls_fmp4_segment_window(
+    input: &Path,
+    output: &Path,
+    options: HlsOptions,
+    index: usize,
+    start_ms: u64,
+    end_ms: u64,
+) -> Result<HlsSegmentInfo> {
+    let source = MappedMediaFile::open(input)?;
+    let bytes = source.as_ref();
+    if !matroska::looks_like_ebml(bytes) {
+        bail!("windowed fMP4 HLS segment currently supports Matroska/WebM sources");
+    }
+    let window = SegmentWindow {
+        index,
+        start_ms,
+        end_ms: end_ms.max(start_ms.saturating_add(1)),
+    };
+    let tracks =
+        matroska_hls_tracks_for_selected_window(bytes, options.audio_track_id.as_deref(), window)?;
+    if !supports_fmp4_audio(&tracks.audio.payload) {
+        bail!("fMP4 HLS currently requires AAC, AC-3, or E-AC-3 audio");
+    }
+    let segment = mux_fmp4_segment(bytes, &tracks, window)?;
+    if let Some(parent) = output.parent() {
+        create_dir_all(parent)?;
+    }
+    write(output, segment)?;
+    Ok(HlsSegmentInfo {
+        index: window.index,
+        start_ms: window.start_ms,
+        duration_ms: window.end_ms.saturating_sub(window.start_ms).max(1),
+        uri: fmp4_segment_name(window.index),
+    })
+}
+
 impl From<MatroskaTrackKind> for HlsTrackKind {
     fn from(kind: MatroskaTrackKind) -> Self {
         match kind {
@@ -1705,13 +1741,31 @@ fn write_matroska_hls_fmp4_vod(
 
 fn write_matroska_hls_fmp4_init(bytes: &[u8], output: &Path, options: HlsOptions) -> Result<()> {
     let segment_target_ms = options.segment_target_ms.max(500);
-    let plan = hls_playlist_plan_from_matroska(
+    let tracks = matroska_hls_tracks_for_first_window(
         bytes,
-        bytes.len() as u64,
         options.audio_track_id.as_deref(),
         segment_target_ms,
-    )?;
-    write_matroska_hls_fmp4_init_from_plan(bytes, output, &plan)
+    )
+    .or_else(|_| {
+        let plan = hls_playlist_plan_from_matroska(
+            bytes,
+            bytes.len() as u64,
+            options.audio_track_id.as_deref(),
+            segment_target_ms,
+        )?;
+        let window = plan.windows.first().copied().ok_or_else(|| {
+            anyhow!("native HLS could not build keyframe-aligned segment windows")
+        })?;
+        matroska_hls_tracks_for_window(bytes, &plan, window)
+    })?;
+    if !supports_fmp4_audio(&tracks.audio.payload) {
+        bail!("fMP4 HLS currently requires AAC, AC-3, or E-AC-3 audio");
+    }
+    if let Some(parent) = output.parent() {
+        create_dir_all(parent)?;
+    }
+    write(output, fmp4_init_segment_for_tracks(&tracks)?)?;
+    Ok(())
 }
 
 fn write_matroska_hls_fmp4_init_from_plan(
@@ -1864,6 +1918,93 @@ fn matroska_hls_tracks_for_window(
         audio: HlsTrack {
             id: plan.audio_track_id().to_string(),
             codec_string: plan.audio_codec().to_string(),
+            timescale: audio_packets
+                .first()
+                .map(|packet| packet.dts.scale.units_per_second)
+                .unwrap_or(48_000),
+            packets: audio_packets,
+            payload: matroska_audio_payload_kind(audio)?,
+            fmp4_sample_entry: audio_fmp4_sample_entry,
+        },
+    })
+}
+
+fn matroska_hls_tracks_for_first_window(
+    bytes: &[u8],
+    requested_audio_track_id: Option<&str>,
+    segment_target_ms: u64,
+) -> Result<HlsTrackSet> {
+    matroska_hls_tracks_for_selected_window(
+        bytes,
+        requested_audio_track_id,
+        SegmentWindow {
+            index: 0,
+            start_ms: 0,
+            end_ms: segment_target_ms.max(MIN_SEGMENT_MS).max(1),
+        },
+    )
+}
+
+fn matroska_hls_tracks_for_selected_window(
+    bytes: &[u8],
+    requested_audio_track_id: Option<&str>,
+    window: SegmentWindow,
+) -> Result<HlsTrackSet> {
+    let meta = matroska::parse_basic_metadata(bytes);
+    let (video_track_id, video) =
+        select_matroska_hls_track(&meta.tracks, MatroskaTrackKind::Video, None).ok_or_else(
+            || anyhow!("native HLS Matroska path currently requires H.264 or HEVC video"),
+        )?;
+    let (audio_track_id, audio) = select_matroska_hls_track(
+        &meta.tracks,
+        MatroskaTrackKind::Audio,
+        requested_audio_track_id,
+    )
+    .ok_or_else(|| {
+        requested_audio_track_id
+            .map(|track_id| {
+                anyhow!("native HLS Matroska path could not use requested audio track {track_id}")
+            })
+            .unwrap_or_else(|| {
+                anyhow!("native HLS Matroska path currently requires AAC, AC-3, or E-AC-3 audio")
+            })
+    })?;
+    let tracks = matroska::parse_packet_tracks_in_time_window(
+        bytes,
+        &[video_track_id.as_str(), audio_track_id.as_str()],
+        window.start_ms,
+        window.end_ms,
+    )
+    .ok_or_else(|| anyhow!("missing Matroska packets for HLS init window"))?;
+    let video_packets = tracks
+        .iter()
+        .find(|track| track.id == video_track_id)
+        .map(|track| track.packets.clone())
+        .filter(|packets| !packets.is_empty())
+        .ok_or_else(|| anyhow!("missing Matroska video packets for HLS init window"))?;
+    let audio_packets = tracks
+        .iter()
+        .find(|track| track.id == audio_track_id)
+        .map(|track| track.packets.clone())
+        .filter(|packets| !packets.is_empty())
+        .ok_or_else(|| anyhow!("missing Matroska audio packets for HLS init window"))?;
+    let audio_fmp4_sample_entry = matroska_audio_fmp4_sample_entry(bytes, audio, &audio_packets)?;
+
+    Ok(HlsTrackSet {
+        video: HlsTrack {
+            id: video_track_id.clone(),
+            codec_string: matroska_video_codec_string(video),
+            timescale: video_packets
+                .first()
+                .map(|packet| packet.dts.scale.units_per_second)
+                .unwrap_or(90_000),
+            packets: video_packets,
+            payload: matroska_video_payload_kind(video)?,
+            fmp4_sample_entry: matroska_video_fmp4_sample_entry(video)?,
+        },
+        audio: HlsTrack {
+            id: audio_track_id.clone(),
+            codec_string: matroska_audio_codec_string(audio),
             timescale: audio_packets
                 .first()
                 .map(|packet| packet.dts.scale.units_per_second)

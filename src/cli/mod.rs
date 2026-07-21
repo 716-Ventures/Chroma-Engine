@@ -278,6 +278,17 @@ enum Command {
         #[arg(long, default_value_t = 4_000)]
         segment_ms: u64,
     },
+    /// Write a native fMP4/CMAF HLS init segment from a stored playback manifest.
+    HlsFmp4InitFromManifest {
+        manifest: PathBuf,
+        output: PathBuf,
+        #[arg(long)]
+        audio_track: Option<String>,
+        #[arg(long)]
+        width: Option<u16>,
+        #[arg(long)]
+        height: Option<u16>,
+    },
     /// Write one native fMP4/CMAF HLS media segment by index.
     HlsFmp4Segment {
         input: PathBuf,
@@ -288,6 +299,19 @@ enum Command {
         audio_track: Option<String>,
         #[arg(long, default_value_t = 4_000)]
         segment_ms: u64,
+    },
+    /// Write one native fMP4/CMAF HLS media segment for an explicit source time window.
+    HlsFmp4SegmentWindow {
+        input: PathBuf,
+        output: PathBuf,
+        #[arg(long)]
+        index: usize,
+        #[arg(long)]
+        start_ms: u64,
+        #[arg(long)]
+        end_ms: u64,
+        #[arg(long)]
+        audio_track: Option<String>,
     },
     /// Write a contiguous run of native fMP4/CMAF HLS segments by index.
     HlsFmp4Segments {
@@ -843,6 +867,13 @@ pub fn run() -> Result<()> {
             audio_track,
             segment_ms,
         } => hls::run_hls_fmp4_init(input, output, audio_track, segment_ms)?,
+        Command::HlsFmp4InitFromManifest {
+            manifest,
+            output,
+            audio_track,
+            width,
+            height,
+        } => hls::run_hls_fmp4_init_from_manifest(manifest, output, audio_track, width, height)?,
         Command::HlsFmp4Segment {
             input,
             output,
@@ -850,6 +881,14 @@ pub fn run() -> Result<()> {
             audio_track,
             segment_ms,
         } => hls::run_hls_fmp4_segment(input, output, index, audio_track, segment_ms)?,
+        Command::HlsFmp4SegmentWindow {
+            input,
+            output,
+            index,
+            start_ms,
+            end_ms,
+            audio_track,
+        } => hls::run_hls_fmp4_segment_window(input, output, index, start_ms, end_ms, audio_track)?,
         Command::HlsFmp4Segments {
             input,
             output_dir,
