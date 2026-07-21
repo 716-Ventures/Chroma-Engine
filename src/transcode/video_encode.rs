@@ -56,6 +56,21 @@ pub struct EncodedVideoOutput {
     pub frames: Vec<EncodedVideoFrame>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// One borrowed raw video frame accepted by native video encoders.
+pub struct RawVideoFrameRef<'a> {
+    /// Presentation timestamp.
+    pub pts: TimePoint,
+    /// Decode timestamp.
+    pub dts: TimePoint,
+    /// Frame duration.
+    pub duration: TimeDelta,
+    /// Raw frame bytes matching the selected raw format.
+    pub bytes: &'a [u8],
+    /// True when this source frame starts an independently decodable access unit.
+    pub keyframe: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 /// Stable output description for an encoded video stream.
@@ -143,6 +158,22 @@ pub fn encode_h264_videotoolbox_bgra_frame(
     platform_encode_h264_videotoolbox_bgra_frame(format, bgra, bitrate)
 }
 
+/// Encodes a contiguous BGRA frame batch to H.264 using one native VideoToolbox session.
+pub fn encode_h264_videotoolbox_bgra_frames(
+    format: RawVideoFormat,
+    frames: &[RawVideoFrameRef<'_>],
+    bitrate: u32,
+) -> Result<EncodedVideoOutput, VideoEncodeError> {
+    validate_raw_video_format(format)?;
+    validate_raw_video_frames(format, frames)?;
+    if bitrate == 0 {
+        return Err(VideoEncodeError::InvalidInput {
+            reason: "bitrate must be greater than zero".to_string(),
+        });
+    }
+    platform_encode_h264_videotoolbox_bgra_frames(format, frames, bitrate)
+}
+
 /// Encodes one BGRA frame to HEVC using the native VideoToolbox backend.
 pub fn encode_hevc_videotoolbox_bgra_frame(
     format: RawVideoFormat,
@@ -200,6 +231,39 @@ fn validate_bgra_frame(format: RawVideoFormat, bgra: &[u8]) -> Result<(), VideoE
         return Err(VideoEncodeError::InvalidInput {
             reason: format!("BGRA frame has {} byte(s), expected {expected}", bgra.len()),
         });
+    }
+    Ok(())
+}
+
+fn validate_raw_video_frames(
+    format: RawVideoFormat,
+    frames: &[RawVideoFrameRef<'_>],
+) -> Result<(), VideoEncodeError> {
+    if frames.is_empty() {
+        return Err(VideoEncodeError::InvalidInput {
+            reason: "video frame batch is empty".to_string(),
+        });
+    }
+    let time_scale = frames[0].pts.scale;
+    let mut previous_dts = None;
+    for frame in frames {
+        validate_bgra_frame(format, frame.bytes)?;
+        if frame.pts.scale != time_scale
+            || frame.dts.scale != time_scale
+            || frame.duration.scale != time_scale
+        {
+            return Err(VideoEncodeError::InvalidInput {
+                reason: "video frame batch timestamps must use one time scale".to_string(),
+            });
+        }
+        if let Some(previous_dts) = previous_dts
+            && frame.dts.units < previous_dts
+        {
+            return Err(VideoEncodeError::InvalidInput {
+                reason: "video frame batch decode timestamps must be monotonic".to_string(),
+            });
+        }
+        previous_dts = Some(frame.dts.units);
     }
     Ok(())
 }
@@ -403,6 +467,203 @@ fn platform_encode_h264_videotoolbox_bgra_frame(
         },
         frames,
     })
+}
+
+#[cfg(target_os = "macos")]
+fn platform_encode_h264_videotoolbox_bgra_frames(
+    format: RawVideoFormat,
+    input_frames: &[RawVideoFrameRef<'_>],
+    bitrate: u32,
+) -> Result<EncodedVideoOutput, VideoEncodeError> {
+    use std::sync::{Arc, Mutex};
+
+    use core_media::{format_description::kCMVideoCodecType_H264, time::CMTime};
+    use video_toolbox::{
+        compression_properties::CompressionPropertyKey, compression_session::VTCompressionSession,
+        session::TVTSession,
+    };
+
+    let session = VTCompressionSession::new(
+        format.width as i32,
+        format.height as i32,
+        kCMVideoCodecType_H264,
+        None,
+        None,
+        default_allocator(),
+    )
+    .map_err(|status| VideoEncodeError::BackendFailed {
+        reason: format!("VTCompressionSessionCreate(H.264 batch) returned {status}"),
+    })?;
+    let vt_session = session.as_session();
+    set_vt_property_bool(&vt_session, CompressionPropertyKey::RealTime, true)?;
+    set_vt_property_bool(
+        &vt_session,
+        CompressionPropertyKey::AllowFrameReordering,
+        false,
+    )?;
+    set_vt_property_i32(
+        &vt_session,
+        CompressionPropertyKey::AverageBitRate,
+        i32::try_from(bitrate).unwrap_or(i32::MAX),
+    )?;
+    set_vt_property_i32(&vt_session, CompressionPropertyKey::MaxFrameDelayCount, 0)?;
+    set_vt_property_i32(
+        &vt_session,
+        CompressionPropertyKey::ExpectedFrameRate,
+        i32::try_from(format.frame_rate_num / format.frame_rate_den.max(1)).unwrap_or(i32::MAX),
+    )?;
+    session
+        .prepare_to_encode_frames()
+        .map_err(|status| VideoEncodeError::BackendFailed {
+            reason: format!(
+                "VTCompressionSessionPrepareToEncodeFrames(H.264 batch) returned {status}"
+            ),
+        })?;
+
+    let frames = Arc::new(Mutex::new(Vec::<EncodedVideoFrame>::new()));
+    let decoder_config = Arc::new(Mutex::new(None::<Vec<u8>>));
+    for (index, input) in input_frames.iter().enumerate() {
+        let pixel_buffer = bgra_pixel_buffer(format, input.bytes)?;
+        let image_buffer = image_buffer_from_pixel_buffer(&pixel_buffer);
+        let frames_out = Arc::clone(&frames);
+        let config_out = Arc::clone(&decoder_config);
+        let pts = input.pts;
+        let dts = input.dts;
+        let duration = input.duration;
+        let keyframe = index == 0 || input.keyframe;
+        let frame_properties = keyframe.then(force_keyframe_dictionary);
+
+        session
+            .encode_frame_with_closure(
+                image_buffer,
+                CMTime::make(
+                    i64::try_from(pts.units).unwrap_or(i64::MAX),
+                    pts.scale.units_per_second as i32,
+                ),
+                CMTime::make(
+                    i64::try_from(duration.units).unwrap_or(i64::MAX),
+                    duration.scale.units_per_second as i32,
+                ),
+                frame_properties.as_ref(),
+                move |status, _flags, sample_buffer_ref| {
+                    if status != 0 || sample_buffer_ref.is_null() {
+                        return;
+                    }
+                    let Some((payload, config)) = copy_h264_sample(sample_buffer_ref) else {
+                        return;
+                    };
+                    if let Ok(mut guard) = config_out.lock()
+                        && guard.is_none()
+                    {
+                        *guard = config;
+                    }
+                    if let Ok(mut guard) = frames_out.lock() {
+                        guard.push(EncodedVideoFrame {
+                            pts,
+                            dts,
+                            duration,
+                            payload,
+                            keyframe,
+                        });
+                    }
+                },
+            )
+            .map_err(|status| VideoEncodeError::BackendFailed {
+                reason: format!("VTCompressionSessionEncodeFrame(H.264 batch) returned {status}"),
+            })?;
+    }
+    session
+        .complete_frames(CMTime::make(
+            i64::MAX,
+            input_frames[0].pts.scale.units_per_second as i32,
+        ))
+        .map_err(|status| VideoEncodeError::BackendFailed {
+            reason: format!("VTCompressionSessionCompleteFrames(H.264 batch) returned {status}"),
+        })?;
+    session.invalidate();
+
+    let mut frames = frames
+        .lock()
+        .map_err(|_| VideoEncodeError::BackendFailed {
+            reason: "VideoToolbox frame output lock was poisoned".to_string(),
+        })?
+        .clone();
+    frames.sort_by_key(|frame| (frame.dts.units, frame.pts.units));
+    if frames.is_empty() {
+        return Err(VideoEncodeError::BackendFailed {
+            reason: "VideoToolbox emitted no H.264 sample buffers".to_string(),
+        });
+    }
+    let decoder_config = decoder_config
+        .lock()
+        .map_err(|_| VideoEncodeError::BackendFailed {
+            reason: "VideoToolbox decoder config lock was poisoned".to_string(),
+        })?
+        .clone();
+
+    Ok(EncodedVideoOutput {
+        stream: EncodedVideoStream {
+            codec: VideoCodec::H264,
+            width: format.width,
+            height: format.height,
+            time_scale: input_frames[0].pts.scale,
+            decoder_config,
+        },
+        frames,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn set_vt_property_bool(
+    session: &video_toolbox::session::VTSession,
+    key: video_toolbox::compression_properties::CompressionPropertyKey,
+    value: bool,
+) -> Result<(), VideoEncodeError> {
+    use core_foundation::{base::TCFType, boolean::CFBoolean};
+    session
+        .set_property(key.into(), CFBoolean::from(value).as_CFType())
+        .map_err(|status| VideoEncodeError::BackendFailed {
+            reason: format!("VTSessionSetProperty({key:?}) returned {status}"),
+        })
+        .or_else(ignore_unsupported_vt_property)
+}
+
+#[cfg(target_os = "macos")]
+fn set_vt_property_i32(
+    session: &video_toolbox::session::VTSession,
+    key: video_toolbox::compression_properties::CompressionPropertyKey,
+    value: i32,
+) -> Result<(), VideoEncodeError> {
+    use core_foundation::{base::TCFType, number::CFNumber};
+    session
+        .set_property(key.into(), CFNumber::from(value).as_CFType())
+        .map_err(|status| VideoEncodeError::BackendFailed {
+            reason: format!("VTSessionSetProperty({key:?}) returned {status}"),
+        })
+        .or_else(ignore_unsupported_vt_property)
+}
+
+#[cfg(target_os = "macos")]
+fn ignore_unsupported_vt_property(error: VideoEncodeError) -> Result<(), VideoEncodeError> {
+    match &error {
+        VideoEncodeError::BackendFailed { reason } if reason.contains("returned -12900") => Ok(()),
+        _ => Err(error),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn force_keyframe_dictionary() -> core_foundation::dictionary::CFDictionary<
+    core_foundation::string::CFString,
+    core_foundation::base::CFType,
+> {
+    use core_foundation::{
+        base::TCFType, boolean::CFBoolean, dictionary::CFDictionary, string::CFString,
+    };
+    use video_toolbox::compression_properties::EncodeFrameOptionKey;
+
+    let key = CFString::from(EncodeFrameOptionKey::ForceKeyFrame);
+    let value = CFBoolean::true_value().as_CFType();
+    CFDictionary::from_CFType_pairs(&[(key, value)])
 }
 
 #[cfg(target_os = "macos")]

@@ -21,10 +21,11 @@ use crate::probe::probe_media_source;
 use crate::session::{AudioSelection, PlaybackConstraints, PlaybackTarget, plan_playback};
 use crate::source::MappedMediaFile;
 use crate::transcode::{
-    AudioDecodeCodec, HlsTranscodeRequest, RawVideoFormat, RawVideoPixelFormat, VideoCodec,
-    build_audio_decode_input, build_video_decode_input, decode_dts_core_to_interleaved_i16,
-    decode_videotoolbox_bgra_frames, encode_eac3_from_interleaved_i16, plan_hls_transcode,
-    probe_dts_audio_bridge,
+    AudioDecodeCodec, HlsTranscodeRequest, NativeFmp4TranscodeOptions, RawVideoFormat,
+    RawVideoPixelFormat, VideoCodec, build_audio_decode_input, build_video_decode_input,
+    decode_dts_core_to_interleaved_i16, decode_videotoolbox_bgra_frames, eac3_bridge_channel_count,
+    encode_eac3_from_interleaved_i16, normalize_interleaved_channels, plan_hls_transcode,
+    probe_dts_audio_bridge, write_native_fmp4_transcode_init, write_native_fmp4_transcode_segment,
 };
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
@@ -190,6 +191,38 @@ enum Command {
         target_ms: u64,
         #[arg(long, default_value_t = 640_000)]
         bitrate: u32,
+    },
+    /// Write a native transcoded fMP4 init segment for Matroska HLS playback.
+    TranscodeFmp4Init {
+        input: PathBuf,
+        output: PathBuf,
+        #[arg(long)]
+        video_track: Option<String>,
+        #[arg(long)]
+        audio_track: Option<String>,
+        #[arg(long, default_value_t = 4_000)]
+        segment_ms: u64,
+        #[arg(long, default_value_t = 16_000_000)]
+        video_bitrate: u32,
+        #[arg(long, default_value_t = 640_000)]
+        audio_bitrate: u32,
+    },
+    /// Write one native transcoded fMP4 media segment for Matroska HLS playback.
+    TranscodeFmp4Segment {
+        input: PathBuf,
+        output: PathBuf,
+        #[arg(long)]
+        index: u32,
+        #[arg(long)]
+        video_track: Option<String>,
+        #[arg(long)]
+        audio_track: Option<String>,
+        #[arg(long, default_value_t = 4_000)]
+        segment_ms: u64,
+        #[arg(long, default_value_t = 16_000_000)]
+        video_bitrate: u32,
+        #[arg(long, default_value_t = 640_000)]
+        audio_bitrate: u32,
     },
     /// Warm the selected encoder backend.
     Warmup,
@@ -669,6 +702,52 @@ pub fn run() -> Result<()> {
                 bitrate,
             )?;
             println!("{}", serde_json::to_string_pretty(&bridge)?);
+        }
+        Command::TranscodeFmp4Init {
+            input,
+            output,
+            video_track,
+            audio_track,
+            segment_ms,
+            video_bitrate,
+            audio_bitrate,
+        } => {
+            let written = write_native_fmp4_transcode_init(
+                &input,
+                &output,
+                NativeFmp4TranscodeOptions {
+                    video_track_id: video_track,
+                    audio_track_id: audio_track,
+                    segment_ms,
+                    video_bitrate,
+                    audio_bitrate,
+                },
+            )?;
+            println!("{}", serde_json::to_string_pretty(&written)?);
+        }
+        Command::TranscodeFmp4Segment {
+            input,
+            output,
+            index,
+            video_track,
+            audio_track,
+            segment_ms,
+            video_bitrate,
+            audio_bitrate,
+        } => {
+            let written = write_native_fmp4_transcode_segment(
+                &input,
+                &output,
+                index,
+                NativeFmp4TranscodeOptions {
+                    video_track_id: video_track,
+                    audio_track_id: audio_track,
+                    segment_ms,
+                    video_bitrate,
+                    audio_bitrate,
+                },
+            )?;
+            println!("{}", serde_json::to_string_pretty(&written)?);
         }
         Command::Warmup => {
             crate::platform::warmup()?;
@@ -1210,42 +1289,6 @@ fn select_matroska_video_track<'a>(
         }
     }
     None
-}
-
-fn eac3_bridge_channel_count(decoded_channels: u32) -> u32 {
-    match decoded_channels {
-        0 | 1 => 1,
-        2 => 2,
-        3..=6 => 6,
-        _ => 8,
-    }
-}
-
-fn normalize_interleaved_channels(
-    pcm: &[i16],
-    source_channels: u32,
-    target_channels: u32,
-) -> Result<Vec<i16>> {
-    if source_channels == 0 || target_channels == 0 {
-        bail!("audio bridge channel count must be greater than zero");
-    }
-    if !pcm.len().is_multiple_of(source_channels as usize) {
-        bail!("decoded PCM sample count does not align to source channels");
-    }
-    if source_channels == target_channels {
-        return Ok(pcm.to_vec());
-    }
-
-    let source_channels = source_channels as usize;
-    let target_channels = target_channels as usize;
-    let frame_count = pcm.len() / source_channels;
-    let mut out = Vec::with_capacity(frame_count * target_channels);
-    for frame in pcm.chunks_exact(source_channels) {
-        let copied = source_channels.min(target_channels);
-        out.extend_from_slice(&frame[..copied]);
-        out.resize(out.len() + target_channels - copied, 0);
-    }
-    Ok(out)
 }
 
 fn select_matroska_audio_track<'a>(

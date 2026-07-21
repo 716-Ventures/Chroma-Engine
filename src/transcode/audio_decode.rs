@@ -330,6 +330,49 @@ pub fn decode_dts_core_to_interleaved_i16(
     })
 }
 
+/// Selects the E-AC-3 bridge channel count for decoded PCM.
+pub fn eac3_bridge_channel_count(decoded_channels: u32) -> u32 {
+    match decoded_channels {
+        0 | 1 => 1,
+        2 => 2,
+        3..=6 => 6,
+        _ => 8,
+    }
+}
+
+/// Converts interleaved PCM to a requested channel count by truncating extra channels
+/// or zero-padding missing channels.
+pub fn normalize_interleaved_channels(
+    pcm: &[i16],
+    source_channels: u32,
+    target_channels: u32,
+) -> Result<Vec<i16>, AudioDecodeError> {
+    if source_channels == 0 || target_channels == 0 {
+        return Err(AudioDecodeError::BackendFailed {
+            reason: "audio bridge channel count must be greater than zero".to_string(),
+        });
+    }
+    if !pcm.len().is_multiple_of(source_channels as usize) {
+        return Err(AudioDecodeError::BackendFailed {
+            reason: "decoded PCM sample count does not align to source channels".to_string(),
+        });
+    }
+    if source_channels == target_channels {
+        return Ok(pcm.to_vec());
+    }
+
+    let source_channels = source_channels as usize;
+    let target_channels = target_channels as usize;
+    let frame_count = pcm.len() / source_channels;
+    let mut out = Vec::with_capacity(frame_count * target_channels);
+    for frame in pcm.chunks_exact(source_channels) {
+        let copied = source_channels.min(target_channels);
+        out.extend_from_slice(&frame[..copied]);
+        out.resize(out.len() + target_channels - copied, 0);
+    }
+    Ok(out)
+}
+
 fn timepoint_units(value: TimePoint) -> i64 {
     i64::try_from(value.units).unwrap_or(i64::MAX)
 }

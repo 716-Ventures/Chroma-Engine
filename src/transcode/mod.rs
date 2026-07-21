@@ -7,6 +7,7 @@ mod audio_clock;
 mod audio_decode;
 mod audio_encode;
 mod execution_plan;
+mod segment;
 mod video_decode;
 mod video_encode;
 
@@ -14,7 +15,8 @@ pub use audio_clock::{AudioClockConfig, AudioFrameTiming, AudioSampleClock};
 pub use audio_decode::{
     AudioDecodeCodec, AudioDecodeError, AudioDecodeInput, CompressedAudioPacket, DecodedPcmFrame,
     DecodedPcmOutput, DecodedPcmStream, DtsAudioBridgeProbe, DtsAudioPacketProbe,
-    build_audio_decode_input, decode_dts_core_to_interleaved_i16, probe_dts_audio_bridge,
+    build_audio_decode_input, decode_dts_core_to_interleaved_i16, eac3_bridge_channel_count,
+    normalize_interleaved_channels, probe_dts_audio_bridge,
 };
 pub use audio_encode::{
     AudioEncodeError, EncodedAudioOutput, PcmAudioFormat, encode_aac_from_interleaved_i16,
@@ -25,6 +27,10 @@ pub use execution_plan::{
     TranscodeOutputVideo, TranscodeStage, TranscodeStageKind, TranscodeStageStatus,
     plan_hls_transcode,
 };
+pub use segment::{
+    NativeFmp4TranscodeInitOutput, NativeFmp4TranscodeOptions, NativeFmp4TranscodeSegmentOutput,
+    write_native_fmp4_transcode_init, write_native_fmp4_transcode_segment,
+};
 pub use video_decode::{
     CompressedVideoPacket, DecodedVideoFrame, DecodedVideoOutput, DecodedVideoStream,
     VideoDecodeError, VideoDecodeInput, VideoDecodeSessionInfo, VideoDecoderAction,
@@ -33,8 +39,9 @@ pub use video_decode::{
     probe_videotoolbox_hevc_decoder_session, validate_decoded_video_format,
 };
 pub use video_encode::{
-    EncodedVideoFrame, EncodedVideoOutput, EncodedVideoStream, RawVideoFormat, RawVideoPixelFormat,
-    VideoEncodeError, VideoEncodeSessionInfo, encode_h264_videotoolbox_bgra_frame,
+    EncodedVideoFrame, EncodedVideoOutput, EncodedVideoStream, RawVideoFormat, RawVideoFrameRef,
+    RawVideoPixelFormat, VideoEncodeError, VideoEncodeSessionInfo,
+    encode_h264_videotoolbox_bgra_frame, encode_h264_videotoolbox_bgra_frames,
     encode_hevc_videotoolbox_bgra_frame, probe_videotoolbox_h264_session,
     probe_videotoolbox_hevc_session,
 };

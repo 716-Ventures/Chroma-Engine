@@ -1,7 +1,7 @@
 use anyhow::{Result, bail};
 
 use crate::packet::PacketRef;
-use crate::transcode::EncodedAudioFrame;
+use crate::transcode::{EncodedAudioFrame, EncodedVideoFrame};
 
 const MOVIE_TIMESCALE: u32 = 1_000;
 
@@ -243,6 +243,67 @@ pub fn fragment_track_from_encoded_audio_frames(
     Ok(Fmp4FragmentTrack {
         track_id,
         base_decode_time: first.timing.start_sample,
+        samples,
+        payload,
+    })
+}
+
+/// Builds one fMP4 fragment track from contiguous encoded video frames.
+#[allow(
+    dead_code,
+    reason = "native video transcode backends use this mux adapter from the CLI segment path"
+)]
+pub fn fragment_track_from_encoded_video_frames(
+    track_id: u32,
+    frames: &[EncodedVideoFrame],
+) -> Result<Fmp4FragmentTrack> {
+    let first = frames
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("fMP4 video fragment requires at least one frame"))?;
+    let timescale = first.dts.scale;
+    let mut payload = Vec::new();
+    let mut samples = Vec::with_capacity(frames.len());
+
+    for frame in frames {
+        if frame.pts.scale != timescale
+            || frame.dts.scale != timescale
+            || frame.duration.scale != timescale
+        {
+            bail!("encoded video frame time scales must match inside one fMP4 fragment");
+        }
+        let duration = frame.duration.units.max(1).min(u64::from(u32::MAX)) as u32;
+        let size = frame.payload.len().min(u32::MAX as usize) as u32;
+        let composition_time_offset = (i128::from(frame.pts.units) - i128::from(frame.dts.units))
+            .clamp(i128::from(i32::MIN), i128::from(i32::MAX))
+            as i32;
+        payload.extend_from_slice(&frame.payload);
+        samples.push(Fmp4Sample {
+            duration,
+            size,
+            flags: if frame.keyframe {
+                0x0200_0000
+            } else {
+                0x0101_0000
+            },
+            composition_time_offset,
+        });
+    }
+
+    if let Some(min_offset) = samples
+        .iter()
+        .map(|sample| sample.composition_time_offset)
+        .min()
+        && min_offset < 0
+    {
+        for sample in &mut samples {
+            sample.composition_time_offset =
+                sample.composition_time_offset.saturating_sub(min_offset);
+        }
+    }
+
+    Ok(Fmp4FragmentTrack {
+        track_id,
+        base_decode_time: first.dts.units,
         samples,
         payload,
     })
@@ -721,7 +782,7 @@ fn rescale_time(units: u64, from_units_per_second: u32, to_units_per_second: u32
 
 #[cfg(test)]
 mod tests {
-    use crate::packet::{PacketRef, TimeDelta, TimePoint};
+    use crate::packet::{PacketRef, TimeDelta, TimePoint, TimeScale};
 
     use super::*;
 
@@ -1129,6 +1190,56 @@ mod tests {
         let err = fragment_track_from_encoded_audio_frames(2, &frames).expect_err("reject gap");
 
         assert!(err.to_string().contains("contiguous"));
+    }
+
+    #[test]
+    fn builds_fragment_track_from_encoded_video_frames() {
+        let time_scale = TimeScale {
+            units_per_second: 90_000,
+        };
+        let frames = vec![
+            EncodedVideoFrame {
+                pts: TimePoint {
+                    units: 90_000,
+                    scale: time_scale,
+                },
+                dts: TimePoint {
+                    units: 90_000,
+                    scale: time_scale,
+                },
+                duration: TimeDelta {
+                    units: 3_003,
+                    scale: time_scale,
+                },
+                payload: b"idr".to_vec(),
+                keyframe: true,
+            },
+            EncodedVideoFrame {
+                pts: TimePoint {
+                    units: 93_003,
+                    scale: time_scale,
+                },
+                dts: TimePoint {
+                    units: 93_003,
+                    scale: time_scale,
+                },
+                duration: TimeDelta {
+                    units: 3_003,
+                    scale: time_scale,
+                },
+                payload: b"p".to_vec(),
+                keyframe: false,
+            },
+        ];
+
+        let track =
+            fragment_track_from_encoded_video_frames(1, &frames).expect("video fragment track");
+
+        assert_eq!(track.track_id, 1);
+        assert_eq!(track.base_decode_time, 90_000);
+        assert_eq!(track.payload, b"idrp");
+        assert_eq!(track.samples[0].flags, 0x0200_0000);
+        assert_eq!(track.samples[1].flags, 0x0101_0000);
     }
 
     #[test]
