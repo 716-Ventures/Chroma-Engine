@@ -11,6 +11,7 @@
 pub mod cli;
 pub(crate) mod codec;
 pub(crate) mod container;
+pub(crate) mod engine;
 pub(crate) mod error;
 pub(crate) mod fmp4;
 pub(crate) mod hls;
@@ -33,6 +34,9 @@ pub use codec::subtitles::{
     segment_webvtt, write_webvtt_sidecars,
 };
 pub use container::{ContainerKind, sniff_container};
+pub use engine::{
+    Engine, EngineSessionError, PlaybackSession, PlaybackSessionOptions, PlaybackSessionPlan,
+};
 pub use error::EngineErrorCode;
 pub use hls::{
     HlsAudioRendition, HlsAudioRenditionInput, HlsError, HlsMultiAudioOutputPlan, HlsOptions,
