@@ -29,7 +29,8 @@ pub use execution_plan::{
 };
 pub use segment::{
     NativeFmp4TranscodeInitOutput, NativeFmp4TranscodeOptions, NativeFmp4TranscodeSegmentOutput,
-    write_native_fmp4_transcode_init, write_native_fmp4_transcode_segment,
+    NativeFmp4TranscodeStartOutput, write_native_fmp4_transcode_init,
+    write_native_fmp4_transcode_segment, write_native_fmp4_transcode_start,
 };
 pub use video_decode::{
     CompressedVideoPacket, DecodedVideoFrame, DecodedVideoOutput, DecodedVideoStream,

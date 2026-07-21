@@ -87,6 +87,32 @@ pub struct NativeFmp4TranscodeSegmentOutput {
     pub first_audio_pts_ms: Option<u64>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+/// Summary emitted after writing native transcode startup assets.
+pub struct NativeFmp4TranscodeStartOutput {
+    /// Init segment path written by the engine.
+    pub init_output: String,
+    /// Media segment path written by the engine.
+    pub segment_output: String,
+    /// Segment index.
+    pub index: u32,
+    /// Selected source video track id.
+    pub video_track_id: String,
+    /// Selected source audio track id.
+    pub audio_track_id: String,
+    /// Init segment byte count.
+    pub init_byte_count: u64,
+    /// Media segment byte count.
+    pub segment_byte_count: u64,
+    /// Decoded video frame count.
+    pub decoded_video_frames: usize,
+    /// Encoded video frame count.
+    pub encoded_video_frames: usize,
+    /// Encoded audio frame count.
+    pub encoded_audio_frames: usize,
+}
+
 impl Default for NativeFmp4TranscodeOptions {
     fn default() -> Self {
         Self {
@@ -139,6 +165,32 @@ pub fn write_native_fmp4_transcode_segment(
         encoded_audio_frames: segment.encoded_audio_frames,
         first_video_pts_ms: segment.first_video_pts.map(TimePoint::as_millis),
         first_audio_pts_ms: segment.first_audio_pts.map(TimePoint::as_millis),
+    })
+}
+
+/// Writes a native fMP4 init segment and one media segment from a single transcode pass.
+pub fn write_native_fmp4_transcode_start(
+    input: &Path,
+    init_output: &Path,
+    segment_output: &Path,
+    index: u32,
+    options: NativeFmp4TranscodeOptions,
+) -> Result<NativeFmp4TranscodeStartOutput> {
+    let source = MappedMediaFile::open(input)?;
+    let segment = transcode_matroska_segment(source.as_ref(), index, &options)?;
+    std::fs::write(init_output, &segment.init_segment)?;
+    std::fs::write(segment_output, &segment.media_segment)?;
+    Ok(NativeFmp4TranscodeStartOutput {
+        init_output: init_output.display().to_string(),
+        segment_output: segment_output.display().to_string(),
+        index,
+        video_track_id: segment.video_track_id,
+        audio_track_id: segment.audio_track_id,
+        init_byte_count: segment.init_segment.len() as u64,
+        segment_byte_count: segment.media_segment.len() as u64,
+        decoded_video_frames: segment.decoded_video_frames,
+        encoded_video_frames: segment.encoded_video_frames,
+        encoded_audio_frames: segment.encoded_audio_frames,
     })
 }
 

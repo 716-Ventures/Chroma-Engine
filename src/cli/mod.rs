@@ -26,6 +26,7 @@ use crate::transcode::{
     decode_dts_core_to_interleaved_i16, decode_videotoolbox_bgra_frames, eac3_bridge_channel_count,
     encode_eac3_from_interleaved_i16, normalize_interleaved_channels, plan_hls_transcode,
     probe_dts_audio_bridge, write_native_fmp4_transcode_init, write_native_fmp4_transcode_segment,
+    write_native_fmp4_transcode_start,
 };
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
@@ -211,6 +212,24 @@ enum Command {
     TranscodeFmp4Segment {
         input: PathBuf,
         output: PathBuf,
+        #[arg(long)]
+        index: u32,
+        #[arg(long)]
+        video_track: Option<String>,
+        #[arg(long)]
+        audio_track: Option<String>,
+        #[arg(long, default_value_t = 4_000)]
+        segment_ms: u64,
+        #[arg(long, default_value_t = 16_000_000)]
+        video_bitrate: u32,
+        #[arg(long, default_value_t = 640_000)]
+        audio_bitrate: u32,
+    },
+    /// Write native transcoded fMP4 init and media segment from one pass.
+    TranscodeFmp4Start {
+        input: PathBuf,
+        init_output: PathBuf,
+        segment_output: PathBuf,
         #[arg(long)]
         index: u32,
         #[arg(long)]
@@ -738,6 +757,32 @@ pub fn run() -> Result<()> {
             let written = write_native_fmp4_transcode_segment(
                 &input,
                 &output,
+                index,
+                NativeFmp4TranscodeOptions {
+                    video_track_id: video_track,
+                    audio_track_id: audio_track,
+                    segment_ms,
+                    video_bitrate,
+                    audio_bitrate,
+                },
+            )?;
+            println!("{}", serde_json::to_string_pretty(&written)?);
+        }
+        Command::TranscodeFmp4Start {
+            input,
+            init_output,
+            segment_output,
+            index,
+            video_track,
+            audio_track,
+            segment_ms,
+            video_bitrate,
+            audio_bitrate,
+        } => {
+            let written = write_native_fmp4_transcode_start(
+                &input,
+                &init_output,
+                &segment_output,
                 index,
                 NativeFmp4TranscodeOptions {
                     video_track_id: video_track,
