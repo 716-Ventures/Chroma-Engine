@@ -42,8 +42,9 @@ pub use hls::{
 };
 pub use packet::{
     ChunkPlan, ChunkSample, CopySeekPlan, ExtractedChunk, NativeChunk, PacketPayloadSpan,
-    PacketRange, PacketRef, SeekAnchor, TimeDelta, TimePoint, TimeScale, packet_payload_spans,
-    plan_copy_seek, plan_fixed_chunks, seek_anchor_for_packets,
+    PacketRange, PacketRef, SeekAnchor, SignedTimeDelta, SignedTimePoint, TimeDelta, TimeError,
+    TimePoint, TimeRounding, TimeScale, packet_payload_spans, plan_copy_seek, plan_fixed_chunks,
+    seek_anchor_for_packets,
 };
 pub use pipeline::{PipelineError, PipelineStageChunk, PipelineStagePayload, emit_stage_chunks};
 pub use platform::{

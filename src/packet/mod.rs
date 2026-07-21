@@ -146,7 +146,7 @@ pub struct PacketRange {
     pub end: u32,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 /// Absolute media timestamp in a declared time scale.
 pub struct TimePoint {
@@ -156,7 +156,7 @@ pub struct TimePoint {
     pub scale: TimeScale,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 /// Relative media duration in a declared time scale.
 pub struct TimeDelta {
@@ -166,12 +166,56 @@ pub struct TimeDelta {
     pub scale: TimeScale,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 /// Rational media time scale represented as units per second.
 pub struct TimeScale {
     /// Number of timestamp units in one second.
     pub units_per_second: u32,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+/// Signed timestamp in a validated rational time base.
+pub struct SignedTimePoint {
+    /// Signed timestamp units in `scale`.
+    pub units: i64,
+    /// Units-per-second time scale.
+    pub scale: TimeScale,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+/// Signed relative media duration in a validated rational time base.
+pub struct SignedTimeDelta {
+    /// Signed duration units in `scale`.
+    pub units: i64,
+    /// Units-per-second time scale.
+    pub scale: TimeScale,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Rounding policy for checked timestamp rescaling.
+pub enum TimeRounding {
+    /// Round toward negative infinity.
+    Floor,
+    /// Round toward zero.
+    Truncate,
+    /// Round to the nearest integer, half away from zero.
+    Nearest,
+    /// Round toward positive infinity.
+    Ceil,
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+/// Error returned when timestamp construction or rescaling cannot preserve invariants.
+pub enum TimeError {
+    /// Time scale must be greater than zero.
+    #[error("time scale must be greater than zero")]
+    ZeroScale,
+    /// Rescaled timestamp does not fit the requested integer type.
+    #[error("rescaled timestamp overflowed")]
+    Overflow,
 }
 
 impl TimeScale {
@@ -180,12 +224,56 @@ impl TimeScale {
         units_per_second: 1000,
     };
 
+    /// Builds a non-zero time scale.
+    pub fn new(units_per_second: u32) -> Result<Self, TimeError> {
+        if units_per_second == 0 {
+            return Err(TimeError::ZeroScale);
+        }
+        Ok(Self { units_per_second })
+    }
+
     /// Converts `units` in this scale to milliseconds.
     pub fn to_millis(self, units: u64) -> u64 {
-        if self.units_per_second == 0 {
-            return 0;
+        self.checked_rescale_u64(units, Self::MILLIS, TimeRounding::Truncate)
+            .unwrap_or(0)
+    }
+
+    /// Converts unsigned `units` in this scale to `target` with checked arithmetic.
+    pub fn checked_rescale_u64(
+        self,
+        units: u64,
+        target: Self,
+        rounding: TimeRounding,
+    ) -> Result<u64, TimeError> {
+        if self.units_per_second == 0 || target.units_per_second == 0 {
+            return Err(TimeError::ZeroScale);
         }
-        units.saturating_mul(1000) / u64::from(self.units_per_second)
+        let value = rescale_signed(
+            i128::from(units),
+            i128::from(target.units_per_second),
+            i128::from(self.units_per_second),
+            rounding,
+        )?;
+        u64::try_from(value).map_err(|_| TimeError::Overflow)
+    }
+
+    /// Converts signed `units` in this scale to `target` with checked arithmetic.
+    pub fn checked_rescale_i64(
+        self,
+        units: i64,
+        target: Self,
+        rounding: TimeRounding,
+    ) -> Result<i64, TimeError> {
+        if self.units_per_second == 0 || target.units_per_second == 0 {
+            return Err(TimeError::ZeroScale);
+        }
+        let value = rescale_signed(
+            i128::from(units),
+            i128::from(target.units_per_second),
+            i128::from(self.units_per_second),
+            rounding,
+        )?;
+        i64::try_from(value).map_err(|_| TimeError::Overflow)
     }
 }
 
@@ -207,6 +295,14 @@ impl TimePoint {
     pub fn as_millis(self) -> u64 {
         self.scale.to_millis(self.units)
     }
+
+    /// Converts to a signed timestamp without changing the time scale.
+    pub fn to_signed(self) -> Result<SignedTimePoint, TimeError> {
+        Ok(SignedTimePoint {
+            units: i64::try_from(self.units).map_err(|_| TimeError::Overflow)?,
+            scale: self.scale,
+        })
+    }
 }
 
 impl TimeDelta {
@@ -222,6 +318,94 @@ impl TimeDelta {
     pub fn as_millis(self) -> u64 {
         self.scale.to_millis(self.units)
     }
+
+    /// Converts to a signed duration without changing the time scale.
+    pub fn to_signed(self) -> Result<SignedTimeDelta, TimeError> {
+        Ok(SignedTimeDelta {
+            units: i64::try_from(self.units).map_err(|_| TimeError::Overflow)?,
+            scale: self.scale,
+        })
+    }
+}
+
+impl SignedTimePoint {
+    /// Builds a signed timestamp from native units and a non-zero time scale.
+    pub fn new(units: i64, scale: TimeScale) -> Result<Self, TimeError> {
+        TimeScale::new(scale.units_per_second)?;
+        Ok(Self { units, scale })
+    }
+
+    /// Rescales this timestamp into a target time scale.
+    pub fn rescale(self, target: TimeScale, rounding: TimeRounding) -> Result<Self, TimeError> {
+        Ok(Self {
+            units: self
+                .scale
+                .checked_rescale_i64(self.units, target, rounding)?,
+            scale: target,
+        })
+    }
+}
+
+impl SignedTimeDelta {
+    /// Builds a signed duration from native units and a non-zero time scale.
+    pub fn new(units: i64, scale: TimeScale) -> Result<Self, TimeError> {
+        TimeScale::new(scale.units_per_second)?;
+        Ok(Self { units, scale })
+    }
+
+    /// Rescales this duration into a target time scale.
+    pub fn rescale(self, target: TimeScale, rounding: TimeRounding) -> Result<Self, TimeError> {
+        Ok(Self {
+            units: self
+                .scale
+                .checked_rescale_i64(self.units, target, rounding)?,
+            scale: target,
+        })
+    }
+}
+
+fn rescale_signed(
+    units: i128,
+    numerator: i128,
+    denominator: i128,
+    rounding: TimeRounding,
+) -> Result<i128, TimeError> {
+    if denominator == 0 {
+        return Err(TimeError::ZeroScale);
+    }
+    let scaled = units.checked_mul(numerator).ok_or(TimeError::Overflow)?;
+    let quotient = scaled / denominator;
+    let remainder = scaled % denominator;
+    if remainder == 0 {
+        return Ok(quotient);
+    }
+    let same_sign = (scaled >= 0) == (denominator >= 0);
+    let adjustment = match rounding {
+        TimeRounding::Truncate => 0,
+        TimeRounding::Floor => {
+            if same_sign {
+                0
+            } else {
+                -1
+            }
+        }
+        TimeRounding::Ceil => {
+            if same_sign {
+                1
+            } else {
+                0
+            }
+        }
+        TimeRounding::Nearest => {
+            let doubled_remainder = remainder.abs().checked_mul(2).ok_or(TimeError::Overflow)?;
+            if doubled_remainder >= denominator.abs() {
+                if same_sign { 1 } else { -1 }
+            } else {
+                0
+            }
+        }
+    };
+    quotient.checked_add(adjustment).ok_or(TimeError::Overflow)
 }
 
 /// Builds fixed-duration chunks for an anonymous track.
@@ -578,6 +762,67 @@ mod tests {
         assert_eq!(samples[1].index, 2);
         assert_eq!(samples[1].payload_offset, 2);
         assert_eq!(samples[1].byte_count, 4);
+    }
+
+    #[test]
+    fn signed_time_preserves_negative_offsets() {
+        let scale = TimeScale::new(90_000).unwrap();
+        let point = SignedTimePoint::new(-45_000, scale).unwrap();
+
+        assert_eq!(
+            point.rescale(TimeScale::MILLIS, TimeRounding::Truncate),
+            Ok(SignedTimePoint {
+                units: -500,
+                scale: TimeScale::MILLIS,
+            })
+        );
+    }
+
+    #[test]
+    fn checked_rescale_supports_fractional_frame_rates() {
+        let scale = TimeScale::new(24_000).unwrap();
+        let target = TimeScale::new(1_001).unwrap();
+
+        assert_eq!(
+            scale.checked_rescale_u64(1, target, TimeRounding::Nearest),
+            Ok(0)
+        );
+        assert_eq!(
+            scale.checked_rescale_u64(24_000, target, TimeRounding::Nearest),
+            Ok(1_001)
+        );
+    }
+
+    #[test]
+    fn checked_rescale_rejects_zero_scale_and_overflow() {
+        assert_eq!(TimeScale::new(0), Err(TimeError::ZeroScale));
+        assert_eq!(
+            TimeScale::MILLIS.checked_rescale_u64(
+                u64::MAX,
+                TimeScale::new(u32::MAX).unwrap(),
+                TimeRounding::Nearest,
+            ),
+            Err(TimeError::Overflow)
+        );
+    }
+
+    #[test]
+    fn signed_rescale_rounding_modes_are_explicit() {
+        let scale = TimeScale::new(3).unwrap();
+        let target = TimeScale::new(2).unwrap();
+
+        assert_eq!(
+            scale.checked_rescale_i64(-2, target, TimeRounding::Truncate),
+            Ok(-1)
+        );
+        assert_eq!(
+            scale.checked_rescale_i64(-2, target, TimeRounding::Floor),
+            Ok(-2)
+        );
+        assert_eq!(
+            scale.checked_rescale_i64(2, target, TimeRounding::Ceil),
+            Ok(2)
+        );
     }
 
     fn packet(start_ms: u64, keyframe: bool) -> PacketRef {

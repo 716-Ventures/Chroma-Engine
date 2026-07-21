@@ -528,7 +528,7 @@ fn platform_decode_videotoolbox_bgra_frames(
         .map_err(|_| VideoDecodeError::BackendFailed {
             reason: "VideoToolbox decoded frame buffer lock was poisoned".to_string(),
         })?;
-    frames.sort_by_key(|frame| frame.pts);
+    frames.sort_by_key(|frame| (frame.pts.units, frame.pts.scale.units_per_second));
 
     Ok(DecodedVideoOutput {
         stream: DecodedVideoStream {
