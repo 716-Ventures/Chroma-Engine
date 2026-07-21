@@ -8,16 +8,15 @@ use crate::{
     container::matroska::{MatroskaTrack, MatroskaTrackKind, looks_like_ebml},
     fmp4::{
         Fmp4SampleEntry, Fmp4Track, Fmp4TrackKind, fragment_track_from_chunk_samples,
-        fragment_track_from_encoded_audio_frames, fragment_track_from_encoded_video_frames,
-        init_segment, media_fragment,
+        fragment_track_from_encoded_video_frames, init_segment, media_fragment,
     },
+    output::publish_bytes,
     packet::{ChunkSample, ExtractedChunk, TimePoint, TimeScale},
     source::MappedMediaFile,
     transcode::{
-        AudioDecodeCodec, AudioFrameTiming, EncodedAudioFrame, RawVideoFormat, RawVideoFrameRef,
-        RawVideoPixelFormat, VideoCodec, build_audio_decode_input, build_video_decode_input,
-        decode_dts_core_to_interleaved_i16, decode_videotoolbox_bgra_frames,
-        encode_aac_from_interleaved_i16, encode_h264_videotoolbox_bgra_frames,
+        RawVideoFormat, RawVideoFrameRef, RawVideoPixelFormat, VideoCodec,
+        build_video_decode_input, decode_videotoolbox_bgra_frames,
+        encode_h264_videotoolbox_bgra_frames,
     },
 };
 
@@ -26,7 +25,6 @@ const AUDIO_TRACK_ID: u32 = 2;
 const DEFAULT_VIDEO_BITRATE: u32 = 16_000_000;
 const DEFAULT_AUDIO_BITRATE: u32 = 384_000;
 const DEFAULT_SEGMENT_MS: u64 = 4_000;
-const AAC_FRAMES_PER_PACKET: u32 = 1_024;
 const H264_WEB_MAX_WIDTH: u32 = 1_920;
 const H264_WEB_MAX_HEIGHT: u32 = 1_080;
 
@@ -157,7 +155,7 @@ pub fn write_native_fmp4_transcode_init(
 ) -> Result<NativeFmp4TranscodeInitOutput> {
     let source = MappedMediaFile::open(input)?;
     let segment = transcode_matroska_segment(source.as_ref(), 0, &options)?;
-    std::fs::write(output, &segment.init_segment)?;
+    publish_bytes(output, &segment.init_segment)?;
     Ok(NativeFmp4TranscodeInitOutput {
         output: output.display().to_string(),
         video_track_id: segment.video_track_id,
@@ -177,7 +175,7 @@ pub fn write_native_fmp4_transcode_segment(
 ) -> Result<NativeFmp4TranscodeSegmentOutput> {
     let source = MappedMediaFile::open(input)?;
     let segment = transcode_matroska_segment(source.as_ref(), index, &options)?;
-    std::fs::write(output, &segment.media_segment)?;
+    publish_bytes(output, &segment.media_segment)?;
     Ok(NativeFmp4TranscodeSegmentOutput {
         output: output.display().to_string(),
         index,
@@ -204,8 +202,8 @@ pub fn write_native_fmp4_transcode_start(
 ) -> Result<NativeFmp4TranscodeStartOutput> {
     let source = MappedMediaFile::open(input)?;
     let segment = transcode_matroska_segment(source.as_ref(), index, &options)?;
-    std::fs::write(init_output, &segment.init_segment)?;
-    std::fs::write(segment_output, &segment.media_segment)?;
+    publish_bytes(init_output, &segment.init_segment)?;
+    publish_bytes(segment_output, &segment.media_segment)?;
     Ok(NativeFmp4TranscodeStartOutput {
         init_output: init_output.display().to_string(),
         segment_output: segment_output.display().to_string(),
@@ -700,64 +698,16 @@ fn matroska_audio_segment(
     track: &MatroskaTrack,
     manifest: ExtractedChunk,
     payload: Vec<u8>,
-    bitrate: u32,
+    _bitrate: u32,
 ) -> Result<AudioSegment> {
     match track.codec.as_str() {
-        "dts" => transcode_dts_audio_segment(&manifest, &payload, bitrate),
+        "dts" => bail!(
+            "DTS audio track {} requires a native decoder capability that is not currently executable",
+            track.index
+        ),
         "aac" | "ac3" | "eac3" => copy_matroska_audio_segment(track, manifest, payload),
         other => bail!("selected audio track codec {other} is not supported by native fMP4 output"),
     }
-}
-
-fn transcode_dts_audio_segment(
-    manifest: &ExtractedChunk,
-    payload: &[u8],
-    bitrate: u32,
-) -> Result<AudioSegment> {
-    let audio_decode_input = build_audio_decode_input(
-        AudioDecodeCodec::Dts,
-        chunk_time_scale(manifest),
-        &manifest.samples,
-        payload,
-        true,
-    )?;
-    let decoded_audio = decode_dts_core_to_interleaved_i16(&audio_decode_input)?;
-    let decoded_pcm = decoded_audio
-        .frames
-        .iter()
-        .flat_map(|frame| frame.pcm.iter().copied())
-        .collect::<Vec<_>>();
-    let bridge_format = crate::transcode::PcmAudioFormat {
-        sample_rate: decoded_audio.stream.format.sample_rate,
-        channels: decoded_audio.stream.format.channels.min(2),
-    };
-    let bridge_pcm = stereo_pcm_from_interleaved(
-        &decoded_pcm,
-        decoded_audio.stream.format.channels,
-        bridge_format.channels,
-    )?;
-    let mut encoded_audio = encode_aac_from_interleaved_i16(bridge_format, &bridge_pcm, bitrate)?;
-    rebase_audio_frames(
-        &mut encoded_audio.frames,
-        first_sample_time(manifest, bridge_format.sample_rate),
-    );
-    let fragment = fragment_track_from_encoded_audio_frames(AUDIO_TRACK_ID, &encoded_audio.frames)?;
-    let decoder_config = encoded_audio.stream.decoder_config.clone().ok_or_else(|| {
-        anyhow::anyhow!("AAC encoder did not return decoder config for DTS bridge")
-    })?;
-    Ok(AudioSegment {
-        fragment,
-        sample_entry: Fmp4SampleEntry::Aac {
-            decoder_config,
-            channel_count: bridge_format.channels.min(u32::from(u16::MAX)) as u16,
-            sample_rate: bridge_format.sample_rate,
-        },
-        codec: "aac".to_string(),
-        timescale: bridge_format.sample_rate,
-        default_sample_duration: AAC_FRAMES_PER_PACKET,
-        encoded_frame_count: encoded_audio.frames.len(),
-        first_pts: encoded_audio.frames.first().map(|frame| frame.timing.pts),
-    })
 }
 
 fn copy_matroska_audio_segment(
@@ -859,30 +809,6 @@ fn chunk_time_scale(chunk: &ExtractedChunk) -> TimeScale {
         .unwrap_or(TimeScale::MILLIS)
 }
 
-fn first_sample_time(chunk: &ExtractedChunk, sample_rate: u32) -> u64 {
-    chunk
-        .samples
-        .first()
-        .map(|sample| rescale_units(sample.pts.units, sample.pts.scale, sample_rate))
-        .unwrap_or(0)
-}
-
-fn rebase_audio_frames(frames: &mut [EncodedAudioFrame], start_sample: u64) {
-    for frame in frames {
-        let rebased_start = start_sample.saturating_add(frame.timing.start_sample);
-        frame.timing = AudioFrameTiming {
-            pts: TimePoint {
-                units: rebased_start,
-                scale: frame.timing.pts.scale,
-            },
-            duration: frame.timing.duration,
-            start_sample: rebased_start,
-            sample_count: frame.timing.sample_count,
-            reanchored: frame.timing.reanchored,
-        };
-    }
-}
-
 fn rescale_units(units: u64, from: TimeScale, to_units_per_second: u32) -> u64 {
     if from.units_per_second == 0 || to_units_per_second == 0 {
         return 0;
@@ -890,34 +816,4 @@ fn rescale_units(units: u64, from: TimeScale, to_units_per_second: u32) -> u64 {
     let numerator = u128::from(units) * u128::from(to_units_per_second);
     let denominator = u128::from(from.units_per_second);
     ((numerator + (denominator / 2)) / denominator).min(u128::from(u64::MAX)) as u64
-}
-
-fn stereo_pcm_from_interleaved(
-    pcm: &[i16],
-    source_channels: u32,
-    target_channels: u32,
-) -> Result<Vec<i16>> {
-    if source_channels == 0 || target_channels == 0 {
-        bail!("audio bridge channel count must be greater than zero");
-    }
-    if !pcm.len().is_multiple_of(source_channels as usize) {
-        bail!("decoded PCM sample count does not align to the source channel count");
-    }
-    if source_channels == target_channels {
-        return Ok(pcm.to_vec());
-    }
-    let source_channels = source_channels as usize;
-    let target_channels = target_channels.min(2) as usize;
-    let mut out = Vec::with_capacity((pcm.len() / source_channels) * target_channels);
-    for frame in pcm.chunks_exact(source_channels) {
-        match target_channels {
-            1 => out.push(frame[0]),
-            2 => {
-                out.push(frame[0]);
-                out.push(*frame.get(1).unwrap_or(&frame[0]));
-            }
-            _ => unreachable!("target_channels is clamped to stereo"),
-        }
-    }
-    Ok(out)
 }

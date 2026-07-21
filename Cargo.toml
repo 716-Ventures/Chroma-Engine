@@ -24,9 +24,6 @@ anyhow = "1.0"
 bitflags = "2.6"
 bytes = "1.7"
 clap = { version = "4.5", features = ["derive"] }
-memmap2 = "0.9"
-oxideav-core = "0.1"
-oxideav-dts = { path = "vendor/oxideav-dts-0.0.1", version = "0.0.1" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "1.0"

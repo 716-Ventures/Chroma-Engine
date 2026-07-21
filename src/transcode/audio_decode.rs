@@ -83,40 +83,6 @@ pub struct DtsAudioBridgeProbe {
     pub packets: Vec<DtsAudioPacketProbe>,
 }
 
-/// Stable output description for decoded PCM emitted by a native bridge decoder.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct DecodedPcmStream {
-    /// Raw PCM format emitted by the decoder.
-    pub format: PcmAudioFormat,
-    /// Source codec decoded into PCM.
-    pub source_codec: AudioDecodeCodec,
-    /// Backend that produced the PCM.
-    pub decoder: String,
-}
-
-/// One decoded PCM frame emitted by a native bridge decoder.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct DecodedPcmFrame {
-    /// Presentation timestamp.
-    pub pts: TimePoint,
-    /// Decoded PCM frame count per channel.
-    pub sample_count: u32,
-    /// Interleaved signed 16-bit PCM.
-    pub pcm: Vec<i16>,
-}
-
-/// Decoded PCM stream plus frames emitted by a backend.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct DecodedPcmOutput {
-    /// Output stream description.
-    pub stream: DecodedPcmStream,
-    /// Decoded PCM frames.
-    pub frames: Vec<DecodedPcmFrame>,
-}
-
 /// Error returned while preparing or probing audio decode input.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum AudioDecodeError {
@@ -140,6 +106,12 @@ pub enum AudioDecodeError {
     BackendFailed {
         /// Diagnostic reason.
         reason: String,
+    },
+    /// DTS can be inspected for routing, but no production decoder is currently executable.
+    #[error("audio decode capability is unsupported: {codec}")]
+    UnsupportedCapability {
+        /// Unsupported source codec.
+        codec: &'static str,
     },
 }
 
@@ -234,158 +206,6 @@ pub fn probe_dts_audio_bridge(
         stable_format,
         packets,
     })
-}
-
-/// Decodes DTS core frames to interleaved signed 16-bit PCM.
-pub fn decode_dts_core_to_interleaved_i16(
-    input: &AudioDecodeInput<'_>,
-) -> Result<DecodedPcmOutput, AudioDecodeError> {
-    let probe = probe_dts_audio_bridge(input)?;
-    if !probe.stable_format {
-        return Err(AudioDecodeError::FormatChanged);
-    }
-
-    use oxideav_core::{CodecId, CodecParameters, Frame, Packet, TimeBase};
-
-    let params = CodecParameters::audio(CodecId::new("dts"));
-    let mut decoder = oxideav_dts::decoder::make_decoder(&params).map_err(|error| {
-        AudioDecodeError::BackendFailed {
-            reason: error.to_string(),
-        }
-    })?;
-    let time_base = TimeBase::new(1, i64::from(input.time_scale.units_per_second.max(1)));
-    let mut decoded_frames = Vec::new();
-
-    for (packet, packet_probe) in input.packets.iter().zip(&probe.packets) {
-        for frame_header in &packet_probe.frames {
-            let start = frame_header.offset;
-            let end = start + frame_header.frame_size;
-            let frame_bytes = packet
-                .bytes
-                .get(start..end)
-                .ok_or(AudioDecodeError::PacketOutOfBounds)?;
-            let oxide_packet = Packet::new(0, time_base, frame_bytes.to_vec())
-                .with_pts(timepoint_units(packet.pts))
-                .with_dts(timepoint_units(packet.dts))
-                .with_duration(timedelta_units(packet.duration));
-
-            decoder.send_packet(&oxide_packet).map_err(|error| {
-                AudioDecodeError::BackendFailed {
-                    reason: error.to_string(),
-                }
-            })?;
-
-            loop {
-                match decoder.receive_frame() {
-                    Ok(Frame::Audio(frame)) => {
-                        let plane =
-                            frame
-                                .data
-                                .first()
-                                .ok_or_else(|| AudioDecodeError::BackendFailed {
-                                    reason: "DTS decoder returned audio frame with no PCM plane"
-                                        .to_string(),
-                                })?;
-                        decoded_frames.push(DecodedPcmFrame {
-                            pts: packet.pts,
-                            sample_count: frame.samples,
-                            pcm: le_bytes_to_i16(plane),
-                        });
-                    }
-                    Ok(_) => {
-                        return Err(AudioDecodeError::BackendFailed {
-                            reason: "DTS decoder returned non-audio frame".to_string(),
-                        });
-                    }
-                    Err(error) if error.is_need_more() => break,
-                    Err(error) => {
-                        return Err(AudioDecodeError::BackendFailed {
-                            reason: error.to_string(),
-                        });
-                    }
-                }
-            }
-        }
-    }
-
-    let decoded_channels = decoded_frames
-        .first()
-        .and_then(|frame| {
-            let samples = usize::try_from(frame.sample_count).ok()?;
-            u32::try_from(frame.pcm.len().checked_div(samples)?).ok()
-        })
-        .filter(|channels| *channels > 0)
-        .unwrap_or(probe.pcm_format.channels);
-
-    Ok(DecodedPcmOutput {
-        stream: DecodedPcmStream {
-            format: PcmAudioFormat {
-                sample_rate: probe.pcm_format.sample_rate,
-                channels: decoded_channels,
-            },
-            source_codec: AudioDecodeCodec::Dts,
-            decoder: "oxideav-dts-core".to_string(),
-        },
-        frames: decoded_frames,
-    })
-}
-
-/// Selects the E-AC-3 bridge channel count for decoded PCM.
-pub fn eac3_bridge_channel_count(decoded_channels: u32) -> u32 {
-    match decoded_channels {
-        0 | 1 => 1,
-        2 => 2,
-        3..=6 => 6,
-        _ => 8,
-    }
-}
-
-/// Converts interleaved PCM to a requested channel count by truncating extra channels
-/// or zero-padding missing channels.
-pub fn normalize_interleaved_channels(
-    pcm: &[i16],
-    source_channels: u32,
-    target_channels: u32,
-) -> Result<Vec<i16>, AudioDecodeError> {
-    if source_channels == 0 || target_channels == 0 {
-        return Err(AudioDecodeError::BackendFailed {
-            reason: "audio bridge channel count must be greater than zero".to_string(),
-        });
-    }
-    if !pcm.len().is_multiple_of(source_channels as usize) {
-        return Err(AudioDecodeError::BackendFailed {
-            reason: "decoded PCM sample count does not align to source channels".to_string(),
-        });
-    }
-    if source_channels == target_channels {
-        return Ok(pcm.to_vec());
-    }
-
-    let source_channels = source_channels as usize;
-    let target_channels = target_channels as usize;
-    let frame_count = pcm.len() / source_channels;
-    let mut out = Vec::with_capacity(frame_count * target_channels);
-    for frame in pcm.chunks_exact(source_channels) {
-        let copied = source_channels.min(target_channels);
-        out.extend_from_slice(&frame[..copied]);
-        out.resize(out.len() + target_channels - copied, 0);
-    }
-    Ok(out)
-}
-
-fn timepoint_units(value: TimePoint) -> i64 {
-    i64::try_from(value.units).unwrap_or(i64::MAX)
-}
-
-fn timedelta_units(value: TimeDelta) -> i64 {
-    i64::try_from(value.units).unwrap_or(i64::MAX)
-}
-
-fn le_bytes_to_i16(bytes: &[u8]) -> Vec<i16> {
-    bytes
-        .chunks_exact(2)
-        .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
-        .collect()
 }
 
 #[cfg(test)]

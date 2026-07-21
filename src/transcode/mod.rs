@@ -13,10 +13,8 @@ mod video_encode;
 
 pub use audio_clock::{AudioClockConfig, AudioFrameTiming, AudioSampleClock};
 pub use audio_decode::{
-    AudioDecodeCodec, AudioDecodeError, AudioDecodeInput, CompressedAudioPacket, DecodedPcmFrame,
-    DecodedPcmOutput, DecodedPcmStream, DtsAudioBridgeProbe, DtsAudioPacketProbe,
-    build_audio_decode_input, decode_dts_core_to_interleaved_i16, eac3_bridge_channel_count,
-    normalize_interleaved_channels, probe_dts_audio_bridge,
+    AudioDecodeCodec, AudioDecodeError, AudioDecodeInput, CompressedAudioPacket,
+    DtsAudioBridgeProbe, DtsAudioPacketProbe, build_audio_decode_input, probe_dts_audio_bridge,
 };
 pub use audio_encode::{
     AudioEncodeError, EncodedAudioOutput, PcmAudioFormat, encode_aac_from_interleaved_i16,

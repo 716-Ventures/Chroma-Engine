@@ -102,10 +102,34 @@ pub struct VideoDecoderBackend {
     pub native_surface_formats: Vec<VideoDecodeSurfaceFormat>,
     /// True when the backend can keep decoded surfaces on the device for a compatible encoder path.
     pub zero_copy_capable: bool,
+    /// Runtime capability state. Planning may select only executable or verified backends.
+    pub state: CapabilityState,
     /// Whether this backend is executable in the current build.
     pub available: bool,
     /// Diagnostic reason when the backend is not available.
     pub unavailable_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+/// Truthful lifecycle state for a runtime media capability.
+pub enum CapabilityState {
+    /// Chroma has a model/roadmap entry, but no local signal or executable implementation.
+    Modeled,
+    /// Chroma detected hardware/runtime presence, but no executable backend is wired.
+    Detected,
+    /// Chroma opened the backend/device, but has not completed a codec smoke probe.
+    Opened,
+    /// Chroma has an implementation that can run for this codec/profile.
+    Executable,
+    /// Chroma completed a real warmup/smoke probe for this codec/profile.
+    Verified,
+}
+
+impl CapabilityState {
+    fn selectable(self) -> bool {
+        matches!(self, Self::Executable | Self::Verified)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -630,7 +654,8 @@ fn video_decoder_backend(
     decoder: &str,
     native_surface_formats: &[VideoDecodeSurfaceFormat],
 ) -> VideoDecoderBackend {
-    let available = video_decode_backend_available(os, kind, codec);
+    let state = video_decode_backend_state(os, kind, codec);
+    let available = state.selectable();
     VideoDecoderBackend {
         kind,
         codec,
@@ -641,6 +666,7 @@ fn video_decoder_backend(
         zero_copy_capable: native_surface_formats
             .iter()
             .any(|format| hardware_surface_format(*format)),
+        state,
         available,
         unavailable_reason: (!available).then(|| video_decode_unavailable_reason(os, kind, codec)),
     }
@@ -681,21 +707,35 @@ fn video_decode_unavailable_reason(os: &str, kind: HardwareKind, codec: VideoCod
     }
 }
 
-fn video_decode_backend_available(os: &str, kind: HardwareKind, codec: VideoCodec) -> bool {
+fn video_decode_backend_state(os: &str, kind: HardwareKind, codec: VideoCodec) -> CapabilityState {
     if os != std::env::consts::OS {
-        return false;
+        return CapabilityState::Modeled;
     }
     match (os, kind) {
-        ("macos", HardwareKind::VideoToolbox) => video_toolbox_decode_supported(codec),
-        ("linux", HardwareKind::Vaapi | HardwareKind::Qsv) => linux_dri_decode_device_present(),
-        ("linux", HardwareKind::Nvdec) => linux_nvidia_decode_device_present(),
+        ("macos", HardwareKind::VideoToolbox) if video_toolbox_decode_supported(codec) => {
+            CapabilityState::Executable
+        }
+        ("linux", HardwareKind::Vaapi | HardwareKind::Qsv) if linux_dri_decode_device_present() => {
+            CapabilityState::Detected
+        }
+        ("linux", HardwareKind::Nvdec) if linux_nvidia_decode_device_present() => {
+            CapabilityState::Detected
+        }
         ("windows", HardwareKind::D3d11Va | HardwareKind::D3d12Va | HardwareKind::Dxva2) => {
-            windows_directx_decode_runtime_present()
+            if windows_directx_decode_runtime_present() {
+                CapabilityState::Detected
+            } else {
+                CapabilityState::Modeled
+            }
         }
         ("windows", HardwareKind::Qsv | HardwareKind::Amf | HardwareKind::Nvdec) => {
-            windows_vendor_decode_runtime_present(kind)
+            if windows_vendor_decode_runtime_present(kind) {
+                CapabilityState::Detected
+            } else {
+                CapabilityState::Modeled
+            }
         }
-        _ => false,
+        _ => CapabilityState::Modeled,
     }
 }
 
@@ -1076,12 +1116,24 @@ mod tests {
                     && backend.codec == VideoCodec::H264
                     && backend.decoder == "chroma-videotoolbox-h264-decoder"
                     && backend.available == video_toolbox_decode_supported(VideoCodec::H264)
+                    && backend.state
+                        == if video_toolbox_decode_supported(VideoCodec::H264) {
+                            CapabilityState::Executable
+                        } else {
+                            CapabilityState::Modeled
+                        }
             }));
             assert!(plan.video_backends.iter().any(|backend| {
                 backend.kind == HardwareKind::VideoToolbox
                     && backend.codec == VideoCodec::Hevc
                     && backend.decoder == "chroma-videotoolbox-hevc-decoder"
                     && backend.available == video_toolbox_decode_supported(VideoCodec::Hevc)
+                    && backend.state
+                        == if video_toolbox_decode_supported(VideoCodec::Hevc) {
+                            CapabilityState::Executable
+                        } else {
+                            CapabilityState::Modeled
+                        }
             }));
         }
         assert!(
@@ -1110,6 +1162,11 @@ mod tests {
         assert!(backends.iter().any(|backend| {
             backend.kind == HardwareKind::Vaapi
                 && backend.codec == VideoCodec::H264
+                && !backend.available
+                && matches!(
+                    backend.state,
+                    CapabilityState::Modeled | CapabilityState::Detected
+                )
                 && backend
                     .native_surface_formats
                     .contains(&VideoDecodeSurfaceFormat::VaapiSurface)
@@ -1138,6 +1195,11 @@ mod tests {
         assert!(backends.iter().any(|backend| {
             backend.kind == HardwareKind::D3d11Va
                 && backend.codec == VideoCodec::H264
+                && !backend.available
+                && matches!(
+                    backend.state,
+                    CapabilityState::Modeled | CapabilityState::Detected
+                )
                 && backend
                     .native_surface_formats
                     .contains(&VideoDecodeSurfaceFormat::D3d11Texture)

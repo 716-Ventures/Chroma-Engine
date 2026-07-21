@@ -12,6 +12,7 @@ use crate::container::{
         parse_chunk_plan as parse_mp4_chunk_plan, parse_codec_config as parse_mp4_codec_config,
     },
 };
+use crate::output::publish_bytes;
 use crate::packet::{ExtractedChunk, TimeDelta, TimePoint, TimeScale};
 use crate::playback_manifest::{
     MatroskaManifestOptions, Mp4ManifestOptions, build_matroska_playback_manifest,
@@ -23,8 +24,7 @@ use crate::source::MappedMediaFile;
 use crate::transcode::{
     AudioDecodeCodec, HlsTranscodeRequest, NativeFmp4TranscodeOptions, NativeFmp4VideoMode,
     RawVideoFormat, RawVideoPixelFormat, VideoCodec, build_audio_decode_input,
-    build_video_decode_input, decode_dts_core_to_interleaved_i16, decode_videotoolbox_bgra_frames,
-    encode_aac_from_interleaved_i16, normalize_interleaved_channels, plan_hls_transcode,
+    build_video_decode_input, decode_videotoolbox_bgra_frames, plan_hls_transcode,
     probe_dts_audio_bridge, write_native_fmp4_transcode_init, write_native_fmp4_transcode_segment,
     write_native_fmp4_transcode_start,
 };
@@ -512,7 +512,7 @@ pub fn run() -> Result<()> {
                     "native chunk extraction currently supports MP4/MOV and Matroska/WebM packet tables"
                 );
             };
-            std::fs::write(output, payload)?;
+            publish_bytes(&output, &payload)?;
             println!("{}", serde_json::to_string_pretty(&manifest)?);
         }
         Command::ExtractWindow {
@@ -606,7 +606,7 @@ pub fn run() -> Result<()> {
                 extract_mp4_chunk(bytes, Some(&config.track_id), target_ms, chunk_index)?;
             let annex_b = avc_chunk_to_annex_b(&payload, &manifest.samples, nalu_length_size)?;
             let byte_count = annex_b.len() as u64;
-            std::fs::write(output, annex_b)?;
+            publish_bytes(&output, &annex_b)?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&H264AnnexBOutput {
@@ -641,7 +641,7 @@ pub fn run() -> Result<()> {
                 extract_mp4_chunk(bytes, Some(&config.track_id), target_ms, chunk_index)?;
             let annex_b = hevc_chunk_to_annex_b(&payload, &manifest.samples, nalu_length_size)?;
             let byte_count = annex_b.len() as u64;
-            std::fs::write(output, annex_b)?;
+            publish_bytes(&output, &annex_b)?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&HevcAnnexBOutput {
@@ -679,7 +679,7 @@ pub fn run() -> Result<()> {
                 extract_mp4_chunk(bytes, Some(&config.track_id), target_ms, chunk_index)?;
             let adts = aac_chunk_to_adts(&payload, &manifest.samples, aac_config)?;
             let byte_count = adts.len() as u64;
-            std::fs::write(output, adts)?;
+            publish_bytes(&output, &adts)?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&AacAdtsOutput {
@@ -1076,38 +1076,18 @@ fn decode_matroska_audio_chunk(
         true,
     )?;
     let probe = probe_dts_audio_bridge(&decode_input)?;
-    let decoded = if probe_only {
-        None
-    } else {
-        Some(decode_dts_core_to_interleaved_i16(&decode_input)?)
-    };
-
-    let (decoder, decoded_pcm_frame_count, decoded_samples, decoded_bytes) = if let Some(decoded) =
-        decoded
-    {
-        let samples = decoded
-            .frames
-            .iter()
-            .map(|frame| u64::from(frame.sample_count) * u64::from(decoded.stream.format.channels))
-            .sum::<u64>();
-        let bytes = decoded
-            .frames
-            .iter()
-            .map(|frame| (frame.pcm.len() * std::mem::size_of::<i16>()) as u64)
-            .sum::<u64>();
-        (decoded.stream.decoder, decoded.frames.len(), samples, bytes)
-    } else {
-        ("dts-core-probe".to_string(), 0, 0, 0)
-    };
+    if !probe_only {
+        bail!("DTS decode is currently unsupported; use --probe-only for DTS packet inspection");
+    }
 
     Ok(DecodeAudioChunkOutput {
         track_id,
         chunk_index: manifest.chunk.index,
         codec: AudioDecodeCodec::Dts,
-        decoder,
+        decoder: "dts-core-probe".to_string(),
         packet_count: probe.packet_count,
         dts_core_frame_count: probe.dts_core_frame_count,
-        decoded_pcm_frame_count,
+        decoded_pcm_frame_count: 0,
         sample_rate: probe.pcm_format.sample_rate,
         channels: probe.pcm_format.channels,
         time_scale,
@@ -1115,8 +1095,8 @@ fn decode_matroska_audio_chunk(
         last_pts: probe.last_pts,
         stable_format: probe.stable_format,
         pcm_frames_per_channel: probe.pcm_frame_count,
-        decoded_samples,
-        decoded_bytes,
+        decoded_samples: 0,
+        decoded_bytes: 0,
         probe_only,
     })
 }
@@ -1126,7 +1106,7 @@ fn bridge_audio_chunk(
     requested_track_id: Option<&str>,
     chunk_index: u32,
     target_ms: u64,
-    bitrate: u32,
+    _bitrate: u32,
 ) -> Result<BridgeAudioChunkOutput> {
     if !looks_like_ebml(bytes) {
         bail!("bridge-audio-chunk currently supports Matroska/WebM DTS packet tables");
@@ -1155,51 +1135,8 @@ fn bridge_audio_chunk(
         &payload,
         true,
     )?;
-    let decoded = decode_dts_core_to_interleaved_i16(&decode_input)?;
-    let decoded_pcm = decoded
-        .frames
-        .iter()
-        .flat_map(|frame| frame.pcm.iter().copied())
-        .collect::<Vec<_>>();
-    let bridge_channels = decoded.stream.format.channels.min(2);
-    let bridge_pcm = normalize_interleaved_channels(
-        &decoded_pcm,
-        decoded.stream.format.channels,
-        bridge_channels,
-    )?;
-    let bridge_format = crate::transcode::PcmAudioFormat {
-        sample_rate: decoded.stream.format.sample_rate,
-        channels: bridge_channels,
-    };
-    let encoded = encode_aac_from_interleaved_i16(bridge_format, &bridge_pcm, bitrate)?;
-    let decoded_samples = decoded
-        .frames
-        .iter()
-        .map(|frame| u64::from(frame.sample_count) * u64::from(decoded.stream.format.channels))
-        .sum::<u64>();
-    let encoded_bytes = encoded
-        .frames
-        .iter()
-        .map(|frame| frame.payload.len() as u64)
-        .sum::<u64>();
-
-    Ok(BridgeAudioChunkOutput {
-        track_id,
-        chunk_index: manifest.chunk.index,
-        source_codec: decoded.stream.source_codec,
-        decoder: decoded.stream.decoder,
-        encoder: "chroma-audiotoolbox-aac".to_string(),
-        packet_count: decode_input.packets.len(),
-        decoded_pcm_frame_count: decoded.frames.len(),
-        encoded_frame_count: encoded.frames.len(),
-        sample_rate: encoded.stream.sample_rate,
-        channels: encoded.stream.channels,
-        bitrate,
-        decoded_samples,
-        encoded_bytes,
-        first_pts: decoded.frames.first().map(|frame| frame.pts),
-        last_pts: decoded.frames.last().map(|frame| frame.pts),
-    })
+    let _probe = probe_dts_audio_bridge(&decode_input)?;
+    bail!("DTS audio bridge is unsupported until Chroma Engine has a measured native DTS decoder")
 }
 
 fn decode_mp4_chunk(
@@ -1483,14 +1420,7 @@ fn safe_cache_component(value: &str) -> String {
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
-    let tmp = path.with_extension(format!(
-        "{}.tmp",
-        path.extension()
-            .and_then(|ext| ext.to_str())
-            .unwrap_or("chroma")
-    ));
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(tmp, path)?;
+    publish_bytes(path, bytes)?;
     Ok(())
 }
 

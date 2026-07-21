@@ -14,6 +14,7 @@ pub(crate) mod container;
 pub(crate) mod error;
 pub(crate) mod fmp4;
 pub(crate) mod hls;
+pub(crate) mod output;
 pub(crate) mod packet;
 pub(crate) mod pipeline;
 pub(crate) mod platform;
@@ -46,7 +47,7 @@ pub use packet::{
 };
 pub use pipeline::{PipelineError, PipelineStageChunk, PipelineStagePayload, emit_stage_chunks};
 pub use platform::{
-    AudioEncoderBackend, DecoderBackendPlan, EncoderBackend, EncoderBackendPlan,
+    AudioEncoderBackend, CapabilityState, DecoderBackendPlan, EncoderBackend, EncoderBackendPlan,
     EncoderFailureNote, EncoderProbe, EncoderProfile, EncoderWarmupError, EncoderWarmupKind,
     EncoderWarmupTask, HardwareKind, VideoDecodeSurfaceFormat, VideoDecoderBackend,
     VideoOutputCodec, decoder_backend_plan, encoder_backend_plan, encoder_probe, warmup,
@@ -68,23 +69,22 @@ pub use session::{
 pub use transcode::{
     AudioClockConfig, AudioCodec, AudioDecodeCodec, AudioDecodeError, AudioDecodeInput,
     AudioEncodeError, AudioFrameTiming, AudioOp, AudioSampleClock, CompressedAudioPacket,
-    CompressedVideoPacket, DecodedPcmFrame, DecodedPcmOutput, DecodedPcmStream, DecodedVideoFrame,
-    DecodedVideoOutput, DecodedVideoStream, DtsAudioBridgeProbe, DtsAudioPacketProbe,
-    EncodedAudioFrame, EncodedAudioOutput, EncodedAudioStream, EncodedVideoFrame,
-    EncodedVideoOutput, EncodedVideoStream, HlsTranscodeRequest, NativeFmp4TranscodeInitOutput,
-    NativeFmp4TranscodeOptions, NativeFmp4TranscodeSegmentOutput, NativeFmp4TranscodeStartOutput,
-    OperationPlan, PcmAudioFormat, PlanMode, RawVideoFormat, RawVideoFrameRef, RawVideoPixelFormat,
-    SubtitleOp, TranscodeExecutionPlan, TranscodeOutputAudio, TranscodeOutputPlan,
-    TranscodeOutputVideo, TranscodeStage, TranscodeStageKind, TranscodeStageStatus, VideoCodec,
-    VideoDecodeError, VideoDecodeInput, VideoDecodeSessionInfo, VideoDecoderAction,
-    VideoDecoderDrainState, VideoEncodeError, VideoEncodeSessionInfo, VideoOp,
-    build_audio_decode_input, build_video_decode_input, decode_dts_core_to_interleaved_i16,
-    decode_videotoolbox_bgra_frames, decoder_actions_for_input, eac3_bridge_channel_count,
+    CompressedVideoPacket, DecodedVideoFrame, DecodedVideoOutput, DecodedVideoStream,
+    DtsAudioBridgeProbe, DtsAudioPacketProbe, EncodedAudioFrame, EncodedAudioOutput,
+    EncodedAudioStream, EncodedVideoFrame, EncodedVideoOutput, EncodedVideoStream,
+    HlsTranscodeRequest, NativeFmp4TranscodeInitOutput, NativeFmp4TranscodeOptions,
+    NativeFmp4TranscodeSegmentOutput, NativeFmp4TranscodeStartOutput, OperationPlan,
+    PcmAudioFormat, PlanMode, RawVideoFormat, RawVideoFrameRef, RawVideoPixelFormat, SubtitleOp,
+    TranscodeExecutionPlan, TranscodeOutputAudio, TranscodeOutputPlan, TranscodeOutputVideo,
+    TranscodeStage, TranscodeStageKind, TranscodeStageStatus, VideoCodec, VideoDecodeError,
+    VideoDecodeInput, VideoDecodeSessionInfo, VideoDecoderAction, VideoDecoderDrainState,
+    VideoEncodeError, VideoEncodeSessionInfo, VideoOp, build_audio_decode_input,
+    build_video_decode_input, decode_videotoolbox_bgra_frames, decoder_actions_for_input,
     encode_aac_from_interleaved_i16, encode_h264_videotoolbox_bgra_frame,
-    encode_h264_videotoolbox_bgra_frames, encode_hevc_videotoolbox_bgra_frame,
-    normalize_interleaved_channels, plan_hls_transcode, probe_dts_audio_bridge,
-    probe_videotoolbox_h264_decoder_session, probe_videotoolbox_h264_session,
-    probe_videotoolbox_hevc_decoder_session, probe_videotoolbox_hevc_session,
-    validate_decoded_video_format, write_native_fmp4_transcode_init,
-    write_native_fmp4_transcode_segment, write_native_fmp4_transcode_start,
+    encode_h264_videotoolbox_bgra_frames, encode_hevc_videotoolbox_bgra_frame, plan_hls_transcode,
+    probe_dts_audio_bridge, probe_videotoolbox_h264_decoder_session,
+    probe_videotoolbox_h264_session, probe_videotoolbox_hevc_decoder_session,
+    probe_videotoolbox_hevc_session, validate_decoded_video_format,
+    write_native_fmp4_transcode_init, write_native_fmp4_transcode_segment,
+    write_native_fmp4_transcode_start,
 };

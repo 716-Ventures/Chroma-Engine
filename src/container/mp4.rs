@@ -4,7 +4,7 @@ use crate::{
     codec::pixel_format::{
         pixel_format_from_avc_decoder_config, pixel_format_from_hevc_decoder_config,
     },
-    container::ContainerKind,
+    container::{ContainerKind, ParseLimits},
     packet::{
         ChunkPlan, ExtractedChunk, NativeChunk, PacketExtractError, PacketRange, PacketRef,
         TimeDelta, TimePoint, TimeScale, extract_packet_payload, packet_samples_for_range,
@@ -703,21 +703,26 @@ impl SampleTable {
 }
 
 fn parse_sample_table(stbl: &[u8]) -> Option<SampleTable> {
-    let sample_sizes = find_atom(stbl, b"stsz").and_then(parse_stsz)?;
+    parse_sample_table_with_limits(stbl, ParseLimits::default())
+}
+
+fn parse_sample_table_with_limits(stbl: &[u8], limits: ParseLimits) -> Option<SampleTable> {
+    let sample_sizes = find_atom(stbl, b"stsz").and_then(|payload| parse_stsz(payload, limits))?;
     let sample_count = sample_sizes.len();
     let sample_durations = find_atom(stbl, b"stts")
-        .and_then(|payload| parse_stts(payload, sample_count))
+        .and_then(|payload| parse_stts(payload, sample_count, limits))
         .unwrap_or_else(|| vec![0; sample_count]);
     let composition_offsets = find_atom(stbl, b"ctts")
-        .and_then(|payload| parse_ctts(payload, sample_count))
+        .and_then(|payload| parse_ctts(payload, sample_count, limits))
         .unwrap_or_else(|| vec![0; sample_count]);
     let keyframes = find_atom(stbl, b"stss")
-        .and_then(|payload| parse_stss(payload, sample_count))
+        .and_then(|payload| parse_stss(payload, sample_count, limits))
         .unwrap_or_else(|| vec![true; sample_count]);
     let chunk_offsets = find_atom(stbl, b"stco")
-        .and_then(parse_stco)
-        .or_else(|| find_atom(stbl, b"co64").and_then(parse_co64))?;
-    let sample_to_chunk = find_atom(stbl, b"stsc").and_then(parse_stsc)?;
+        .and_then(|payload| parse_stco(payload, limits))
+        .or_else(|| find_atom(stbl, b"co64").and_then(|payload| parse_co64(payload, limits)))?;
+    let sample_to_chunk =
+        find_atom(stbl, b"stsc").and_then(|payload| parse_stsc(payload, limits))?;
 
     Some(SampleTable {
         sample_sizes,
@@ -737,8 +742,11 @@ struct SampleTiming {
 }
 
 fn parse_sample_timing(stbl: &[u8]) -> Option<SampleTiming> {
-    let (sample_count, total_size_bytes) = find_atom(stbl, b"stsz").and_then(parse_stsz_totals)?;
-    let total_duration_units = find_atom(stbl, b"stts").and_then(parse_stts_total_duration)?;
+    let limits = ParseLimits::default();
+    let (sample_count, total_size_bytes) =
+        find_atom(stbl, b"stsz").and_then(|payload| parse_stsz_totals(payload, limits))?;
+    let total_duration_units =
+        find_atom(stbl, b"stts").and_then(|payload| parse_stts_total_duration(payload, limits))?;
     Some(SampleTiming {
         sample_count,
         total_size_bytes,
@@ -804,23 +812,23 @@ fn parse_mdhd_timescale(payload: &[u8]) -> Option<u32> {
     }
 }
 
-fn parse_stts(payload: &[u8], sample_count: usize) -> Option<Vec<u64>> {
+fn parse_stts(payload: &[u8], sample_count: usize, limits: ParseLimits) -> Option<Vec<u64>> {
     if payload.len() < 8 {
         return None;
     }
-    let entry_count = read_u32(&payload[4..8])? as usize;
+    let entry_count = checked_table_entry_count(payload, 8, 8, limits)?;
     let mut offset = 8;
     let mut durations = Vec::with_capacity(sample_count);
     for _ in 0..entry_count {
-        if offset + 8 > payload.len() {
+        let count = usize::try_from(read_u32(&payload[offset..offset + 4])?).ok()?;
+        let delta = u64::from(read_u32(&payload[offset + 4..offset + 8])?);
+        if count > sample_count.checked_sub(durations.len())? {
             return None;
         }
-        let count = read_u32(&payload[offset..offset + 4])? as usize;
-        let delta = u64::from(read_u32(&payload[offset + 4..offset + 8])?);
+        durations.try_reserve(count).ok()?;
         durations.extend(std::iter::repeat_n(delta, count));
         offset += 8;
     }
-    durations.truncate(sample_count);
     if durations.len() == sample_count {
         Some(durations)
     } else {
@@ -828,47 +836,44 @@ fn parse_stts(payload: &[u8], sample_count: usize) -> Option<Vec<u64>> {
     }
 }
 
-fn parse_stts_total_duration(payload: &[u8]) -> Option<u64> {
+fn parse_stts_total_duration(payload: &[u8], limits: ParseLimits) -> Option<u64> {
     if payload.len() < 8 {
         return None;
     }
-    let entry_count = read_u32(&payload[4..8])? as usize;
+    let entry_count = checked_table_entry_count(payload, 8, 8, limits)?;
     let mut offset = 8;
     let mut total = 0_u64;
     for _ in 0..entry_count {
-        if offset + 8 > payload.len() {
-            return None;
-        }
         let count = u64::from(read_u32(&payload[offset..offset + 4])?);
         let delta = u64::from(read_u32(&payload[offset + 4..offset + 8])?);
-        total = total.saturating_add(count.saturating_mul(delta));
+        total = total.checked_add(count.checked_mul(delta)?)?;
         offset += 8;
     }
     (total > 0).then_some(total)
 }
 
-fn parse_ctts(payload: &[u8], sample_count: usize) -> Option<Vec<i64>> {
+fn parse_ctts(payload: &[u8], sample_count: usize, limits: ParseLimits) -> Option<Vec<i64>> {
     if payload.len() < 8 {
         return None;
     }
     let version = payload[0];
-    let entry_count = read_u32(&payload[4..8])? as usize;
+    let entry_count = checked_table_entry_count(payload, 8, 8, limits)?;
     let mut offset = 8;
     let mut offsets = Vec::with_capacity(sample_count);
     for _ in 0..entry_count {
-        if offset + 8 > payload.len() {
-            return None;
-        }
-        let count = read_u32(&payload[offset..offset + 4])? as usize;
+        let count = usize::try_from(read_u32(&payload[offset..offset + 4])?).ok()?;
         let sample_offset = match version {
             0 => i64::from(read_u32(&payload[offset + 4..offset + 8])?),
             1 => i64::from(read_i32(&payload[offset + 4..offset + 8])?),
             _ => return None,
         };
+        if count > sample_count.checked_sub(offsets.len())? {
+            return None;
+        }
+        offsets.try_reserve(count).ok()?;
         offsets.extend(std::iter::repeat_n(sample_offset, count));
         offset += 8;
     }
-    offsets.truncate(sample_count);
     if offsets.len() == sample_count {
         Some(offsets)
     } else {
@@ -876,17 +881,17 @@ fn parse_ctts(payload: &[u8], sample_count: usize) -> Option<Vec<i64>> {
     }
 }
 
-fn parse_stss(payload: &[u8], sample_count: usize) -> Option<Vec<bool>> {
+fn parse_stss(payload: &[u8], sample_count: usize, limits: ParseLimits) -> Option<Vec<bool>> {
     if payload.len() < 8 {
         return None;
     }
-    let entry_count = read_u32(&payload[4..8])? as usize;
+    let entry_count = checked_table_entry_count(payload, 8, 4, limits)?;
+    if sample_count > limits.max_samples_per_track {
+        return None;
+    }
     let mut out = vec![false; sample_count];
     let mut offset = 8;
     for _ in 0..entry_count {
-        if offset + 4 > payload.len() {
-            return None;
-        }
         let sample_number = read_u32(&payload[offset..offset + 4])? as usize;
         if (1..=sample_count).contains(&sample_number) {
             out[sample_number - 1] = true;
@@ -896,17 +901,15 @@ fn parse_stss(payload: &[u8], sample_count: usize) -> Option<Vec<bool>> {
     Some(out)
 }
 
-fn parse_stsc(payload: &[u8]) -> Option<Vec<SampleToChunk>> {
+fn parse_stsc(payload: &[u8], limits: ParseLimits) -> Option<Vec<SampleToChunk>> {
     if payload.len() < 8 {
         return None;
     }
-    let entry_count = read_u32(&payload[4..8])? as usize;
+    let entry_count = checked_table_entry_count(payload, 8, 12, limits)?;
     let mut offset = 8;
-    let mut out = Vec::with_capacity(entry_count);
+    let mut out = Vec::new();
+    out.try_reserve(entry_count).ok()?;
     for _ in 0..entry_count {
-        if offset + 12 > payload.len() {
-            return None;
-        }
         out.push(SampleToChunk {
             first_chunk: read_u32(&payload[offset..offset + 4])?,
             samples_per_chunk: read_u32(&payload[offset + 4..offset + 8])?,
@@ -916,81 +919,115 @@ fn parse_stsc(payload: &[u8]) -> Option<Vec<SampleToChunk>> {
     if out.is_empty() { None } else { Some(out) }
 }
 
-fn parse_stsz(payload: &[u8]) -> Option<Vec<u32>> {
+fn parse_stsz(payload: &[u8], limits: ParseLimits) -> Option<Vec<u32>> {
     if payload.len() < 12 {
         return None;
     }
     let fixed_size = read_u32(&payload[4..8])?;
-    let sample_count = read_u32(&payload[8..12])? as usize;
-    if fixed_size != 0 {
-        return Some(vec![fixed_size; sample_count]);
+    let sample_count = usize::try_from(read_u32(&payload[8..12])?).ok()?;
+    if sample_count > limits.max_samples_per_track {
+        return None;
     }
-    let mut offset = 12;
-    let mut out = Vec::with_capacity(sample_count);
-    for _ in 0..sample_count {
-        if offset + 4 > payload.len() {
+    if fixed_size != 0 {
+        let bytes = sample_count.checked_mul(std::mem::size_of::<u32>())?;
+        if bytes > limits.max_index_bytes {
             return None;
         }
+        return Some(vec![fixed_size; sample_count]);
+    }
+    if sample_count > checked_payload_entries(payload, 12, 4)? {
+        return None;
+    }
+    let mut offset = 12;
+    let mut out = Vec::new();
+    out.try_reserve(sample_count).ok()?;
+    for _ in 0..sample_count {
         out.push(read_u32(&payload[offset..offset + 4])?);
         offset += 4;
     }
     Some(out)
 }
 
-fn parse_stsz_totals(payload: &[u8]) -> Option<(u64, u64)> {
+fn parse_stsz_totals(payload: &[u8], limits: ParseLimits) -> Option<(u64, u64)> {
     if payload.len() < 12 {
         return None;
     }
     let fixed_size = u64::from(read_u32(&payload[4..8])?);
     let sample_count = u64::from(read_u32(&payload[8..12])?);
+    if sample_count > limits.max_samples_per_track as u64 {
+        return None;
+    }
     if fixed_size != 0 {
-        return Some((sample_count, fixed_size.saturating_mul(sample_count)));
+        return Some((sample_count, fixed_size.checked_mul(sample_count)?));
+    }
+    if usize::try_from(sample_count).ok()? > checked_payload_entries(payload, 12, 4)? {
+        return None;
     }
     let mut offset = 12;
     let mut total_size_bytes = 0_u64;
     for _ in 0..sample_count {
-        if offset + 4 > payload.len() {
-            return None;
-        }
         total_size_bytes =
-            total_size_bytes.saturating_add(u64::from(read_u32(&payload[offset..offset + 4])?));
+            total_size_bytes.checked_add(u64::from(read_u32(&payload[offset..offset + 4])?))?;
         offset += 4;
     }
     Some((sample_count, total_size_bytes))
 }
 
-fn parse_stco(payload: &[u8]) -> Option<Vec<u64>> {
+fn parse_stco(payload: &[u8], limits: ParseLimits) -> Option<Vec<u64>> {
     if payload.len() < 8 {
         return None;
     }
-    let entry_count = read_u32(&payload[4..8])? as usize;
+    let entry_count = checked_table_entry_count(payload, 8, 4, limits)?;
     let mut offset = 8;
-    let mut out = Vec::with_capacity(entry_count);
+    let mut out = Vec::new();
+    out.try_reserve(entry_count).ok()?;
     for _ in 0..entry_count {
-        if offset + 4 > payload.len() {
-            return None;
-        }
         out.push(u64::from(read_u32(&payload[offset..offset + 4])?));
         offset += 4;
     }
     Some(out)
 }
 
-fn parse_co64(payload: &[u8]) -> Option<Vec<u64>> {
+fn parse_co64(payload: &[u8], limits: ParseLimits) -> Option<Vec<u64>> {
     if payload.len() < 8 {
         return None;
     }
-    let entry_count = read_u32(&payload[4..8])? as usize;
+    let entry_count = checked_table_entry_count(payload, 8, 8, limits)?;
     let mut offset = 8;
-    let mut out = Vec::with_capacity(entry_count);
+    let mut out = Vec::new();
+    out.try_reserve(entry_count).ok()?;
     for _ in 0..entry_count {
-        if offset + 8 > payload.len() {
-            return None;
-        }
         out.push(read_u64(&payload[offset..offset + 8])?);
         offset += 8;
     }
     Some(out)
+}
+
+fn checked_table_entry_count(
+    payload: &[u8],
+    header_len: usize,
+    entry_width: usize,
+    limits: ParseLimits,
+) -> Option<usize> {
+    let declared = usize::try_from(read_u32(payload.get(4..8)?)?).ok()?;
+    if declared > limits.max_table_entries {
+        return None;
+    }
+    if declared > checked_payload_entries(payload, header_len, entry_width)? {
+        return None;
+    }
+    let bytes = declared.checked_mul(entry_width)?;
+    if bytes > limits.max_index_bytes {
+        return None;
+    }
+    Some(declared)
+}
+
+fn checked_payload_entries(payload: &[u8], header_len: usize, entry_width: usize) -> Option<usize> {
+    if entry_width == 0 || payload.len() < header_len {
+        return None;
+    }
+    Some((payload.len() - header_len) / entry_width)
 }
 
 fn parse_stsd(payload: &[u8]) -> Option<SampleEntryInfo> {
@@ -1724,6 +1761,77 @@ mod tests {
     }
 
     #[test]
+    fn rejects_fixed_size_stsz_count_above_sample_limit_before_allocation() {
+        let limits = ParseLimits {
+            max_samples_per_track: 16,
+            ..ParseLimits::default()
+        };
+        let payload = full_box_payload(&[&4_u32.to_be_bytes(), &u32::MAX.to_be_bytes()]);
+
+        assert!(parse_stsz(&payload, limits).is_none());
+    }
+
+    #[test]
+    fn rejects_variable_stsz_count_larger_than_payload_geometry() {
+        let limits = ParseLimits::default();
+        let payload = full_box_payload(&[
+            &0_u32.to_be_bytes(),
+            &u32::MAX.to_be_bytes(),
+            &1_u32.to_be_bytes(),
+        ]);
+
+        assert!(parse_stsz(&payload, limits).is_none());
+        assert!(parse_stsz_totals(&payload, limits).is_none());
+    }
+
+    #[test]
+    fn rejects_sample_table_entry_count_larger_than_payload_geometry() {
+        let limits = ParseLimits::default();
+        let stsc = full_box_payload(&[
+            &u32::MAX.to_be_bytes(),
+            &1_u32.to_be_bytes(),
+            &1_u32.to_be_bytes(),
+            &1_u32.to_be_bytes(),
+        ]);
+        let stco = full_box_payload(&[&u32::MAX.to_be_bytes(), &128_u32.to_be_bytes()]);
+        let co64 = full_box_payload(&[&u32::MAX.to_be_bytes(), &128_u64.to_be_bytes()]);
+        let stss = full_box_payload(&[&u32::MAX.to_be_bytes(), &1_u32.to_be_bytes()]);
+
+        assert!(parse_stsc(&stsc, limits).is_none());
+        assert!(parse_stco(&stco, limits).is_none());
+        assert!(parse_co64(&co64, limits).is_none());
+        assert!(parse_stss(&stss, 8, limits).is_none());
+    }
+
+    #[test]
+    fn rejects_rle_timing_runs_that_exceed_sample_count() {
+        let limits = ParseLimits::default();
+        let stts = full_box_payload(&[
+            &1_u32.to_be_bytes(),
+            &u32::MAX.to_be_bytes(),
+            &40_u32.to_be_bytes(),
+        ]);
+        let ctts = full_box_payload(&[
+            &1_u32.to_be_bytes(),
+            &u32::MAX.to_be_bytes(),
+            &40_u32.to_be_bytes(),
+        ]);
+
+        assert!(parse_stts(&stts, 8, limits).is_none());
+        assert!(parse_ctts(&ctts, 8, limits).is_none());
+    }
+
+    #[test]
+    fn atom_iter_rejects_oversized_extended_atom_without_overflow() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&1_u32.to_be_bytes());
+        bytes.extend_from_slice(b"free");
+        bytes.extend_from_slice(&u64::MAX.to_be_bytes());
+
+        assert!(AtomIter::new(&bytes).next().is_none());
+    }
+
+    #[test]
     fn detects_ftyp() {
         let mut head = vec![0_u8; 16];
         head[4..8].copy_from_slice(b"ftyp");
@@ -2214,6 +2322,14 @@ mod tests {
             ]
             .concat(),
         )
+    }
+
+    fn full_box_payload(parts: &[&[u8]]) -> Vec<u8> {
+        let mut out = vec![0, 0, 0, 0];
+        for part in parts {
+            out.extend_from_slice(part);
+        }
+        out
     }
 
     fn trak(

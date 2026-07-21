@@ -244,7 +244,7 @@ pub fn plan_hls_transcode(
                     "audio-decode0",
                     TranscodeStageKind::AudioDecode,
                     vec![track.id.clone()],
-                    "native DTS core decode can feed the target-native audio bridge",
+                    "native audio decode can feed the target-native audio bridge",
                 ));
             } else {
                 let missing = format!("audioDecode:{}", capability_label(track.codec.family));
@@ -349,8 +349,8 @@ fn native_video_decode_ready(family: CodecFamily) -> bool {
     cfg!(target_os = "macos") && matches!(family, CodecFamily::H264 | CodecFamily::Hevc)
 }
 
-fn native_audio_decode_ready(family: CodecFamily) -> bool {
-    matches!(family, CodecFamily::Dts)
+fn native_audio_decode_ready(_family: CodecFamily) -> bool {
+    false
 }
 
 fn audio_can_copy_for_hls(track: &MediaTrack, target: PlaybackTarget) -> bool {
@@ -602,7 +602,7 @@ mod tests {
     }
 
     #[test]
-    fn dts_audio_routes_to_aac_bridge_with_native_core_decoder() {
+    fn dts_audio_requires_missing_native_decoder_capability() {
         let probe = probe_with_tracks(vec![
             video_track("v0", CodecFamily::H264, 1_920, 1_080, 8_000_000, None),
             audio_track("a0", CodecFamily::Dts, true, 8, 48_000, Some(1_536_000)),
@@ -610,14 +610,18 @@ mod tests {
 
         let plan = plan_hls_transcode(&probe, request(PlaybackTarget::AppleNative, false, None));
 
-        assert!(plan.engine_executable);
+        assert!(!plan.engine_executable);
         let audio = plan.output.audio.as_ref().unwrap();
         assert_eq!(audio.codec, AudioCodec::Aac);
         assert_eq!(audio.channels, 2);
-        assert!(plan.missing_capabilities.is_empty());
+        assert!(
+            plan.missing_capabilities
+                .iter()
+                .any(|capability| capability == "audioDecode:dts")
+        );
         assert!(plan.stages.iter().any(|stage| {
             stage.kind == TranscodeStageKind::AudioDecode
-                && stage.status == TranscodeStageStatus::NativeReady
+                && stage.status == TranscodeStageStatus::NativeMissing
         }));
     }
 
@@ -651,7 +655,12 @@ mod tests {
 
         assert_eq!(plan.selected_audio_track_id.as_deref(), Some("a0"));
         assert_eq!(plan.output.audio.as_ref().unwrap().codec, AudioCodec::Aac);
-        assert!(plan.engine_executable);
+        assert!(!plan.engine_executable);
+        assert!(
+            plan.missing_capabilities
+                .iter()
+                .any(|capability| capability == "audioDecode:dts")
+        );
     }
 
     fn request(
