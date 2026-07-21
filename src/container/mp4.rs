@@ -561,11 +561,20 @@ struct SampleToChunk {
     samples_per_chunk: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NormalizedSampleTiming {
+    pts: u64,
+    dts: u64,
+    duration: u64,
+}
+
 impl SampleTable {
     fn into_packets(self, scale: TimeScale) -> Vec<PacketRef> {
         let mut packets = Vec::with_capacity(self.sample_sizes.len());
         let mut sample_index = 0_usize;
-        let mut dts = 0_u64;
+        let Some(timing) = self.normalized_timing() else {
+            return Vec::new();
+        };
         let mut sample_to_chunk_index = 0_usize;
 
         for (chunk_idx, chunk_offset) in self.chunk_offsets.iter().copied().enumerate() {
@@ -580,25 +589,25 @@ impl SampleTable {
                 let Some(size) = self.sample_sizes.get(sample_index).copied() else {
                     break;
                 };
-                let duration = self
-                    .sample_durations
-                    .get(sample_index)
-                    .copied()
-                    .unwrap_or(0);
-                let pts = composition_time(dts, self.composition_offsets[sample_index]);
+                let timing = timing[sample_index];
                 packets.push(PacketRef {
                     source_offset: chunk_offset.saturating_add(offset_in_chunk),
                     size,
-                    pts: TimePoint { units: pts, scale },
-                    dts: TimePoint { units: dts, scale },
+                    pts: TimePoint {
+                        units: timing.pts,
+                        scale,
+                    },
+                    dts: TimePoint {
+                        units: timing.dts,
+                        scale,
+                    },
                     duration: TimeDelta {
-                        units: duration,
+                        units: timing.duration,
                         scale,
                     },
                     keyframe: self.keyframes.get(sample_index).copied().unwrap_or(true),
                 });
                 sample_index += 1;
-                dts = dts.saturating_add(duration);
                 offset_in_chunk = offset_in_chunk.saturating_add(u64::from(size));
             }
 
@@ -608,6 +617,37 @@ impl SampleTable {
         }
 
         packets
+    }
+
+    fn normalized_timing(&self) -> Option<Vec<NormalizedSampleTiming>> {
+        let mut raw = Vec::with_capacity(self.sample_sizes.len());
+        let mut dts = 0_i128;
+        let mut min_time = 0_i128;
+
+        for sample_index in 0..self.sample_sizes.len() {
+            let duration = i128::from(
+                self.sample_durations
+                    .get(sample_index)
+                    .copied()
+                    .unwrap_or(0),
+            );
+            let offset = i128::from(*self.composition_offsets.get(sample_index)?);
+            let pts = dts.checked_add(offset)?;
+            min_time = min_time.min(pts).min(dts);
+            raw.push((pts, dts, duration));
+            dts = dts.checked_add(duration)?;
+        }
+
+        let shift = min_time.checked_neg()?;
+        raw.into_iter()
+            .map(|(pts, dts, duration)| {
+                Some(NormalizedSampleTiming {
+                    pts: u64::try_from(pts.checked_add(shift)?).ok()?,
+                    dts: u64::try_from(dts.checked_add(shift)?).ok()?,
+                    duration: u64::try_from(duration).ok()?,
+                })
+            })
+            .collect()
     }
 
     fn advance_sample_to_chunk(&self, mut index: usize, chunk_number: u32) -> usize {
@@ -631,7 +671,12 @@ impl SampleTable {
 
         let mut chunks = Vec::new();
         let mut sample_index = 0_usize;
-        let mut dts = 0_u64;
+        let Some(timing) = self.normalized_timing() else {
+            return ChunkPlan {
+                track_ids: Vec::new(),
+                chunks: Vec::new(),
+            };
+        };
         let mut chunk_start_sample = 0_u32;
         let mut chunk_start_ms = 0_u64;
         let mut last_end_ms = 0_u64;
@@ -650,14 +695,9 @@ impl SampleTable {
                     break 'chunks;
                 }
 
-                let duration = self
-                    .sample_durations
-                    .get(sample_index)
-                    .copied()
-                    .unwrap_or(0);
-                let pts = composition_time(dts, self.composition_offsets[sample_index]);
-                let packet_start_ms = scale.to_millis(pts);
-                let packet_end_ms = scale.to_millis(pts.saturating_add(duration));
+                let timing = timing[sample_index];
+                let packet_start_ms = scale.to_millis(timing.pts);
+                let packet_end_ms = scale.to_millis(timing.pts.saturating_add(timing.duration));
                 let packet_is_keyframe = self.keyframes.get(sample_index).copied().unwrap_or(true);
                 let should_cut = sample_index as u32 > chunk_start_sample
                     && packet_is_keyframe
@@ -678,7 +718,6 @@ impl SampleTable {
                     key_aligned = packet_is_keyframe;
                 }
 
-                dts = dts.saturating_add(duration);
                 last_end_ms = packet_end_ms;
                 sample_index += 1;
             }
@@ -775,14 +814,6 @@ fn bitrate_from_sample_timing(timescale: Option<u32>, timing: Option<SampleTimin
     let bits = u128::from(timing.total_size_bytes).saturating_mul(8);
     let bps = bits.saturating_mul(timescale) / u128::from(timing.total_duration_units);
     Some(bps.min(u128::from(u64::MAX)) as u64)
-}
-
-fn composition_time(dts: u64, offset: i64) -> u64 {
-    if offset >= 0 {
-        dts.saturating_add(offset as u64)
-    } else {
-        dts.saturating_sub(offset.unsigned_abs())
-    }
 }
 
 fn next_track_id(prefix: &str, counter: &mut u32) -> String {
@@ -2153,6 +2184,33 @@ mod tests {
     }
 
     #[test]
+    fn normalizes_negative_mp4_composition_offsets_across_whole_track() {
+        let mut data = ftyp();
+        data.extend_from_slice(&atom(
+            b"moov",
+            &trak_with_samples_and_signed_ctts(
+                b"vide",
+                b"avc1",
+                &[100, 100, 100],
+                &[40, 40, 40],
+                &[1],
+                &[200],
+                &[(1, 3)],
+                &[-40, 0, 40],
+            ),
+        ));
+
+        let index = parse_packet_index(&data);
+        let packets = &index.tracks[0].packets;
+        assert_eq!(packets[0].pts.units, 0);
+        assert_eq!(packets[0].dts.units, 40);
+        assert_eq!(packets[1].pts.units, 80);
+        assert_eq!(packets[1].dts.units, 80);
+        assert_eq!(packets[2].pts.units, 160);
+        assert_eq!(packets[2].dts.units, 120);
+    }
+
+    #[test]
     fn plans_mp4_chunks_directly_from_sample_tables() {
         let mut data = ftyp();
         data.extend_from_slice(&atom(
@@ -2447,6 +2505,45 @@ mod tests {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn trak_with_samples_and_signed_ctts(
+        handler: &[u8; 4],
+        sample_entry: &[u8; 4],
+        sample_sizes: &[u32],
+        sample_durations: &[u32],
+        sync_samples: &[u32],
+        chunk_offsets: &[u32],
+        sample_to_chunk: &[(u32, u32)],
+        composition_offsets: &[i32],
+    ) -> Vec<u8> {
+        let sample_table = [
+            stsd(sample_entry, Some((1920, 1080)), None),
+            stts(sample_durations),
+            stss(sync_samples),
+            stsc(sample_to_chunk),
+            stsz(sample_sizes),
+            stco(chunk_offsets),
+            ctts_signed(composition_offsets),
+        ];
+
+        atom(
+            b"trak",
+            &[
+                tkhd(Some((1920, 1080))),
+                atom(
+                    b"mdia",
+                    &[
+                        mdhd(1000, sample_durations.iter().copied().sum()),
+                        hdlr(handler),
+                        atom(b"minf", &atom(b"stbl", &sample_table.concat())),
+                    ]
+                    .concat(),
+                ),
+            ]
+            .concat(),
+        )
+    }
+
     fn trak_with_sample_entry_payload(
         handler: &[u8; 4],
         sample_entry: &[u8; 4],
@@ -2560,6 +2657,17 @@ mod tests {
     fn ctts(sample_offsets: &[u32]) -> Vec<u8> {
         let mut payload = Vec::new();
         payload.extend_from_slice(&[0, 0, 0, 0]);
+        payload.extend_from_slice(&(sample_offsets.len() as u32).to_be_bytes());
+        for offset in sample_offsets {
+            payload.extend_from_slice(&1_u32.to_be_bytes());
+            payload.extend_from_slice(&offset.to_be_bytes());
+        }
+        atom(b"ctts", &payload)
+    }
+
+    fn ctts_signed(sample_offsets: &[i32]) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&[1, 0, 0, 0]);
         payload.extend_from_slice(&(sample_offsets.len() as u32).to_be_bytes());
         for offset in sample_offsets {
             payload.extend_from_slice(&1_u32.to_be_bytes());
