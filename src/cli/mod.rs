@@ -19,6 +19,7 @@ use crate::playback_manifest::{
 use crate::probe::probe_media_source;
 use crate::session::{AudioSelection, PlaybackConstraints, PlaybackTarget, plan_playback};
 use crate::source::MappedMediaFile;
+use crate::transcode::{HlsTranscodeRequest, plan_hls_transcode};
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 use serde::Serialize;
@@ -44,6 +45,18 @@ enum Command {
         all_audio: bool,
         #[arg(long, default_value_t = true)]
         include_subtitles: bool,
+    },
+    /// Emit a native Chroma HLS transcode execution plan.
+    TranscodePlan {
+        file: PathBuf,
+        #[arg(long, value_enum, default_value_t = TargetArg::AppleNative)]
+        target: TargetArg,
+        #[arg(long)]
+        audio_track: Option<String>,
+        #[arg(long, default_value_t = 4_000)]
+        segment_ms: u64,
+        #[arg(long, default_value_t = false)]
+        force_video_transcode: bool,
     },
     /// Emit keyframe-aligned native chunk windows for a compressed packet track.
     Chunks {
@@ -280,6 +293,25 @@ pub fn run() -> Result<()> {
                     },
                     include_subtitles,
                     ..PlaybackConstraints::default()
+                },
+            );
+            println!("{}", serde_json::to_string_pretty(&plan)?);
+        }
+        Command::TranscodePlan {
+            file,
+            target,
+            audio_track,
+            segment_ms,
+            force_video_transcode,
+        } => {
+            let probe = probe_media_source(&file)?;
+            let plan = plan_hls_transcode(
+                &probe,
+                HlsTranscodeRequest {
+                    target: target.into(),
+                    audio_track_id: audio_track,
+                    segment_target_ms: segment_ms,
+                    force_video_transcode,
                 },
             );
             println!("{}", serde_json::to_string_pretty(&plan)?);

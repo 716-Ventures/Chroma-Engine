@@ -67,10 +67,12 @@ pub use session::{
 pub use transcode::{
     AudioClockConfig, AudioCodec, AudioEncodeError, AudioFrameTiming, AudioOp, AudioSampleClock,
     EncodedAudioFrame, EncodedAudioOutput, EncodedAudioStream, EncodedVideoFrame,
-    EncodedVideoOutput, EncodedVideoStream, OperationPlan, PcmAudioFormat, PlanMode,
-    RawVideoFormat, RawVideoPixelFormat, SubtitleOp, VideoCodec, VideoEncodeError,
-    VideoEncodeSessionInfo, VideoOp, encode_aac_from_interleaved_i16,
-    encode_ac3_from_interleaved_i16, encode_eac3_from_interleaved_i16,
-    encode_h264_videotoolbox_bgra_frame, encode_hevc_videotoolbox_bgra_frame,
-    probe_videotoolbox_h264_session, probe_videotoolbox_hevc_session,
+    EncodedVideoOutput, EncodedVideoStream, HlsTranscodeRequest, OperationPlan, PcmAudioFormat,
+    PlanMode, RawVideoFormat, RawVideoPixelFormat, SubtitleOp, TranscodeExecutionPlan,
+    TranscodeOutputAudio, TranscodeOutputPlan, TranscodeOutputVideo, TranscodeStage,
+    TranscodeStageKind, TranscodeStageStatus, VideoCodec, VideoEncodeError, VideoEncodeSessionInfo,
+    VideoOp, encode_aac_from_interleaved_i16, encode_ac3_from_interleaved_i16,
+    encode_eac3_from_interleaved_i16, encode_h264_videotoolbox_bgra_frame,
+    encode_hevc_videotoolbox_bgra_frame, plan_hls_transcode, probe_videotoolbox_h264_session,
+    probe_videotoolbox_hevc_session,
 };

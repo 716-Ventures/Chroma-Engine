@@ -124,6 +124,8 @@
 - [x] Linux VAAPI/NVENC/QSV path.
 - [x] Windows NVENC/QSV/AMF path.
 - [x] Warm encoder session initialization. AAC AudioToolbox, VideoToolbox H.264/HEVC, and AC-3/E-AC-3 bridge backends run tiny real encodes before playback so startup failures surface before the first segment request.
+- [x] Chroma-native HLS transcode execution planning. `transcode-plan` now emits selected tracks, output codecs, stage readiness, and missing native capabilities so hosts can ask the engine what it can run without inheriting FFmpeg command/API shape.
+- [ ] Native compressed video decode stage for HEVC/H.264/AV1 sources that need target-native HLS output. Preserve the FFmpeg send/receive/drain lesson as a bounded state machine, but expose only Chroma Engine stage events and frames.
 - [ ] Native DTS/TrueHD decode bridge for MKV audio tracks that have no AAC/AC-3/E-AC-3 alternate. Follow the FFmpeg send/receive/drain state-machine shape and AetherEngine's copy-first/bridge-only policy, but keep the API Chroma-native.
 
 ## Integration

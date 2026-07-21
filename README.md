@@ -6,6 +6,7 @@ The target is a native media architecture, not an FFmpeg-compatible facade. Chro
 
 - `probe`: emit a Chroma-native `MediaProbe` manifest with typed tracks, source facts, and capability hints.
 - `plan`: produce Chroma playback sessions optimized around reusable packet/decode/encode stages.
+- `transcode-plan`: emit the Chroma-native HLS transcode execution contract, including selected tracks, output codecs, executable stages, and missing native capabilities.
 - `manifest`: emit a native playback manifest with selected tracks, decoder config, and chunk windows.
 - `chunks`: produce keyframe-aligned native chunk windows from compressed packet indexes.
 - `codec-config`: emit decoder initialization facts for a compressed MP4/MOV track.
@@ -29,6 +30,7 @@ Rust is required to build:
 cargo test
 cargo run -- probe /path/to/media.mkv
 cargo run -- manifest /path/to/media.mp4 --target-ms 4000
+cargo run -- transcode-plan /path/to/media.mkv --target apple-native --force-video-transcode
 cargo run -- chunks /path/to/media.mp4 --target-ms 4000
 cargo run -- codec-config /path/to/media.mp4 --track a0
 cargo run -- h264-nalus /path/to/media.mp4 --chunk-index 0

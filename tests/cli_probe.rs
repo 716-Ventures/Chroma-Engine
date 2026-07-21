@@ -102,6 +102,41 @@ fn plan_cli_reports_browser_decode_for_mkv_hevc_truehd() {
     );
 }
 
+#[test]
+fn transcode_plan_cli_reports_missing_native_decode_capability() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("sample.mkv");
+    std::fs::write(&file, minimal_browser_unfriendly_mkv()).unwrap();
+
+    let output = Command::cargo_bin("chroma-engine")
+        .unwrap()
+        .arg("transcode-plan")
+        .arg(&file)
+        .arg("--target")
+        .arg("apple-native")
+        .arg("--force-video-transcode")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(json["schemaVersion"], 1);
+    assert_eq!(json["target"], "appleNative");
+    assert_eq!(json["selectedVideoTrackId"], "v0");
+    assert_eq!(json["output"]["transport"], "hlsFmp4");
+    assert_eq!(json["output"]["video"]["codec"], "h264");
+    assert_eq!(json["engineExecutable"], false);
+    assert!(
+        json["missingCapabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|capability| capability == "videoDecode:hevc")
+    );
+}
+
 fn minimal_mp4() -> Vec<u8> {
     let mut out = atom(
         b"ftyp",
