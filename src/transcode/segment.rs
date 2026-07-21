@@ -8,14 +8,16 @@ use crate::{
     container::matroska::{MatroskaTrack, MatroskaTrackKind, looks_like_ebml},
     fmp4::{
         Fmp4SampleEntry, Fmp4Track, Fmp4TrackKind, fragment_track_from_chunk_samples,
-        fragment_track_from_encoded_audio_frames, init_segment, media_fragment,
+        fragment_track_from_encoded_audio_frames, fragment_track_from_encoded_video_frames,
+        init_segment, media_fragment,
     },
     packet::{ChunkSample, ExtractedChunk, TimePoint, TimeScale},
     source::MappedMediaFile,
     transcode::{
-        AudioDecodeCodec, AudioFrameTiming, EncodedAudioFrame, VideoCodec,
-        build_audio_decode_input, decode_dts_core_to_interleaved_i16,
-        encode_aac_from_interleaved_i16,
+        AudioDecodeCodec, AudioFrameTiming, EncodedAudioFrame, RawVideoFormat, RawVideoFrameRef,
+        RawVideoPixelFormat, VideoCodec, build_audio_decode_input, build_video_decode_input,
+        decode_dts_core_to_interleaved_i16, decode_videotoolbox_bgra_frames,
+        encode_aac_from_interleaved_i16, encode_h264_videotoolbox_bgra_frames,
     },
 };
 
@@ -40,6 +42,18 @@ pub struct NativeFmp4TranscodeOptions {
     pub video_bitrate: u32,
     /// Target E-AC-3 bitrate.
     pub audio_bitrate: u32,
+    /// Output video path.
+    pub video_mode: NativeFmp4VideoMode,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+/// Native fMP4 video output mode.
+pub enum NativeFmp4VideoMode {
+    /// Packet-copy source video into fMP4.
+    Copy,
+    /// Decode source video and encode browser-oriented H.264.
+    H264,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -128,6 +142,7 @@ impl Default for NativeFmp4TranscodeOptions {
             segment_ms: DEFAULT_SEGMENT_MS,
             video_bitrate: DEFAULT_VIDEO_BITRATE,
             audio_bitrate: DEFAULT_AUDIO_BITRATE,
+            video_mode: NativeFmp4VideoMode::Copy,
         }
     }
 }
@@ -220,6 +235,18 @@ struct TranscodedSegment {
     first_audio_pts: Option<TimePoint>,
 }
 
+struct VideoSegment {
+    fragment: crate::fmp4::Fmp4FragmentTrack,
+    sample_entry: Fmp4SampleEntry,
+    timescale: u32,
+    default_sample_duration: u32,
+    codec: String,
+    decoded_frame_count: usize,
+    sample_count: usize,
+    encoded_frame_count: usize,
+    first_pts: Option<TimePoint>,
+}
+
 struct AudioSegment {
     fragment: crate::fmp4::Fmp4FragmentTrack,
     sample_entry: Fmp4SampleEntry,
@@ -252,7 +279,7 @@ fn transcode_matroska_segment(
         options.audio_track_id.as_deref(),
     )
     .ok_or_else(|| anyhow::anyhow!("no matching Matroska audio track found"))?;
-    let _video_codec = video_codec_from_label(&video_track.codec)?;
+    let video_codec = video_codec_from_label(&video_track.codec)?;
     let decoder_config = video_track
         .codec_private
         .clone()
@@ -263,12 +290,13 @@ fn transcode_matroska_segment(
     let (audio_manifest, audio_payload) =
         crate::container::matroska::extract_chunk(bytes, Some(&audio_track_id), segment_ms, index)?;
 
-    let video_timescale = chunk_time_scale(&video_manifest).units_per_second;
-    let video_fragment = fragment_track_from_chunk_samples(
-        VIDEO_TRACK_ID,
-        &video_manifest.samples,
+    let video_segment = matroska_video_segment(
+        video_track,
+        video_codec,
+        decoder_config,
+        video_manifest,
         video_payload,
-        video_timescale,
+        options,
     )?;
 
     let audio_segment = matroska_audio_segment(
@@ -282,23 +310,11 @@ fn transcode_matroska_segment(
         Fmp4Track {
             id: VIDEO_TRACK_ID,
             kind: Fmp4TrackKind::Video,
-            timescale: video_timescale,
-            default_sample_duration: video_manifest
-                .samples
-                .first()
-                .map(|sample| {
-                    rescale_units(
-                        sample.duration.units,
-                        sample.duration.scale,
-                        video_timescale,
-                    )
-                    .max(1)
-                    .min(u64::from(u32::MAX)) as u32
-                })
-                .unwrap_or(1),
+            timescale: video_segment.timescale,
+            default_sample_duration: video_segment.default_sample_duration,
             default_sample_size: 0,
             default_sample_flags: 0x0101_0000,
-            sample_entry: matroska_video_sample_entry(video_track, decoder_config)?,
+            sample_entry: video_segment.sample_entry,
         },
         Fmp4Track {
             id: AUDIO_TRACK_ID,
@@ -313,21 +329,21 @@ fn transcode_matroska_segment(
     let init = init_segment(&tracks)?;
     let media = media_fragment(
         index.saturating_add(1),
-        &[video_fragment, audio_segment.fragment],
+        &[video_segment.fragment, audio_segment.fragment],
     )?;
 
     Ok(TranscodedSegment {
         video_track_id,
         audio_track_id,
-        video_codec: video_codec_string(video_track),
+        video_codec: video_segment.codec,
         audio_codec: audio_segment.codec,
         init_segment: init,
         media_segment: media,
-        decoded_video_frames: 0,
-        video_sample_count: video_manifest.samples.len(),
-        encoded_video_frames: 0,
+        decoded_video_frames: video_segment.decoded_frame_count,
+        video_sample_count: video_segment.sample_count,
+        encoded_video_frames: video_segment.encoded_frame_count,
         encoded_audio_frames: audio_segment.encoded_frame_count,
-        first_video_pts: video_manifest.samples.first().map(|sample| sample.pts),
+        first_video_pts: video_segment.first_pts,
         first_audio_pts: audio_segment.first_pts,
     })
 }
@@ -407,6 +423,122 @@ fn video_codec_string(track: &MatroskaTrack) -> String {
         "hevc" => "hevc".to_string(),
         other => other.to_string(),
     }
+}
+
+fn matroska_video_segment(
+    track: &MatroskaTrack,
+    codec: VideoCodec,
+    decoder_config: Vec<u8>,
+    manifest: ExtractedChunk,
+    payload: Vec<u8>,
+    options: &NativeFmp4TranscodeOptions,
+) -> Result<VideoSegment> {
+    match options.video_mode {
+        NativeFmp4VideoMode::Copy => {
+            copy_matroska_video_segment(track, decoder_config, manifest, payload)
+        }
+        NativeFmp4VideoMode::H264 => transcode_h264_video_segment(
+            track,
+            codec,
+            decoder_config,
+            &manifest,
+            &payload,
+            options.video_bitrate,
+        ),
+    }
+}
+
+fn copy_matroska_video_segment(
+    track: &MatroskaTrack,
+    decoder_config: Vec<u8>,
+    manifest: ExtractedChunk,
+    payload: Vec<u8>,
+) -> Result<VideoSegment> {
+    let timescale = chunk_time_scale(&manifest).units_per_second;
+    let sample_entry = matroska_video_sample_entry(track, decoder_config)?;
+    let default_sample_duration = default_sample_duration(&manifest, timescale);
+    let first_pts = manifest.samples.first().map(|sample| sample.pts);
+    let sample_count = manifest.samples.len();
+    let fragment =
+        fragment_track_from_chunk_samples(VIDEO_TRACK_ID, &manifest.samples, payload, timescale)?;
+    Ok(VideoSegment {
+        fragment,
+        sample_entry,
+        timescale,
+        default_sample_duration,
+        codec: video_codec_string(track),
+        decoded_frame_count: 0,
+        sample_count,
+        encoded_frame_count: 0,
+        first_pts,
+    })
+}
+
+fn transcode_h264_video_segment(
+    track: &MatroskaTrack,
+    codec: VideoCodec,
+    decoder_config: Vec<u8>,
+    manifest: &ExtractedChunk,
+    payload: &[u8],
+    bitrate: u32,
+) -> Result<VideoSegment> {
+    let frame_duration_ns = track.default_duration_ns.unwrap_or(41_666_667);
+    let output_format = RawVideoFormat {
+        width: track.width.unwrap_or(1920),
+        height: track.height.unwrap_or(1080),
+        frame_rate_num: u32::try_from(1_000_000_000_u64 / frame_duration_ns.max(1))
+            .unwrap_or(24)
+            .max(1),
+        frame_rate_den: 1,
+        pixel_format: RawVideoPixelFormat::Bgra,
+    };
+    let decode_input = build_video_decode_input(
+        codec,
+        chunk_time_scale(manifest),
+        Some(&decoder_config),
+        &manifest.samples,
+        payload,
+        true,
+    )?;
+    let decoded = decode_videotoolbox_bgra_frames(&decode_input, output_format)?;
+    let raw_frames = decoded
+        .frames
+        .iter()
+        .map(|frame| RawVideoFrameRef {
+            pts: frame.pts,
+            dts: frame.dts,
+            duration: frame.duration,
+            bytes: frame.pixels.as_slice(),
+            keyframe: frame.keyframe,
+        })
+        .collect::<Vec<_>>();
+    let encoded = encode_h264_videotoolbox_bgra_frames(output_format, &raw_frames, bitrate)?;
+    let decoder_config = encoded
+        .stream
+        .decoder_config
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("H.264 encoder did not return decoder config"))?;
+    let fragment = fragment_track_from_encoded_video_frames(VIDEO_TRACK_ID, &encoded.frames)?;
+    let default_sample_duration = encoded
+        .frames
+        .first()
+        .map(|frame| frame.duration.units.max(1).min(u64::from(u32::MAX)) as u32)
+        .unwrap_or(1);
+    Ok(VideoSegment {
+        fragment,
+        sample_entry: Fmp4SampleEntry::Avc {
+            codec_config: decoder_config,
+            width: output_format.width.min(u32::from(u16::MAX)) as u16,
+            height: output_format.height.min(u32::from(u16::MAX)) as u16,
+        },
+        timescale: encoded.stream.time_scale.units_per_second,
+        default_sample_duration,
+        codec: "h264".to_string(),
+        decoded_frame_count: decoded.frames.len(),
+        sample_count: encoded.frames.len(),
+        encoded_frame_count: encoded.frames.len(),
+        first_pts: encoded.frames.first().map(|frame| frame.pts),
+    })
 }
 
 fn matroska_audio_segment(

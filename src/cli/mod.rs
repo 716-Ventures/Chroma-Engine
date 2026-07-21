@@ -21,9 +21,9 @@ use crate::probe::probe_media_source;
 use crate::session::{AudioSelection, PlaybackConstraints, PlaybackTarget, plan_playback};
 use crate::source::MappedMediaFile;
 use crate::transcode::{
-    AudioDecodeCodec, HlsTranscodeRequest, NativeFmp4TranscodeOptions, RawVideoFormat,
-    RawVideoPixelFormat, VideoCodec, build_audio_decode_input, build_video_decode_input,
-    decode_dts_core_to_interleaved_i16, decode_videotoolbox_bgra_frames,
+    AudioDecodeCodec, HlsTranscodeRequest, NativeFmp4TranscodeOptions, NativeFmp4VideoMode,
+    RawVideoFormat, RawVideoPixelFormat, VideoCodec, build_audio_decode_input,
+    build_video_decode_input, decode_dts_core_to_interleaved_i16, decode_videotoolbox_bgra_frames,
     encode_aac_from_interleaved_i16, normalize_interleaved_channels, plan_hls_transcode,
     probe_dts_audio_bridge, write_native_fmp4_transcode_init, write_native_fmp4_transcode_segment,
     write_native_fmp4_transcode_start,
@@ -207,6 +207,8 @@ enum Command {
         video_bitrate: u32,
         #[arg(long, default_value_t = 640_000)]
         audio_bitrate: u32,
+        #[arg(long, value_enum, default_value_t = NativeFmp4VideoModeArg::Copy)]
+        video_mode: NativeFmp4VideoModeArg,
     },
     /// Write one native transcoded fMP4 media segment for Matroska HLS playback.
     TranscodeFmp4Segment {
@@ -224,6 +226,8 @@ enum Command {
         video_bitrate: u32,
         #[arg(long, default_value_t = 640_000)]
         audio_bitrate: u32,
+        #[arg(long, value_enum, default_value_t = NativeFmp4VideoModeArg::Copy)]
+        video_mode: NativeFmp4VideoModeArg,
     },
     /// Write native transcoded fMP4 init and media segment from one pass.
     TranscodeFmp4Start {
@@ -242,6 +246,8 @@ enum Command {
         video_bitrate: u32,
         #[arg(long, default_value_t = 640_000)]
         audio_bitrate: u32,
+        #[arg(long, value_enum, default_value_t = NativeFmp4VideoModeArg::Copy)]
+        video_mode: NativeFmp4VideoModeArg,
     },
     /// Warm the selected encoder backend.
     Warmup,
@@ -330,6 +336,21 @@ enum Command {
     },
     /// Remux a source into faststart MP4.
     RemuxMp4 { input: PathBuf, output: PathBuf },
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum NativeFmp4VideoModeArg {
+    Copy,
+    H264,
+}
+
+impl From<NativeFmp4VideoModeArg> for NativeFmp4VideoMode {
+    fn from(value: NativeFmp4VideoModeArg) -> Self {
+        match value {
+            NativeFmp4VideoModeArg::Copy => NativeFmp4VideoMode::Copy,
+            NativeFmp4VideoModeArg::H264 => NativeFmp4VideoMode::H264,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -730,6 +751,7 @@ pub fn run() -> Result<()> {
             segment_ms,
             video_bitrate,
             audio_bitrate,
+            video_mode,
         } => {
             let written = write_native_fmp4_transcode_init(
                 &input,
@@ -740,6 +762,7 @@ pub fn run() -> Result<()> {
                     segment_ms,
                     video_bitrate,
                     audio_bitrate,
+                    video_mode: video_mode.into(),
                 },
             )?;
             println!("{}", serde_json::to_string_pretty(&written)?);
@@ -753,6 +776,7 @@ pub fn run() -> Result<()> {
             segment_ms,
             video_bitrate,
             audio_bitrate,
+            video_mode,
         } => {
             let written = write_native_fmp4_transcode_segment(
                 &input,
@@ -764,6 +788,7 @@ pub fn run() -> Result<()> {
                     segment_ms,
                     video_bitrate,
                     audio_bitrate,
+                    video_mode: video_mode.into(),
                 },
             )?;
             println!("{}", serde_json::to_string_pretty(&written)?);
@@ -778,6 +803,7 @@ pub fn run() -> Result<()> {
             segment_ms,
             video_bitrate,
             audio_bitrate,
+            video_mode,
         } => {
             let written = write_native_fmp4_transcode_start(
                 &input,
@@ -790,6 +816,7 @@ pub fn run() -> Result<()> {
                     segment_ms,
                     video_bitrate,
                     audio_bitrate,
+                    video_mode: video_mode.into(),
                 },
             )?;
             println!("{}", serde_json::to_string_pretty(&written)?);
