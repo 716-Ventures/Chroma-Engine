@@ -7,6 +7,7 @@ use crate::{
     container::{ContainerKind, matroska, mp4, sniff_container},
     error::EngineErrorCode,
     hls::{HlsOptions, HlsVodPlan},
+    output::publish_file,
     packet::{PacketExtractError, PacketPayloadSpan, PacketRange, packet_payload_spans},
 };
 
@@ -223,22 +224,21 @@ pub fn remux_mp4(input: &Path, output: &Path) -> Result<(), RemuxError> {
 fn write_fragmented_mp4(input: &Path, output: &Path) -> Result<(), RemuxError> {
     let plan = HlsVodPlan::open(input, HlsOptions::default())
         .map_err(|err| RemuxError::Fmp4(err.to_string()))?;
-    if let Some(parent) = output.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let mut writer = std::io::BufWriter::new(std::fs::File::create(output)?);
     let init = plan
         .fmp4_init_segment()
         .map_err(|err| RemuxError::Fmp4(err.to_string()))?;
-    writer.write_all(&init)?;
-    for index in 0..plan.segment_count() {
-        let segment = plan
-            .mux_fmp4_segment(index)
-            .map_err(|err| RemuxError::Fmp4(err.to_string()))?;
-        writer.write_all(&segment)?;
-    }
-    writer.flush()?;
-    Ok(())
+    publish_file(output, |file| {
+        let mut writer = std::io::BufWriter::new(file);
+        writer.write_all(&init)?;
+        for index in 0..plan.segment_count() {
+            let segment = plan
+                .mux_fmp4_segment(index)
+                .map_err(|err| RemuxError::Fmp4(err.to_string()))?;
+            writer.write_all(&segment)?;
+        }
+        writer.flush()?;
+        Ok(())
+    })
 }
 
 fn metadata_from_mp4(container: ContainerKind, meta: &mp4::Mp4BasicMetadata) -> RemuxMetadata {

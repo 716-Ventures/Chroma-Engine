@@ -1,7 +1,4 @@
-use std::{
-    fs::{create_dir_all, read_to_string, write},
-    path::PathBuf,
-};
+use std::{fs::read_to_string, path::PathBuf};
 
 use anyhow::{Result, anyhow};
 use serde::Serialize;
@@ -14,6 +11,7 @@ use crate::{
         write_hls_fmp4_segment, write_hls_fmp4_segment_window, write_hls_fmp4_segments,
         write_hls_fmp4_vod, write_hls_segment, write_hls_segments, write_hls_vod,
     },
+    output::publish_bytes,
 };
 
 #[derive(Debug, Serialize)]
@@ -124,10 +122,7 @@ pub(super) fn run_hls_fmp4_init_from_manifest(
             sample_entry: audio_entry,
         },
     ])?;
-    if let Some(parent) = output.parent() {
-        create_dir_all(parent)?;
-    }
-    write(&output, init)?;
+    publish_bytes(&output, &init)?;
     println!("{}", serde_json::json!({ "ok": true, "output": output }));
     Ok(())
 }

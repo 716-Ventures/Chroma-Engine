@@ -20,12 +20,13 @@
 - [x] Enforce `cargo clippy --all-targets --all-features -- -D warnings`.
 - [x] Enforce `cargo test --all-features`.
 - [x] Enforce `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features`.
-- [x] Centralize memory-map `unsafe` usage behind an audited source wrapper.
+- [x] Replace file-sized heap snapshots with a file-backed source wrapper. The only mapping `unsafe` block is documented inside that wrapper; macOS uses a private clone where supported, while sessions validate identity before work on the portable retained-handle path.
 - [x] Add release profile policy for optimized binaries.
 - [x] Add Criterion benchmark harness for initial hot paths.
 - [x] Add dependency audit policy once `cargo-deny` is installed or CI can install it reproducibly.
 - [x] Add missing-docs policy for the public facade.
 - [x] Split oversized implementation modules: HLS, MP4, Matroska, CLI.
+- [x] Split HLS MPEG-TS muxing and transcode scaling into focused modules.
 - [x] Replace broad `anyhow` use in library-facing APIs with typed engine errors.
 - [x] Add fuzz/property tests for EBML, MP4 atoms, packet range math, and timestamp repair.
 
@@ -46,7 +47,7 @@
 - [x] Extract subtitles: text vs bitmap classification, language/title, default/forced disposition.
 - [x] Extract chapters.
 - [x] Extract duration.
-- [x] Snapshot source bytes behind `MediaSource` and validate source identity before segment reads. Safe owned snapshots replaced the earlier mmap plan to keep parser access bounded and replacement-aware.
+- [x] Keep source bytes behind `MediaSource` and validate source identity before segment reads. The wrapper uses a sealed copy-on-write clone where supported and a retained read handle elsewhere, avoiding a file-sized heap allocation.
 - [x] Define Chroma-native error taxonomy.
 
 ## Remux MP4
@@ -79,6 +80,7 @@
 - [x] Convert native MP4/MOV AVC chunks to Annex-B H.264 without decode.
 - [x] Wrap native MP4/MOV AAC chunks as ADTS without decode.
 - [x] Emit stream chunks through reusable packet/decode/encode stages.
+- [x] Publish HLS, subtitle, remux, and transcode artifacts through the race-safe immutable output publisher.
 - [x] H.264/AAC native stream-copy chunks.
 - [x] HEVC native stream-copy chunks.
 - [x] AC-3/E-AC-3/MP3/FLAC/ALAC native copy paths.
@@ -128,6 +130,7 @@
 - [x] Native video decode frame/pump contract. Chroma Engine now has zero-copy compressed packet input, decoded BGRA frame output, and a bounded send/receive/drain action sequence for future HEVC/H.264/AV1 decoder backends.
 - [x] Native video decoder backend matrix. `decoder-probe` now reports H.264/HEVC decode backends and BGRA output format separately from encoder capabilities, with macOS VideoToolbox availability backed by native hardware decode support checks.
 - [x] Native VideoToolbox decoder session probes. H.264 and HEVC probes parse avcC/hvcC decoder config into parameter sets, create CoreMedia format descriptions, and open real VTDecompressionSession instances before the engine trusts a source for native decode.
+- [x] Stateful native fMP4 transcode session. Source snapshot, track selection, packet indexes, and keyframe chunk plan are retained across segment requests; lifecycle stats expose source opens, index parses, requests, and validations.
 - [x] Cross-platform hardware decode contract. Decoder probes now model macOS VideoToolbox, Linux VAAPI/NVDEC/QSV, and Windows D3D11VA/D3D12VA/DXVA2/QSV/AMF/NVDEC paths with explicit `designed`, `detected`, `available`, and `verified` capability states instead of marking modeled placeholders as executable.
 - [x] macOS VideoToolbox BGRA decode primitive. Chroma Engine can now accept H.264/HEVC compressed packet batches plus avcC/hvcC config and return owned decoded BGRA frames through a Rust-first API.
 - [ ] Native compressed video decode backend for HEVC/H.264 sources that need target-native HLS output. Preserve the FFmpeg send/receive/drain lesson as a bounded state machine, but expose only Chroma Engine stage events and frames.

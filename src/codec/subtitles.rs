@@ -1,9 +1,6 @@
-use std::{
-    fs::{create_dir_all, write},
-    path::Path,
-};
+use std::{fs::create_dir_all, path::Path};
 
-use crate::packet::ChunkSample;
+use crate::{output::publish_bytes, packet::ChunkSample};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// A normalized text subtitle cue using millisecond timing.
@@ -230,9 +227,12 @@ pub fn write_webvtt_sidecars(
         let safe_id = safe_path_component(&track.track_id);
         let track_dir = output_dir.join("subs").join(safe_id);
         create_dir_all(&track_dir)?;
-        write(track_dir.join("index.m3u8"), &track.playlist_body)?;
+        publish_bytes(
+            &track_dir.join("index.m3u8"),
+            track.playlist_body.as_bytes(),
+        )?;
         for segment in &track.segments {
-            write(track_dir.join(&segment.uri), &segment.body)?;
+            publish_bytes(&track_dir.join(&segment.uri), segment.body.as_bytes())?;
         }
     }
 

@@ -1,5 +1,13 @@
 # Chroma Engine Rust, Security, and Architecture Review
 
+> Historical review: this document describes revision `362324a`. The September 2026 remediation
+> replaced file-sized heap storage with a clone-or-retained-handle file-backed source view, enforced
+> parser limits and signed timing, corrected capability states and callback accounting, removed
+> the rejected DTS decoder, added stateful playback/transcode sessions, centralized immutable
+> output publication, expanded multi-platform CI/fuzz/release gates, and eliminated the `block`
+> future-incompatibility warning. Keep the findings below as rationale and audit history rather
+> than as a description of the current tree.
+
 Date: 2026-07-21  
 Reviewed revision: `362324a` (`main`)  
 Target implementer: GPT-5.5  

@@ -25,6 +25,13 @@ This crate is intentionally not a general FFmpeg clone. It implements the contai
 
 The native probe path parses MP4/MOV and Matroska/WebM structure, emits typed tracks, and has integration tests against generated fixtures. macOS VideoToolbox encode/decode probes are executable today. Linux and Windows hardware backend contracts are modeled with explicit capability states, but those backends are not executable yet.
 
+Media inputs are held through file-backed views rather than file-sized heap buffers. Clone-capable
+macOS filesystems get a private copy-on-write snapshot; the portable fallback retains the open read
+handle and validates source identity around work without eagerly copying the file. A reusable
+`HlsVodPlan`, `PlaybackSession`, or `NativeFmp4TranscodeSession` keeps that view and its
+parsed/indexed state alive across segment requests. Generated artifacts are published atomically
+and treated as immutable; a conflicting concurrent writer receives an error.
+
 Capability status terms are:
 
 - `designed`: modeled, not executable.

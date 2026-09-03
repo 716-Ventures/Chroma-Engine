@@ -7,6 +7,7 @@ mod audio_clock;
 mod audio_decode;
 mod audio_encode;
 mod execution_plan;
+mod scaler;
 mod segment;
 mod video_decode;
 mod video_encode;
@@ -26,8 +27,9 @@ pub use execution_plan::{
 };
 pub use segment::{
     NativeFmp4TranscodeInitOutput, NativeFmp4TranscodeOptions, NativeFmp4TranscodeSegmentOutput,
-    NativeFmp4TranscodeStartOutput, NativeFmp4VideoMode, write_native_fmp4_transcode_init,
-    write_native_fmp4_transcode_segment, write_native_fmp4_transcode_start,
+    NativeFmp4TranscodeSession, NativeFmp4TranscodeSessionStats, NativeFmp4TranscodeStartOutput,
+    NativeFmp4VideoMode, write_native_fmp4_transcode_init, write_native_fmp4_transcode_segment,
+    write_native_fmp4_transcode_start,
 };
 pub use video_decode::{
     CompressedVideoPacket, DecodedVideoFrame, DecodedVideoOutput, DecodedVideoStream,

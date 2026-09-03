@@ -29,6 +29,38 @@ pub(crate) fn publish_bytes(path: &Path, bytes: &[u8]) -> io::Result<()> {
     publish_bytes_with_options(path, bytes, PublishOptions::default())
 }
 
+/// Streams an immutable output through a unique same-directory temporary file.
+pub(crate) fn publish_file<E, F>(path: &Path, write: F) -> Result<(), E>
+where
+    E: From<io::Error>,
+    F: FnOnce(&mut fs::File) -> Result<(), E>,
+{
+    if path.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("output already exists: {}", path.display()),
+        )
+        .into());
+    }
+
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    let (mut file, tmp_path) = create_unique_temp(parent, path)?;
+    let publish_result = (|| {
+        write(&mut file)?;
+        file.flush()?;
+        drop(file);
+        fs::hard_link(&tmp_path, path)?;
+        fs::remove_file(&tmp_path)?;
+        Ok(())
+    })();
+
+    if publish_result.is_err() {
+        let _ = fs::remove_file(&tmp_path);
+    }
+    publish_result
+}
+
 /// Publishes bytes through a unique same-directory temporary file using explicit options.
 pub(crate) fn publish_bytes_with_options(
     path: &Path,
@@ -59,13 +91,37 @@ pub(crate) fn publish_bytes_with_options(
             file.sync_data()?;
         }
         drop(file);
-        fs::rename(&tmp_path, path)
+        publish_temp_without_replacement(&tmp_path, path, bytes)
     })();
 
     if publish_result.is_err() {
         let _ = fs::remove_file(&tmp_path);
     }
     publish_result
+}
+
+fn publish_temp_without_replacement(tmp_path: &Path, path: &Path, bytes: &[u8]) -> io::Result<()> {
+    match fs::hard_link(tmp_path, path) {
+        Ok(()) => {
+            fs::remove_file(tmp_path)?;
+            Ok(())
+        }
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            if existing_file_matches(path, bytes)? {
+                fs::remove_file(tmp_path)?;
+                Ok(())
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!(
+                        "output was concurrently published with different content: {}",
+                        path.display()
+                    ),
+                ))
+            }
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn existing_file_matches(path: &Path, bytes: &[u8]) -> io::Result<bool> {
@@ -149,5 +205,54 @@ mod tests {
 
         assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
         assert_eq!(fs::read(&output).expect("read output"), b"old");
+    }
+
+    #[test]
+    fn concurrent_different_publishers_cannot_replace_the_winner() {
+        use std::sync::{Arc, Barrier};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let output = Arc::new(dir.path().join("segment.m4s"));
+        let barrier = Arc::new(Barrier::new(3));
+        let handles = [b"first".as_slice(), b"second".as_slice()].map(|bytes| {
+            let output = Arc::clone(&output);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                publish_bytes(&output, bytes)
+            })
+        });
+        barrier.wait();
+
+        let results = handles.map(|handle| handle.join().expect("publisher thread"));
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        let published = fs::read(&*output).expect("published output");
+        assert!(published == b"first" || published == b"second");
+    }
+
+    #[test]
+    fn streaming_output_is_invisible_until_complete() {
+        use std::sync::{Arc, mpsc};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let output = Arc::new(dir.path().join("movie.mp4"));
+        let worker_output = Arc::clone(&output);
+        let (prefix_ready_tx, prefix_ready_rx) = mpsc::channel();
+        let (finish_tx, finish_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            publish_file::<io::Error, _>(&worker_output, |file| {
+                file.write_all(b"prefix")?;
+                prefix_ready_tx.send(()).expect("signal prefix");
+                finish_rx.recv().expect("finish signal");
+                file.write_all(b"-suffix")?;
+                Ok(())
+            })
+        });
+
+        prefix_ready_rx.recv().expect("prefix signal");
+        assert!(!output.exists());
+        finish_tx.send(()).expect("finish signal");
+        worker.join().expect("publisher thread").expect("publish");
+        assert_eq!(fs::read(&*output).expect("read output"), b"prefix-suffix");
     }
 }

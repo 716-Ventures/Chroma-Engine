@@ -87,7 +87,8 @@ pub fn extract_chunk(
         .ok_or(MatroskaChunkExtractError::NoChunk)
 }
 
-pub fn extract_time_range(
+#[cfg(test)]
+fn extract_time_range(
     bytes: &[u8],
     requested_track_id: Option<&str>,
     range_start_ms: u64,
@@ -110,11 +111,9 @@ pub fn extract_time_range(
                 end > range_start_ms && start < range_end_ms
             })
             .collect::<Vec<_>>();
-
     if packets.is_empty() {
         return Err(MatroskaChunkExtractError::NoChunk);
     }
-
     let last_duration =
         infer_last_packet_duration(&packets).unwrap_or_else(|| TimeDelta::millis(0));
     if let Some(last) = packets.last_mut() {

@@ -43,6 +43,11 @@ Release artifacts must be built from a clean commit and published with checksums
 
 The CI `release-build` job uses `cargo auditable build --locked --release --bin chroma-engine` on macOS, Linux, and Windows so release binaries carry dependency metadata before packaging is formalized.
 
+The current Apple bindings still transitively use `block 0.1.6`. Chroma Engine carries a minimal
+source-compatible patch that gives its opaque Objective-C class declaration a valid C layout and
+uses explicit C ABIs. `cargo check --future-incompat-report` must remain at zero until the Apple
+backend is migrated to the maintained `objc2` framework crates.
+
 ## Client Migration Notes
 
 GenusServer, tvOS, and web-player changes should be listed per release when they depend on a new engine schema, capability state, track-selection behavior, or error code. The engine should keep adapter code outside core parser/muxer modules so client migration does not freeze the Rust API shape.

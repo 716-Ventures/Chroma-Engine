@@ -4,18 +4,21 @@ Chroma Engine is not a command-compatible FFmpeg replacement. It is a media engi
 
 - **Probe emits facts, not legacy process output.** `MediaProbe` is the source of truth: source identity, container family, typed tracks, codec families, flags, attachments, and engine capability hints.
 - **Playback is session-first.** The core engine models packet sources, decode stages, encode stages, muxers, and native Chroma transports. Legacy transports must not shape the core.
-- **Metadata probing must be bounded.** Probing maps the file and reads container metadata sections. It must not scan packet clusters or decode frames unless a caller explicitly asks for deep analysis.
+- **Metadata probing must be bounded.** Probing reads container metadata sections from a file-backed source view. It must not scan packet clusters or decode frames unless a caller explicitly asks for deep analysis.
 - **Matroska startup uses SeekHead and Cues.** Large Matroska files must not be planned by walking every cluster; Cues provide the bounded keyframe map for native chunk startup.
 - **Track IDs are stable semantic handles.** Video, audio, and subtitle tracks get IDs such as `v0`, `a0`, and `s0`; server/client APIs should use those IDs rather than container stream indexes.
 - **Playback planning is selective by default.** A session plan selects the primary video and primary audio track unless the caller explicitly asks for broader work, such as all audio tracks. This keeps startup fast and avoids waste.
 - **Copy paths stay separate from decode paths.** Remuxing and segmenting copy-compatible streams should avoid decoders, frame allocation, and encoder scheduling entirely.
 - **Chunks are packet windows.** The engine plans native chunk ranges from compressed packet indexes first; delivery protocols can adapt after that.
 - **Extraction is byte-range native.** Copy-compatible chunk emission should copy planned packet byte ranges directly from mapped source data before any decode, encode, or mux work is considered.
+- **Source views must not scale heap use with media size.** On macOS the source layer first attempts a sealed same-filesystem copy-on-write clone. When cloning is unavailable, it retains the original read handle and maps it on demand without an eager disk copy. Sessions validate path identity before serving work; deployments must not modify an actively leased inode in place.
+- **Generated artifacts are immutable publications.** Segment, init, playlist, subtitle, and remux writers complete a unique same-directory temporary file before atomically linking it into place. Concurrent writers may accept identical bytes but cannot replace a different completed artifact.
 - **HLS is an adapter over native packet plans.** The engine plans keyframe windows once, then emits playlists, individual segments, or contiguous read-ahead batches from that plan. It should not rebuild container indexes for every future segment.
 - **Multi-output work should share stages.** Multiple audio/subtitle outputs should not duplicate video demux/decode/encode work.
 - **Compatibility is outside the core.** If a deployment later needs a legacy transport, that layer must adapt from the native session model. It should not dictate the engine core or public CLI.
 - **The crate root is the supported API.** Parser, muxer, codec, and source modules are implementation details. Server/client integrations should import re-exported root symbols so internals can be split or replaced without changing host code.
 - **Performance work must be measurable.** Hot paths should get a benchmark before or with major rewrites. The current baseline lives in the `engine_hot_paths` Criterion bench and covers probe, planning, packet windows, and subtitle segmentation.
+- **Transcode work is session-first.** `NativeFmp4TranscodeSession` retains its source snapshot, selected tracks, packet indexes, and keyframe plan. Stateless CLI helpers are adapters over a one-operation session; servers should retain the session across requests.
 - **Real media smoke tests are separate from fixtures.** Scripts may inspect mounted local media, but committed tests use generated or sanitized fixtures so the repo stays small and deterministic.
 
 Near-term implementation order:

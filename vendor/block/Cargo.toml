@@ -1,0 +1,8 @@
+[package]
+name = "block"
+version = "0.1.6"
+edition = "2015"
+license = "MIT"
+description = "Locally maintained compatibility patch for rust-block 0.1.6."
+repository = "http://github.com/SSheldon/rust-block"
+

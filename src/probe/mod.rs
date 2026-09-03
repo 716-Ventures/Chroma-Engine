@@ -1,5 +1,3 @@
-use std::fs::File;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -331,19 +329,11 @@ pub fn probe_media_source(path: &Path) -> Result<MediaProbe, ProbeError> {
         return Err(ProbeError::FileNotFound);
     }
 
-    let mut file = File::open(path).map_err(|err| ProbeError::OpenFailed(err.to_string()))?;
-    let size_bytes = file
-        .metadata()
-        .map_err(|err| ProbeError::OpenFailed(err.to_string()))?
-        .len();
-    let mut head = [0_u8; 4096];
-    let n = file
-        .read(&mut head)
-        .map_err(|err| ProbeError::ReadFailed(err.to_string()))?;
-
-    let container = sniff_container(&head[..n]);
     let mapped =
         MappedMediaFile::open(path).map_err(|err| ProbeError::MapFailed(err.to_string()))?;
+    let size_bytes = mapped.len();
+    let bytes = mapped.as_ref();
+    let container = sniff_container(&bytes[..bytes.len().min(4096)]);
 
     let mut duration_ms = None;
     let mut tracks = Vec::new();
@@ -362,6 +352,10 @@ pub fn probe_media_source(path: &Path) -> Result<MediaProbe, ProbeError> {
         chapters = chapters_from_matroska(&meta.chapters);
         tracks = tracks_from_matroska(&meta);
     }
+
+    mapped
+        .validate_current()
+        .map_err(|err| ProbeError::ReadFailed(err.to_string()))?;
 
     let capabilities = infer_capabilities(&tracks);
     Ok(MediaProbe {

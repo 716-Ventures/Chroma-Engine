@@ -1,8 +1,12 @@
-use std::path::Path;
+use std::{
+    path::Path,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use anyhow::{Result, bail};
 use serde::Serialize;
 
+use super::scaler::{constrained_h264_format, scale_bgra};
 use crate::{
     codec::ac3::{parse_ac3_specific_box, parse_eac3_specific_box},
     container::matroska::{MatroskaTrack, MatroskaTrackKind, looks_like_ebml},
@@ -11,7 +15,10 @@ use crate::{
         fragment_track_from_encoded_video_frames, init_segment, media_fragment,
     },
     output::publish_bytes,
-    packet::{ChunkSample, ExtractedChunk, TimePoint, TimeScale},
+    packet::{
+        ChunkPlan, ChunkSample, ExtractedChunk, NativeChunk, PacketRange, PacketRef, TimeDelta,
+        TimePoint, TimeScale, extract_packet_payload, packet_samples_for_range, plan_track_chunks,
+    },
     source::MappedMediaFile,
     transcode::{
         RawVideoFormat, RawVideoFrameRef, RawVideoPixelFormat, VideoCodec,
@@ -25,8 +32,6 @@ const AUDIO_TRACK_ID: u32 = 2;
 const DEFAULT_VIDEO_BITRATE: u32 = 16_000_000;
 const DEFAULT_AUDIO_BITRATE: u32 = 384_000;
 const DEFAULT_SEGMENT_MS: u64 = 4_000;
-const H264_WEB_MAX_WIDTH: u32 = 1_920;
-const H264_WEB_MAX_HEIGHT: u32 = 1_080;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -134,6 +139,129 @@ pub struct NativeFmp4TranscodeStartOutput {
     pub audio_codec: String,
 }
 
+/// Lifecycle counters for a retained native fMP4 transcode session.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeFmp4TranscodeSessionStats {
+    /// Source snapshots created by this session.
+    pub source_opens: u64,
+    /// Track-selection and packet-index passes completed at session open.
+    pub index_parses: u64,
+    /// Segment transcode requests served by this session.
+    pub segment_requests: u64,
+    /// Source identity validations performed before transcoding.
+    pub source_validations: u64,
+}
+
+/// Stateful Matroska-to-fMP4 transcode session retaining one immutable source snapshot.
+#[derive(Debug)]
+pub struct NativeFmp4TranscodeSession {
+    source: MappedMediaFile,
+    options: NativeFmp4TranscodeOptions,
+    prepared: PreparedTranscode,
+    segment_requests: AtomicU64,
+    source_validations: AtomicU64,
+}
+
+impl NativeFmp4TranscodeSession {
+    /// Opens and validates a reusable transcode session.
+    pub fn open(input: &Path, options: NativeFmp4TranscodeOptions) -> Result<Self> {
+        let source = MappedMediaFile::open(input)?;
+        if !looks_like_ebml(source.as_ref()) {
+            bail!("native fMP4 transcode currently supports Matroska/WebM sources");
+        }
+        let prepared = prepare_transcode(source.as_ref(), &options)?;
+        Ok(Self {
+            source,
+            options,
+            prepared,
+            segment_requests: AtomicU64::new(0),
+            source_validations: AtomicU64::new(0),
+        })
+    }
+
+    /// Returns measured session lifecycle counters.
+    pub fn stats(&self) -> NativeFmp4TranscodeSessionStats {
+        NativeFmp4TranscodeSessionStats {
+            source_opens: 1,
+            index_parses: 1,
+            segment_requests: self.segment_requests.load(Ordering::Relaxed),
+            source_validations: self.source_validations.load(Ordering::Relaxed),
+        }
+    }
+
+    fn render(&self, index: u32) -> Result<TranscodedSegment> {
+        self.segment_requests.fetch_add(1, Ordering::Relaxed);
+        self.source.validate_current()?;
+        self.source_validations.fetch_add(1, Ordering::Relaxed);
+        transcode_prepared_segment(self.source.as_ref(), index, &self.options, &self.prepared)
+    }
+
+    /// Writes a native fMP4 init segment, deriving encoder configuration from segment zero.
+    pub fn write_init(&self, output: &Path) -> Result<NativeFmp4TranscodeInitOutput> {
+        let segment = self.render(0)?;
+        publish_bytes(output, &segment.init_segment)?;
+        Ok(NativeFmp4TranscodeInitOutput {
+            output: output.display().to_string(),
+            video_track_id: segment.video_track_id,
+            audio_track_id: segment.audio_track_id,
+            byte_count: segment.init_segment.len() as u64,
+            video_codec: segment.video_codec,
+            audio_codec: segment.audio_codec,
+        })
+    }
+
+    /// Writes one media segment while retaining the source snapshot for later requests.
+    pub fn write_segment(
+        &self,
+        output: &Path,
+        index: u32,
+    ) -> Result<NativeFmp4TranscodeSegmentOutput> {
+        let segment = self.render(index)?;
+        publish_bytes(output, &segment.media_segment)?;
+        Ok(NativeFmp4TranscodeSegmentOutput {
+            output: output.display().to_string(),
+            index,
+            video_track_id: segment.video_track_id,
+            audio_track_id: segment.audio_track_id,
+            byte_count: segment.media_segment.len() as u64,
+            decoded_video_frames: segment.decoded_video_frames,
+            video_sample_count: segment.video_sample_count,
+            encoded_video_frames: segment.encoded_video_frames,
+            encoded_audio_frames: segment.encoded_audio_frames,
+            audio_codec: segment.audio_codec,
+            first_video_pts_ms: segment.first_video_pts.map(TimePoint::as_millis),
+            first_audio_pts_ms: segment.first_audio_pts.map(TimePoint::as_millis),
+        })
+    }
+
+    /// Writes init and media artifacts from one segment pass.
+    pub fn write_start(
+        &self,
+        init_output: &Path,
+        segment_output: &Path,
+        index: u32,
+    ) -> Result<NativeFmp4TranscodeStartOutput> {
+        let segment = self.render(index)?;
+        publish_bytes(init_output, &segment.init_segment)?;
+        publish_bytes(segment_output, &segment.media_segment)?;
+        Ok(NativeFmp4TranscodeStartOutput {
+            init_output: init_output.display().to_string(),
+            segment_output: segment_output.display().to_string(),
+            index,
+            video_track_id: segment.video_track_id,
+            audio_track_id: segment.audio_track_id,
+            init_byte_count: segment.init_segment.len() as u64,
+            segment_byte_count: segment.media_segment.len() as u64,
+            decoded_video_frames: segment.decoded_video_frames,
+            video_sample_count: segment.video_sample_count,
+            encoded_video_frames: segment.encoded_video_frames,
+            encoded_audio_frames: segment.encoded_audio_frames,
+            audio_codec: segment.audio_codec,
+        })
+    }
+}
+
 impl Default for NativeFmp4TranscodeOptions {
     fn default() -> Self {
         Self {
@@ -153,17 +281,7 @@ pub fn write_native_fmp4_transcode_init(
     output: &Path,
     options: NativeFmp4TranscodeOptions,
 ) -> Result<NativeFmp4TranscodeInitOutput> {
-    let source = MappedMediaFile::open(input)?;
-    let segment = transcode_matroska_segment(source.as_ref(), 0, &options)?;
-    publish_bytes(output, &segment.init_segment)?;
-    Ok(NativeFmp4TranscodeInitOutput {
-        output: output.display().to_string(),
-        video_track_id: segment.video_track_id,
-        audio_track_id: segment.audio_track_id,
-        byte_count: segment.init_segment.len() as u64,
-        video_codec: segment.video_codec,
-        audio_codec: segment.audio_codec,
-    })
+    NativeFmp4TranscodeSession::open(input, options)?.write_init(output)
 }
 
 /// Writes one native fMP4 media segment for the Matroska transcode path.
@@ -173,23 +291,7 @@ pub fn write_native_fmp4_transcode_segment(
     index: u32,
     options: NativeFmp4TranscodeOptions,
 ) -> Result<NativeFmp4TranscodeSegmentOutput> {
-    let source = MappedMediaFile::open(input)?;
-    let segment = transcode_matroska_segment(source.as_ref(), index, &options)?;
-    publish_bytes(output, &segment.media_segment)?;
-    Ok(NativeFmp4TranscodeSegmentOutput {
-        output: output.display().to_string(),
-        index,
-        video_track_id: segment.video_track_id,
-        audio_track_id: segment.audio_track_id,
-        byte_count: segment.media_segment.len() as u64,
-        decoded_video_frames: segment.decoded_video_frames,
-        video_sample_count: segment.video_sample_count,
-        encoded_video_frames: segment.encoded_video_frames,
-        encoded_audio_frames: segment.encoded_audio_frames,
-        audio_codec: segment.audio_codec,
-        first_video_pts_ms: segment.first_video_pts.map(TimePoint::as_millis),
-        first_audio_pts_ms: segment.first_audio_pts.map(TimePoint::as_millis),
-    })
+    NativeFmp4TranscodeSession::open(input, options)?.write_segment(output, index)
 }
 
 /// Writes a native fMP4 init segment and one media segment from a single transcode pass.
@@ -200,24 +302,11 @@ pub fn write_native_fmp4_transcode_start(
     index: u32,
     options: NativeFmp4TranscodeOptions,
 ) -> Result<NativeFmp4TranscodeStartOutput> {
-    let source = MappedMediaFile::open(input)?;
-    let segment = transcode_matroska_segment(source.as_ref(), index, &options)?;
-    publish_bytes(init_output, &segment.init_segment)?;
-    publish_bytes(segment_output, &segment.media_segment)?;
-    Ok(NativeFmp4TranscodeStartOutput {
-        init_output: init_output.display().to_string(),
-        segment_output: segment_output.display().to_string(),
+    NativeFmp4TranscodeSession::open(input, options)?.write_start(
+        init_output,
+        segment_output,
         index,
-        video_track_id: segment.video_track_id,
-        audio_track_id: segment.audio_track_id,
-        init_byte_count: segment.init_segment.len() as u64,
-        segment_byte_count: segment.media_segment.len() as u64,
-        decoded_video_frames: segment.decoded_video_frames,
-        video_sample_count: segment.video_sample_count,
-        encoded_video_frames: segment.encoded_video_frames,
-        encoded_audio_frames: segment.encoded_audio_frames,
-        audio_codec: segment.audio_codec,
-    })
+    )
 }
 
 struct TranscodedSegment {
@@ -257,15 +346,23 @@ struct AudioSegment {
     first_pts: Option<TimePoint>,
 }
 
-fn transcode_matroska_segment(
-    bytes: &[u8],
-    index: u32,
-    options: &NativeFmp4TranscodeOptions,
-) -> Result<TranscodedSegment> {
-    if !looks_like_ebml(bytes) {
-        bail!("native fMP4 transcode currently supports Matroska/WebM sources");
-    }
+#[derive(Debug)]
+struct PreparedTranscode {
+    video_track_id: String,
+    audio_track_id: String,
+    video_track: MatroskaTrack,
+    audio_track: MatroskaTrack,
+    video_codec: VideoCodec,
+    decoder_config: Vec<u8>,
+    video_packets: Vec<PacketRef>,
+    audio_packets: Vec<PacketRef>,
+    video_chunks: ChunkPlan,
+}
 
+fn prepare_transcode(
+    bytes: &[u8],
+    options: &NativeFmp4TranscodeOptions,
+) -> Result<PreparedTranscode> {
     let meta = crate::container::matroska::parse_basic_metadata(bytes);
     let (video_track_id, video_track) = select_matroska_track(
         &meta.tracks,
@@ -284,30 +381,81 @@ fn transcode_matroska_segment(
         .codec_private
         .clone()
         .ok_or_else(|| anyhow::anyhow!("missing Matroska video decoder config"))?;
-    let segment_ms = options.segment_ms.max(1);
-    let (video_manifest, video_payload) =
-        crate::container::matroska::extract_chunk(bytes, Some(&video_track_id), segment_ms, index)?;
+    let requested_ids = [video_track_id.as_str(), audio_track_id.as_str()];
+    let mut indexed = crate::container::matroska::parse_packet_tracks_in_time_window(
+        bytes,
+        &requested_ids,
+        0,
+        u64::MAX,
+    )
+    .ok_or_else(|| anyhow::anyhow!("could not index selected Matroska tracks"))?;
+    let audio_packets = indexed
+        .pop()
+        .ok_or_else(|| anyhow::anyhow!("missing indexed Matroska audio track"))?
+        .packets;
+    let video_packets = indexed
+        .pop()
+        .ok_or_else(|| anyhow::anyhow!("missing indexed Matroska video track"))?
+        .packets;
+    let video_chunks =
+        plan_track_chunks(&video_track_id, &video_packets, options.segment_ms.max(1));
+    if video_chunks.chunks.is_empty() {
+        bail!("selected Matroska video track produced no transcode segments");
+    }
+
+    Ok(PreparedTranscode {
+        video_track_id,
+        audio_track_id,
+        video_track: video_track.clone(),
+        audio_track: audio_track.clone(),
+        video_codec,
+        decoder_config,
+        video_packets,
+        audio_packets,
+        video_chunks,
+    })
+}
+
+fn transcode_prepared_segment(
+    bytes: &[u8],
+    index: u32,
+    options: &NativeFmp4TranscodeOptions,
+    prepared: &PreparedTranscode,
+) -> Result<TranscodedSegment> {
+    let video_chunk = prepared
+        .video_chunks
+        .chunks
+        .get(usize::try_from(index)?)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("transcode segment {index} is out of range"))?;
+    let (video_manifest, video_payload) = extract_indexed_chunk(
+        bytes,
+        &prepared.video_track_id,
+        &prepared.video_packets,
+        video_chunk,
+    )?;
     let video_start_ms = video_manifest.chunk.start.as_millis();
     let video_end_ms = video_start_ms.saturating_add(video_manifest.chunk.duration.as_millis());
-    let (audio_manifest, audio_payload) = crate::container::matroska::extract_time_range(
+    let (audio_manifest, audio_payload) = extract_indexed_time_range(
         bytes,
-        Some(&audio_track_id),
+        &prepared.audio_track_id,
+        &prepared.audio_packets,
         video_start_ms,
         video_end_ms,
         index,
     )?;
 
     let video_segment = matroska_video_segment(
-        video_track,
-        video_codec,
-        decoder_config,
+        &prepared.video_track,
+        prepared.video_codec,
+        prepared.decoder_config.clone(),
         video_manifest,
         video_payload,
         options,
     )?;
 
     let audio_segment = matroska_audio_segment(
-        audio_track,
+        &prepared.audio_track,
         audio_manifest,
         audio_payload,
         options.audio_bitrate,
@@ -340,8 +488,8 @@ fn transcode_matroska_segment(
     )?;
 
     Ok(TranscodedSegment {
-        video_track_id,
-        audio_track_id,
+        video_track_id: prepared.video_track_id.clone(),
+        audio_track_id: prepared.audio_track_id.clone(),
         video_codec: video_segment.codec,
         audio_codec: audio_segment.codec,
         init_segment: init,
@@ -353,6 +501,69 @@ fn transcode_matroska_segment(
         first_video_pts: video_segment.first_pts,
         first_audio_pts: audio_segment.first_pts,
     })
+}
+
+fn extract_indexed_chunk(
+    bytes: &[u8],
+    track_id: &str,
+    packets: &[PacketRef],
+    chunk: NativeChunk,
+) -> Result<(ExtractedChunk, Vec<u8>)> {
+    let payload = extract_packet_payload(bytes, packets, chunk.packet_range)?;
+    let samples = packet_samples_for_range(packets, chunk.packet_range)?;
+    Ok((
+        ExtractedChunk {
+            track_id: track_id.to_string(),
+            packet_count: chunk
+                .packet_range
+                .end
+                .saturating_sub(chunk.packet_range.start),
+            byte_count: payload.len() as u64,
+            chunk,
+            samples,
+        },
+        payload,
+    ))
+}
+
+fn extract_indexed_time_range(
+    bytes: &[u8],
+    track_id: &str,
+    packets: &[PacketRef],
+    start_ms: u64,
+    end_ms: u64,
+    index: u32,
+) -> Result<(ExtractedChunk, Vec<u8>)> {
+    let start = packets
+        .iter()
+        .position(|packet| {
+            packet
+                .pts
+                .as_millis()
+                .saturating_add(packet.duration.as_millis().max(1))
+                > start_ms
+        })
+        .ok_or_else(|| anyhow::anyhow!("audio track has no packets for segment {index}"))?;
+    let end = packets
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take_while(|(_, packet)| packet.pts.as_millis() < end_ms)
+        .map(|(packet_index, _)| packet_index + 1)
+        .last()
+        .ok_or_else(|| anyhow::anyhow!("audio track has no packets for segment {index}"))?;
+    let range = PacketRange {
+        start: u32::try_from(start)?,
+        end: u32::try_from(end)?,
+    };
+    let chunk = NativeChunk {
+        index,
+        start: TimePoint::millis(start_ms),
+        duration: TimeDelta::millis(end_ms.saturating_sub(start_ms).max(1)),
+        packet_range: range,
+        key_aligned: true,
+    };
+    extract_indexed_chunk(bytes, track_id, packets, chunk)
 }
 
 fn select_matroska_track<'a>(
@@ -512,7 +723,7 @@ fn transcode_h264_video_segment(
         .frames
         .iter()
         .map(|frame| {
-            scale_bgra_nearest(
+            scale_bgra(
                 &frame.pixels,
                 decode_format.width,
                 decode_format.height,
@@ -529,7 +740,7 @@ fn transcode_h264_video_segment(
             pts: frame.pts,
             dts: frame.dts,
             duration: frame.duration,
-            bytes: pixels.as_slice(),
+            bytes: pixels.as_ref(),
             keyframe: frame.keyframe,
         })
         .collect::<Vec<_>>();
@@ -587,111 +798,6 @@ fn gcd_u64(mut a: u64, mut b: u64) -> u64 {
         b = next;
     }
     a.max(1)
-}
-
-fn constrained_h264_format(source: RawVideoFormat) -> RawVideoFormat {
-    let width_scale = H264_WEB_MAX_WIDTH as f64 / source.width.max(1) as f64;
-    let height_scale = H264_WEB_MAX_HEIGHT as f64 / source.height.max(1) as f64;
-    let scale = width_scale.min(height_scale).min(1.0);
-    let width = even_dimension((source.width as f64 * scale).round() as u32).max(2);
-    let height = even_dimension((source.height as f64 * scale).round() as u32).max(2);
-    RawVideoFormat {
-        width,
-        height,
-        frame_rate_num: source.frame_rate_num,
-        frame_rate_den: source.frame_rate_den,
-        pixel_format: source.pixel_format,
-    }
-}
-
-fn even_dimension(value: u32) -> u32 {
-    if value <= 2 { 2 } else { value & !1 }
-}
-
-fn scale_bgra_nearest(
-    src: &[u8],
-    src_width: u32,
-    src_height: u32,
-    dst_width: u32,
-    dst_height: u32,
-) -> Result<Vec<u8>> {
-    let src_stride = usize::try_from(src_width)?
-        .checked_mul(4)
-        .ok_or_else(|| anyhow::anyhow!("source BGRA stride overflowed"))?;
-    let src_len = src_stride
-        .checked_mul(usize::try_from(src_height)?)
-        .ok_or_else(|| anyhow::anyhow!("source BGRA frame size overflowed"))?;
-    if src.len() != src_len {
-        bail!("source BGRA frame size does not match declared dimensions");
-    }
-    if src_width == dst_width && src_height == dst_height {
-        return Ok(src.to_vec());
-    }
-    if src_width == dst_width.saturating_mul(2) && src_height == dst_height.saturating_mul(2) {
-        return scale_bgra_half_nearest(src, src_width, src_height, dst_width, dst_height);
-    }
-    let dst_stride = usize::try_from(dst_width)?
-        .checked_mul(4)
-        .ok_or_else(|| anyhow::anyhow!("destination BGRA stride overflowed"))?;
-    let mut out =
-        vec![
-            0;
-            dst_stride
-                .checked_mul(usize::try_from(dst_height)?)
-                .ok_or_else(|| anyhow::anyhow!("destination BGRA frame size overflowed"))?
-        ];
-    for y in 0..dst_height {
-        let src_y = ((u64::from(y) * u64::from(src_height)) / u64::from(dst_height)) as usize;
-        for x in 0..dst_width {
-            let src_x = ((u64::from(x) * u64::from(src_width)) / u64::from(dst_width)) as usize;
-            let src_offset = src_y * src_stride + src_x * 4;
-            let dst_offset = usize::try_from(y)? * dst_stride + usize::try_from(x)? * 4;
-            out[dst_offset..dst_offset + 4].copy_from_slice(&src[src_offset..src_offset + 4]);
-        }
-    }
-    Ok(out)
-}
-
-fn scale_bgra_half_nearest(
-    src: &[u8],
-    src_width: u32,
-    src_height: u32,
-    dst_width: u32,
-    dst_height: u32,
-) -> Result<Vec<u8>> {
-    let src_stride = usize::try_from(src_width)?
-        .checked_mul(4)
-        .ok_or_else(|| anyhow::anyhow!("source BGRA stride overflowed"))?;
-    let dst_stride = usize::try_from(dst_width)?
-        .checked_mul(4)
-        .ok_or_else(|| anyhow::anyhow!("destination BGRA stride overflowed"))?;
-    let src_len = src_stride
-        .checked_mul(usize::try_from(src_height)?)
-        .ok_or_else(|| anyhow::anyhow!("source BGRA frame size overflowed"))?;
-    if src.len() != src_len {
-        bail!("source BGRA frame size does not match declared dimensions");
-    }
-    let mut out =
-        vec![
-            0;
-            dst_stride
-                .checked_mul(usize::try_from(dst_height)?)
-                .ok_or_else(|| anyhow::anyhow!("destination BGRA frame size overflowed"))?
-        ];
-    for y in 0..usize::try_from(dst_height)? {
-        let src_row = (y * 2)
-            .checked_mul(src_stride)
-            .ok_or_else(|| anyhow::anyhow!("source BGRA row offset overflowed"))?;
-        let dst_row = y
-            .checked_mul(dst_stride)
-            .ok_or_else(|| anyhow::anyhow!("destination BGRA row offset overflowed"))?;
-        for x in 0..usize::try_from(dst_width)? {
-            let src_offset = src_row + x * 8;
-            let dst_offset = dst_row + x * 4;
-            out[dst_offset..dst_offset + 4].copy_from_slice(&src[src_offset..src_offset + 4]);
-        }
-    }
-    Ok(out)
 }
 
 fn matroska_audio_segment(
@@ -816,4 +922,28 @@ fn rescale_units(units: u64, from: TimeScale, to_units_per_second: u32) -> u64 {
     let numerator = u128::from(units) * u128::from(to_units_per_second);
     let denominator = u128::from(from.units_per_second);
     ((numerator + (denominator / 2)) / denominator).min(u128::from(u64::MAX)) as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scaler_borrows_frames_when_dimensions_already_match() {
+        let pixels = [1_u8, 2, 3, 255, 4, 5, 6, 255];
+        let scaled = scale_bgra(&pixels, 2, 1, 2, 1).expect("scale");
+
+        assert!(matches!(scaled, std::borrow::Cow::Borrowed(_)));
+        assert_eq!(scaled.as_ref(), pixels);
+    }
+
+    #[test]
+    fn half_scaler_averages_four_source_pixels() {
+        let pixels = [
+            0_u8, 0, 0, 0, 100, 100, 100, 100, 200, 200, 200, 200, 252, 252, 252, 252,
+        ];
+        let scaled = scale_bgra(&pixels, 2, 2, 1, 1).expect("scale");
+
+        assert_eq!(scaled.as_ref(), [138, 138, 138, 138]);
+    }
 }
