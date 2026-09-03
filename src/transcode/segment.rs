@@ -1,4 +1,5 @@
 use std::{
+    cell::RefCell,
     path::Path,
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -22,8 +23,7 @@ use crate::{
     source::MappedMediaFile,
     transcode::{
         RawVideoFormat, RawVideoFrameRef, RawVideoPixelFormat, VideoCodec,
-        build_video_decode_input, decode_videotoolbox_bgra_frames,
-        encode_h264_videotoolbox_bgra_frames,
+        VideoToolboxBgraDecoderSession, VideoToolboxH264EncoderSession, build_video_decode_input,
     },
 };
 
@@ -32,6 +32,7 @@ const AUDIO_TRACK_ID: u32 = 2;
 const DEFAULT_VIDEO_BITRATE: u32 = 16_000_000;
 const DEFAULT_AUDIO_BITRATE: u32 = 384_000;
 const DEFAULT_SEGMENT_MS: u64 = 4_000;
+const VIDEO_DECODE_BATCH_PACKETS: usize = 16;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -139,6 +140,20 @@ pub struct NativeFmp4TranscodeStartOutput {
     pub audio_codec: String,
 }
 
+/// Immutable segment plan exposed by a retained native fMP4 transcode session.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeFmp4TranscodePlan {
+    /// Selected source video track id.
+    pub video_track_id: String,
+    /// Selected source audio track id.
+    pub audio_track_id: String,
+    /// Planned video operation.
+    pub video_mode: NativeFmp4VideoMode,
+    /// Keyframe-aligned output segment windows.
+    pub chunks: ChunkPlan,
+}
+
 /// Lifecycle counters for a retained native fMP4 transcode session.
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -151,6 +166,14 @@ pub struct NativeFmp4TranscodeSessionStats {
     pub segment_requests: u64,
     /// Source identity validations performed before transcoding.
     pub source_validations: u64,
+    /// Native video decoder sessions created, including discontinuity resets.
+    pub video_decoder_sessions_created: u64,
+    /// Native video encoder sessions created, including discontinuity resets.
+    pub video_encoder_sessions_created: u64,
+    /// Sequential segment requests that reused both native video sessions.
+    pub codec_session_reuses: u64,
+    /// Discontinuous requests that required fresh native video sessions.
+    pub codec_session_resets: u64,
 }
 
 /// Stateful Matroska-to-fMP4 transcode session retaining one immutable source snapshot.
@@ -159,6 +182,7 @@ pub struct NativeFmp4TranscodeSession {
     source: MappedMediaFile,
     options: NativeFmp4TranscodeOptions,
     prepared: PreparedTranscode,
+    codec_pipeline: RefCell<Option<NativeVideoCodecPipeline>>,
     segment_requests: AtomicU64,
     source_validations: AtomicU64,
 }
@@ -171,10 +195,15 @@ impl NativeFmp4TranscodeSession {
             bail!("native fMP4 transcode currently supports Matroska/WebM sources");
         }
         let prepared = prepare_transcode(source.as_ref(), &options)?;
+        let codec_pipeline = match options.video_mode {
+            NativeFmp4VideoMode::Copy => None,
+            NativeFmp4VideoMode::H264 => Some(NativeVideoCodecPipeline::new(&prepared, &options)?),
+        };
         Ok(Self {
             source,
             options,
             prepared,
+            codec_pipeline: RefCell::new(codec_pipeline),
             segment_requests: AtomicU64::new(0),
             source_validations: AtomicU64::new(0),
         })
@@ -182,11 +211,30 @@ impl NativeFmp4TranscodeSession {
 
     /// Returns measured session lifecycle counters.
     pub fn stats(&self) -> NativeFmp4TranscodeSessionStats {
+        let codec_pipeline = self.codec_pipeline.borrow();
+        let codec_stats = codec_pipeline
+            .as_ref()
+            .map(NativeVideoCodecPipeline::stats)
+            .unwrap_or_default();
         NativeFmp4TranscodeSessionStats {
             source_opens: 1,
             index_parses: 1,
             segment_requests: self.segment_requests.load(Ordering::Relaxed),
             source_validations: self.source_validations.load(Ordering::Relaxed),
+            video_decoder_sessions_created: codec_stats.decoder_sessions_created,
+            video_encoder_sessions_created: codec_stats.encoder_sessions_created,
+            codec_session_reuses: codec_stats.reuses,
+            codec_session_resets: codec_stats.resets,
+        }
+    }
+
+    /// Returns the immutable routing and segment plan retained by the session.
+    pub fn plan(&self) -> NativeFmp4TranscodePlan {
+        NativeFmp4TranscodePlan {
+            video_track_id: self.prepared.video_track_id.clone(),
+            audio_track_id: self.prepared.audio_track_id.clone(),
+            video_mode: self.options.video_mode,
+            chunks: self.prepared.video_chunks.clone(),
         }
     }
 
@@ -194,7 +242,23 @@ impl NativeFmp4TranscodeSession {
         self.segment_requests.fetch_add(1, Ordering::Relaxed);
         self.source.validate_current()?;
         self.source_validations.fetch_add(1, Ordering::Relaxed);
-        transcode_prepared_segment(self.source.as_ref(), index, &self.options, &self.prepared)
+        let mut codec_pipeline = self.codec_pipeline.borrow_mut();
+        if let Some(pipeline) = codec_pipeline.as_mut() {
+            pipeline.prepare_for(index, &self.prepared, &self.options)?;
+        }
+        let result = transcode_prepared_segment(
+            self.source.as_ref(),
+            index,
+            &self.options,
+            &self.prepared,
+            codec_pipeline.as_mut(),
+        );
+        if result.is_ok()
+            && let Some(pipeline) = codec_pipeline.as_mut()
+        {
+            pipeline.mark_completed(index);
+        }
+        result
     }
 
     /// Writes a native fMP4 init segment, deriving encoder configuration from segment zero.
@@ -235,6 +299,52 @@ impl NativeFmp4TranscodeSession {
         })
     }
 
+    /// Writes a contiguous media-segment window while reusing native codecs.
+    pub fn write_segments(
+        &self,
+        output_dir: &Path,
+        start_index: u32,
+        count: u32,
+    ) -> Result<Vec<NativeFmp4TranscodeSegmentOutput>> {
+        let mut outputs = Vec::with_capacity(usize::try_from(count)?);
+        for offset in 0..count {
+            let index = start_index
+                .checked_add(offset)
+                .ok_or_else(|| anyhow::anyhow!("transcode segment index overflowed"))?;
+            outputs
+                .push(self.write_segment(&output_dir.join(format!("seg-{index:05}.m4s")), index)?);
+        }
+        Ok(outputs)
+    }
+
+    /// Writes an fMP4 HLS media playlist for a planned contiguous window.
+    pub fn write_media_playlist(
+        &self,
+        output: &Path,
+        init_uri: &str,
+        start_index: u32,
+        count: u32,
+    ) -> Result<()> {
+        let start = usize::try_from(start_index)?;
+        let end = start
+            .checked_add(usize::try_from(count)?)
+            .ok_or_else(|| anyhow::anyhow!("playlist segment window overflowed"))?;
+        let chunks = self
+            .prepared
+            .video_chunks
+            .chunks
+            .get(start..end)
+            .ok_or_else(|| anyhow::anyhow!("playlist segment window is out of range"))?;
+        let playlist = render_transcode_media_playlist(
+            chunks,
+            init_uri,
+            start_index,
+            end == self.prepared.video_chunks.chunks.len(),
+        );
+        publish_bytes(output, playlist.as_bytes())?;
+        Ok(())
+    }
+
     /// Writes init and media artifacts from one segment pass.
     pub fn write_start(
         &self,
@@ -260,6 +370,34 @@ impl NativeFmp4TranscodeSession {
             audio_codec: segment.audio_codec,
         })
     }
+}
+
+fn render_transcode_media_playlist(
+    chunks: &[NativeChunk],
+    init_uri: &str,
+    media_sequence: u32,
+    end_list: bool,
+) -> String {
+    let target_duration = chunks
+        .iter()
+        .map(|chunk| chunk.duration.as_millis().div_ceil(1_000))
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    let mut playlist = format!(
+        "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:{target_duration}\n#EXT-X-MEDIA-SEQUENCE:{media_sequence}\n#EXT-X-MAP:URI=\"{init_uri}\"\n"
+    );
+    for chunk in chunks {
+        playlist.push_str(&format!(
+            "#EXTINF:{:.3},\nseg-{:05}.m4s\n",
+            chunk.duration.as_millis() as f64 / 1_000.0,
+            chunk.index
+        ));
+    }
+    if end_list {
+        playlist.push_str("#EXT-X-ENDLIST\n");
+    }
+    playlist
 }
 
 impl Default for NativeFmp4TranscodeOptions {
@@ -359,6 +497,83 @@ struct PreparedTranscode {
     video_chunks: ChunkPlan,
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+struct NativeVideoCodecStats {
+    decoder_sessions_created: u64,
+    encoder_sessions_created: u64,
+    reuses: u64,
+    resets: u64,
+}
+
+#[derive(Debug)]
+struct NativeVideoCodecPipeline {
+    decoder: VideoToolboxBgraDecoderSession,
+    encoder: VideoToolboxH264EncoderSession,
+    last_completed_index: Option<u32>,
+    stats: NativeVideoCodecStats,
+}
+
+impl NativeVideoCodecPipeline {
+    fn new(prepared: &PreparedTranscode, options: &NativeFmp4TranscodeOptions) -> Result<Self> {
+        let (decode_format, encode_format) = video_formats(&prepared.video_track);
+        Ok(Self {
+            decoder: VideoToolboxBgraDecoderSession::new(
+                prepared.video_codec,
+                decode_format,
+                &prepared.decoder_config,
+            )?,
+            encoder: VideoToolboxH264EncoderSession::new(encode_format, options.video_bitrate)?,
+            last_completed_index: None,
+            stats: NativeVideoCodecStats {
+                decoder_sessions_created: 1,
+                encoder_sessions_created: 1,
+                ..NativeVideoCodecStats::default()
+            },
+        })
+    }
+
+    fn prepare_for(
+        &mut self,
+        index: u32,
+        prepared: &PreparedTranscode,
+        options: &NativeFmp4TranscodeOptions,
+    ) -> Result<()> {
+        match self.last_completed_index {
+            None => Ok(()),
+            Some(previous) if previous.checked_add(1) == Some(index) => {
+                self.stats.reuses = self.stats.reuses.saturating_add(1);
+                Ok(())
+            }
+            Some(_) => {
+                let prior = self.stats;
+                let replacement = Self::new(prepared, options)?;
+                self.decoder = replacement.decoder;
+                self.encoder = replacement.encoder;
+                self.last_completed_index = None;
+                self.stats = NativeVideoCodecStats {
+                    decoder_sessions_created: prior.decoder_sessions_created.saturating_add(1),
+                    encoder_sessions_created: prior.encoder_sessions_created.saturating_add(1),
+                    reuses: prior.reuses,
+                    resets: prior.resets.saturating_add(1),
+                };
+                Ok(())
+            }
+        }
+    }
+
+    fn mark_completed(&mut self, index: u32) {
+        self.last_completed_index = Some(index);
+    }
+
+    fn stats(&self) -> NativeVideoCodecStats {
+        debug_assert_eq!(
+            self.decoder.decoded_batches(),
+            self.encoder.encoded_batches()
+        );
+        self.stats
+    }
+}
+
 fn prepare_transcode(
     bytes: &[u8],
     options: &NativeFmp4TranscodeOptions,
@@ -421,6 +636,7 @@ fn transcode_prepared_segment(
     index: u32,
     options: &NativeFmp4TranscodeOptions,
     prepared: &PreparedTranscode,
+    codec_pipeline: Option<&mut NativeVideoCodecPipeline>,
 ) -> Result<TranscodedSegment> {
     let video_chunk = prepared
         .video_chunks
@@ -452,6 +668,7 @@ fn transcode_prepared_segment(
         video_manifest,
         video_payload,
         options,
+        codec_pipeline,
     )?;
 
     let audio_segment = matroska_audio_segment(
@@ -650,6 +867,7 @@ fn matroska_video_segment(
     manifest: ExtractedChunk,
     payload: Vec<u8>,
     options: &NativeFmp4TranscodeOptions,
+    codec_pipeline: Option<&mut NativeVideoCodecPipeline>,
 ) -> Result<VideoSegment> {
     match options.video_mode {
         NativeFmp4VideoMode::Copy => {
@@ -661,7 +879,8 @@ fn matroska_video_segment(
             decoder_config,
             &manifest,
             &payload,
-            options.video_bitrate,
+            codec_pipeline
+                .ok_or_else(|| anyhow::anyhow!("missing retained video codec pipeline"))?,
         ),
     }
 }
@@ -698,61 +917,71 @@ fn transcode_h264_video_segment(
     decoder_config: Vec<u8>,
     manifest: &ExtractedChunk,
     payload: &[u8],
-    bitrate: u32,
+    codec_pipeline: &mut NativeVideoCodecPipeline,
 ) -> Result<VideoSegment> {
-    let frame_duration_ns = track.default_duration_ns.unwrap_or(41_666_667);
-    let (frame_rate_num, frame_rate_den) = frame_rate_from_duration_ns(frame_duration_ns);
-    let decode_format = RawVideoFormat {
-        width: track.width.unwrap_or(1920),
-        height: track.height.unwrap_or(1080),
-        frame_rate_num,
-        frame_rate_den,
-        pixel_format: RawVideoPixelFormat::Bgra,
-    };
-    let encode_format = constrained_h264_format(decode_format);
-    let decode_input = build_video_decode_input(
-        codec,
-        chunk_time_scale(manifest),
-        Some(&decoder_config),
-        &manifest.samples,
-        payload,
-        true,
-    )?;
-    let decoded = decode_videotoolbox_bgra_frames(&decode_input, decode_format)?;
-    let frame_buffers = decoded
-        .frames
-        .iter()
-        .map(|frame| {
-            scale_bgra(
-                &frame.pixels,
-                decode_format.width,
-                decode_format.height,
-                encode_format.width,
-                encode_format.height,
-            )
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let raw_frames = decoded
-        .frames
-        .iter()
-        .zip(frame_buffers.iter())
-        .map(|(frame, pixels)| RawVideoFrameRef {
-            pts: frame.pts,
-            dts: frame.dts,
-            duration: frame.duration,
-            bytes: pixels.as_ref(),
-            keyframe: frame.keyframe,
-        })
+    let (decode_format, encode_format) = video_formats(track);
+    let sample_batches = manifest
+        .samples
+        .chunks(VIDEO_DECODE_BATCH_PACKETS)
         .collect::<Vec<_>>();
-    let encoded = encode_h264_videotoolbox_bgra_frames(encode_format, &raw_frames, bitrate)?;
-    let decoder_config = encoded
-        .stream
-        .decoder_config
-        .clone()
+    let mut encoded_frames = Vec::new();
+    let mut output_decoder_config = None;
+    let mut output_time_scale = None;
+    let mut decoded_frame_count = 0;
+
+    for (batch_index, samples) in sample_batches.iter().enumerate() {
+        let decode_input = build_video_decode_input(
+            codec,
+            chunk_time_scale(manifest),
+            Some(&decoder_config),
+            samples,
+            payload,
+            batch_index + 1 == sample_batches.len(),
+        )?;
+        let decoded = codec_pipeline.decoder.decode(&decode_input)?;
+        decoded_frame_count += decoded.frames.len();
+        if decoded.frames.is_empty() {
+            continue;
+        }
+        let frame_buffers = decoded
+            .frames
+            .iter()
+            .map(|frame| {
+                scale_bgra(
+                    &frame.pixels,
+                    decode_format.width,
+                    decode_format.height,
+                    encode_format.width,
+                    encode_format.height,
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let raw_frames = decoded
+            .frames
+            .iter()
+            .zip(frame_buffers.iter())
+            .map(|(frame, pixels)| RawVideoFrameRef {
+                pts: frame.pts,
+                // The H.264 encoder disables frame reordering, so output decode
+                // order is presentation order even when the source carried B-frames.
+                dts: frame.pts,
+                duration: frame.duration,
+                bytes: pixels.as_ref(),
+                keyframe: frame.keyframe,
+            })
+            .collect::<Vec<_>>();
+        let encoded = codec_pipeline.encoder.encode(&raw_frames)?;
+        output_time_scale = Some(encoded.stream.time_scale);
+        if output_decoder_config.is_none() {
+            output_decoder_config = encoded.stream.decoder_config;
+        }
+        encoded_frames.extend(encoded.frames);
+    }
+
+    let decoder_config = output_decoder_config
         .ok_or_else(|| anyhow::anyhow!("H.264 encoder did not return decoder config"))?;
-    let fragment = fragment_track_from_encoded_video_frames(VIDEO_TRACK_ID, &encoded.frames)?;
-    let default_sample_duration = encoded
-        .frames
+    let fragment = fragment_track_from_encoded_video_frames(VIDEO_TRACK_ID, &encoded_frames)?;
+    let default_sample_duration = encoded_frames
         .first()
         .map(|frame| frame.duration.units.max(1).min(u64::from(u32::MAX)) as u32)
         .unwrap_or(1);
@@ -763,14 +992,29 @@ fn transcode_h264_video_segment(
             width: encode_format.width.min(u32::from(u16::MAX)) as u16,
             height: encode_format.height.min(u32::from(u16::MAX)) as u16,
         },
-        timescale: encoded.stream.time_scale.units_per_second,
+        timescale: output_time_scale
+            .ok_or_else(|| anyhow::anyhow!("H.264 encoder emitted no frames"))?
+            .units_per_second,
         default_sample_duration,
         codec: "h264".to_string(),
-        decoded_frame_count: decoded.frames.len(),
-        sample_count: encoded.frames.len(),
-        encoded_frame_count: encoded.frames.len(),
-        first_pts: encoded.frames.first().map(|frame| frame.pts),
+        decoded_frame_count,
+        sample_count: encoded_frames.len(),
+        encoded_frame_count: encoded_frames.len(),
+        first_pts: encoded_frames.first().map(|frame| frame.pts),
     })
+}
+
+fn video_formats(track: &MatroskaTrack) -> (RawVideoFormat, RawVideoFormat) {
+    let frame_duration_ns = track.default_duration_ns.unwrap_or(41_666_667);
+    let (frame_rate_num, frame_rate_den) = frame_rate_from_duration_ns(frame_duration_ns);
+    let decode_format = RawVideoFormat {
+        width: track.width.unwrap_or(1920),
+        height: track.height.unwrap_or(1080),
+        frame_rate_num,
+        frame_rate_den,
+        pixel_format: RawVideoPixelFormat::Bgra,
+    };
+    (decode_format, constrained_h264_format(decode_format))
 }
 
 fn frame_rate_from_duration_ns(duration_ns: u64) -> (u32, u32) {
@@ -945,5 +1189,32 @@ mod tests {
         let scaled = scale_bgra(&pixels, 2, 2, 1, 1).expect("scale");
 
         assert_eq!(scaled.as_ref(), [138, 138, 138, 138]);
+    }
+
+    #[test]
+    fn transcode_playlist_uses_planned_durations_and_sequence() {
+        let chunks = [
+            NativeChunk {
+                index: 4,
+                start: TimePoint::millis(10_000),
+                duration: TimeDelta::millis(4_125),
+                packet_range: PacketRange { start: 0, end: 1 },
+                key_aligned: true,
+            },
+            NativeChunk {
+                index: 5,
+                start: TimePoint::millis(14_125),
+                duration: TimeDelta::millis(3_875),
+                packet_range: PacketRange { start: 1, end: 2 },
+                key_aligned: true,
+            },
+        ];
+
+        let playlist = render_transcode_media_playlist(&chunks, "init.mp4", 4, true);
+
+        assert!(playlist.contains("#EXT-X-TARGETDURATION:5"));
+        assert!(playlist.contains("#EXT-X-MEDIA-SEQUENCE:4"));
+        assert!(playlist.contains("#EXTINF:4.125,\nseg-00004.m4s"));
+        assert!(playlist.ends_with("#EXT-X-ENDLIST\n"));
     }
 }

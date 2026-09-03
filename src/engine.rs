@@ -19,6 +19,7 @@ use crate::{
         packet_samples_for_range, plan_track_chunks,
     },
     source::MediaSource,
+    transcode::{NativeFmp4TranscodeOptions, NativeFmp4TranscodeSession},
 };
 
 /// Stateful Chroma Engine entrypoint.
@@ -44,6 +45,18 @@ impl Engine {
         options: PlaybackSessionOptions,
     ) -> Result<PlaybackSession, EngineSessionError> {
         PlaybackSession::open(input, options)
+    }
+
+    /// Opens the retained Matroska-to-fMP4 execution path used by HLS hosts.
+    ///
+    /// The returned session keeps packet indexes and supported native codec
+    /// sessions alive across sequential segment requests.
+    pub fn open_native_fmp4_transcode_session(
+        self,
+        input: &Path,
+        options: NativeFmp4TranscodeOptions,
+    ) -> anyhow::Result<NativeFmp4TranscodeSession> {
+        NativeFmp4TranscodeSession::open(input, options)
     }
 }
 

@@ -18,7 +18,8 @@ Chroma Engine is not a command-compatible FFmpeg replacement. It is a media engi
 - **Compatibility is outside the core.** If a deployment later needs a legacy transport, that layer must adapt from the native session model. It should not dictate the engine core or public CLI.
 - **The crate root is the supported API.** Parser, muxer, codec, and source modules are implementation details. Server/client integrations should import re-exported root symbols so internals can be split or replaced without changing host code.
 - **Performance work must be measurable.** Hot paths should get a benchmark before or with major rewrites. The current baseline lives in the `engine_hot_paths` Criterion bench and covers probe, planning, packet windows, and subtitle segmentation.
-- **Transcode work is session-first.** `NativeFmp4TranscodeSession` retains its source snapshot, selected tracks, packet indexes, and keyframe plan. Stateless CLI helpers are adapters over a one-operation session; servers should retain the session across requests.
+- **Transcode work is session-first.** `NativeFmp4TranscodeSession` retains its source snapshot, selected tracks, packet indexes, keyframe plan, and VideoToolbox decoder/encoder objects. Sequential requests reuse codec state; discontinuous segment requests reset the codec pair. Stateless CLI helpers are adapters over a one-operation session; servers should open sessions through `Engine` and retain them across requests.
+- **Raw-frame queues are bounded.** The VideoToolbox path decodes and encodes small packet batches inside each segment instead of retaining an entire keyframe span as BGRA. On the 720p HEVC/AAC smoke fixture this reduced observed maximum resident size from roughly 1.09 GB to 238 MB.
 - **Real media smoke tests are separate from fixtures.** Scripts may inspect mounted local media, but committed tests use generated or sanitized fixtures so the repo stays small and deterministic.
 
 Near-term implementation order:
@@ -41,6 +42,8 @@ cargo test --all-features
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
 cargo bench --bench engine_hot_paths
 scripts/smoke-real-media.sh
+scripts/smoke-native-transcode-session.sh
+scripts/benchmark-native-transcode.sh
 ```
 
 Release binaries use the repository release profile: thin LTO, one codegen unit, stripped symbols, and abort-on-panic. Profiling builds inherit release settings but keep debug symbols.
@@ -48,3 +51,7 @@ Release binaries use the repository release profile: thin LTO, one codegen unit,
 ## Web Player Test Milestone
 
 Every build-out pass should check whether Chroma Engine has reached the point where GenusServer can be updated for a real web-player test. Do not move this milestone forward just to force an early integration. It is ready only when Chroma Engine can produce a browser-playable or WebCodecs-ready native stream for at least one real MP4 from `/Volumes/Movies` or `/Volumes/TVShows` without FFmpeg, including manifest shape, codec configuration, chunk URLs, timing, and clear errors.
+
+The retained transcode path has also crossed this milestone for Matroska: a real 720p HEVC/AAC
+source was decoded and re-encoded to an H.264/AAC fMP4 HLS window, then played through hls.js in
+Chromium at 1280x720 beyond 4.3 seconds with no media error.

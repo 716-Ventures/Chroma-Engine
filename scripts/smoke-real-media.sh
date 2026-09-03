@@ -4,9 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENGINE="${ROOT}/target/release/chroma-engine"
 
-if [[ ! -x "${ENGINE}" ]]; then
-  cargo build --manifest-path "${ROOT}/Cargo.toml" --release
-fi
+cargo build --manifest-path "${ROOT}/Cargo.toml" --release >/dev/null
 
 find_first_native_hls_media() {
   for dir in "/Volumes/Movies" "/Volumes/TV Shows" "/Volumes/TVShows"; do

@@ -4,9 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENGINE="${ROOT}/target/release/chroma-engine"
 
-if [[ ! -x "${ENGINE}" ]]; then
-  cargo build --manifest-path "${ROOT}/Cargo.toml" --release
-fi
+cargo build --manifest-path "${ROOT}/Cargo.toml" --release >/dev/null
 
 has_h264_aac() {
   local file="$1"

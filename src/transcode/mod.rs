@@ -18,7 +18,8 @@ pub use audio_decode::{
     DtsAudioBridgeProbe, DtsAudioPacketProbe, build_audio_decode_input, probe_dts_audio_bridge,
 };
 pub use audio_encode::{
-    AudioEncodeError, EncodedAudioOutput, PcmAudioFormat, encode_aac_from_interleaved_i16,
+    AudioEncodeError, AudioToolboxAacEncoderSession, EncodedAudioOutput, PcmAudioFormat,
+    encode_aac_from_interleaved_i16,
 };
 pub use execution_plan::{
     HlsTranscodeRequest, TranscodeExecutionPlan, TranscodeOutputAudio, TranscodeOutputPlan,
@@ -26,21 +27,22 @@ pub use execution_plan::{
     plan_hls_transcode,
 };
 pub use segment::{
-    NativeFmp4TranscodeInitOutput, NativeFmp4TranscodeOptions, NativeFmp4TranscodeSegmentOutput,
-    NativeFmp4TranscodeSession, NativeFmp4TranscodeSessionStats, NativeFmp4TranscodeStartOutput,
-    NativeFmp4VideoMode, write_native_fmp4_transcode_init, write_native_fmp4_transcode_segment,
-    write_native_fmp4_transcode_start,
+    NativeFmp4TranscodeInitOutput, NativeFmp4TranscodeOptions, NativeFmp4TranscodePlan,
+    NativeFmp4TranscodeSegmentOutput, NativeFmp4TranscodeSession, NativeFmp4TranscodeSessionStats,
+    NativeFmp4TranscodeStartOutput, NativeFmp4VideoMode, write_native_fmp4_transcode_init,
+    write_native_fmp4_transcode_segment, write_native_fmp4_transcode_start,
 };
 pub use video_decode::{
     CompressedVideoPacket, DecodedVideoFrame, DecodedVideoOutput, DecodedVideoStream,
     VideoDecodeError, VideoDecodeInput, VideoDecodeSessionInfo, VideoDecoderAction,
-    VideoDecoderDrainState, build_video_decode_input, decode_videotoolbox_bgra_frames,
-    decoder_actions_for_input, probe_videotoolbox_h264_decoder_session,
-    probe_videotoolbox_hevc_decoder_session, validate_decoded_video_format,
+    VideoDecoderDrainState, VideoToolboxBgraDecoderSession, build_video_decode_input,
+    decode_videotoolbox_bgra_frames, decoder_actions_for_input,
+    probe_videotoolbox_h264_decoder_session, probe_videotoolbox_hevc_decoder_session,
+    validate_decoded_video_format,
 };
 pub use video_encode::{
     EncodedVideoFrame, EncodedVideoOutput, EncodedVideoStream, RawVideoFormat, RawVideoFrameRef,
-    RawVideoPixelFormat, VideoEncodeError, VideoEncodeSessionInfo,
+    RawVideoPixelFormat, VideoEncodeError, VideoEncodeSessionInfo, VideoToolboxH264EncoderSession,
     encode_h264_videotoolbox_bgra_frame, encode_h264_videotoolbox_bgra_frames,
     encode_hevc_videotoolbox_bgra_frame, probe_videotoolbox_h264_session,
     probe_videotoolbox_hevc_session,

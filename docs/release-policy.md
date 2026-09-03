@@ -48,6 +48,10 @@ source-compatible patch that gives its opaque Objective-C class declaration a va
 uses explicit C ABIs. `cargo check --future-incompat-report` must remain at zero until the Apple
 backend is migrated to the maintained `objc2` framework crates.
 
+The all-at-once ownership-boundary migration plan is documented in
+[`apple-objc2-migration.md`](apple-objc2-migration.md). Do not mix old and new Core Foundation
+wrapper families inside a single asynchronous codec callback.
+
 ## Client Migration Notes
 
 GenusServer, tvOS, and web-player changes should be listed per release when they depend on a new engine schema, capability state, track-selection behavior, or error code. The engine should keep adapter code outside core parser/muxer modules so client migration does not freeze the Rust API shape.

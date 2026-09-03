@@ -25,6 +25,51 @@ pub struct EncodedAudioOutput {
     pub frames: Vec<EncodedAudioFrame>,
 }
 
+/// Retained AudioToolbox AAC encoder with a continuous sample clock.
+pub struct AudioToolboxAacEncoderSession {
+    format: PcmAudioFormat,
+    bitrate: u32,
+    encoded_batches: u64,
+    clock: AudioSampleClock,
+    #[cfg(target_os = "macos")]
+    destination: audiotoolbox::AudioStreamBasicDescription,
+    #[cfg(target_os = "macos")]
+    converter: audiotoolbox::AudioConverter,
+}
+
+impl std::fmt::Debug for AudioToolboxAacEncoderSession {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AudioToolboxAacEncoderSession")
+            .field("format", &self.format)
+            .field("bitrate", &self.bitrate)
+            .field("encoded_batches", &self.encoded_batches)
+            .field("next_sample", &self.clock.next_sample())
+            .finish_non_exhaustive()
+    }
+}
+
+impl AudioToolboxAacEncoderSession {
+    /// Creates one AAC encoder that can serve multiple PCM batches.
+    pub fn new(format: PcmAudioFormat, bitrate: u32) -> Result<Self, AudioEncodeError> {
+        validate_pcm_config(format, bitrate)?;
+        platform_new_aac_encoder_session(format, bitrate)
+    }
+
+    /// Encodes one PCM batch while retaining converter and clock state.
+    pub fn encode(&mut self, pcm: &[i16]) -> Result<EncodedAudioOutput, AudioEncodeError> {
+        validate_pcm(self.format, pcm, self.bitrate)?;
+        let output = platform_encode_aac_with_retained_session(self, pcm)?;
+        self.encoded_batches = self.encoded_batches.saturating_add(1);
+        Ok(output)
+    }
+
+    /// Returns the number of batches encoded by this native session.
+    pub fn encoded_batches(&self) -> u64 {
+        self.encoded_batches
+    }
+}
+
 #[derive(Debug, Error)]
 /// Error returned by native audio encode backends.
 pub enum AudioEncodeError {
@@ -60,21 +105,11 @@ pub fn encode_aac_from_interleaved_i16(
     pcm: &[i16],
     bitrate: u32,
 ) -> Result<EncodedAudioOutput, AudioEncodeError> {
-    validate_pcm(format, pcm, bitrate)?;
-    platform_encode_aac_from_interleaved_i16(format, pcm, bitrate)
+    AudioToolboxAacEncoderSession::new(format, bitrate)?.encode(pcm)
 }
 
 fn validate_pcm(format: PcmAudioFormat, pcm: &[i16], bitrate: u32) -> Result<(), AudioEncodeError> {
-    if format.sample_rate == 0 {
-        return Err(AudioEncodeError::InvalidInput {
-            reason: "sample_rate must be greater than zero".to_string(),
-        });
-    }
-    if format.channels == 0 {
-        return Err(AudioEncodeError::InvalidInput {
-            reason: "channels must be greater than zero".to_string(),
-        });
-    }
+    validate_pcm_config(format, bitrate)?;
     if pcm.is_empty() {
         return Err(AudioEncodeError::InvalidInput {
             reason: "PCM buffer is empty".to_string(),
@@ -83,6 +118,20 @@ fn validate_pcm(format: PcmAudioFormat, pcm: &[i16], bitrate: u32) -> Result<(),
     if !pcm.len().is_multiple_of(format.channels as usize) {
         return Err(AudioEncodeError::InvalidInput {
             reason: "PCM sample count must align to the interleaved channel count".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_pcm_config(format: PcmAudioFormat, bitrate: u32) -> Result<(), AudioEncodeError> {
+    if format.sample_rate == 0 {
+        return Err(AudioEncodeError::InvalidInput {
+            reason: "sample_rate must be greater than zero".to_string(),
+        });
+    }
+    if format.channels == 0 {
+        return Err(AudioEncodeError::InvalidInput {
+            reason: "channels must be greater than zero".to_string(),
         });
     }
     if bitrate == 0 {
@@ -144,14 +193,12 @@ fn frame_from_payload(
 }
 
 #[cfg(target_os = "macos")]
-fn platform_encode_aac_from_interleaved_i16(
+fn platform_new_aac_encoder_session(
     format: PcmAudioFormat,
-    pcm: &[i16],
     bitrate: u32,
-) -> Result<EncodedAudioOutput, AudioEncodeError> {
+) -> Result<AudioToolboxAacEncoderSession, AudioEncodeError> {
     use audiotoolbox::{
-        AUDIO_FORMAT_MPEG4_AAC, AudioConversionInput, AudioConverter, AudioFormat,
-        AudioStreamBasicDescription,
+        AUDIO_FORMAT_MPEG4_AAC, AudioConverter, AudioFormat, AudioStreamBasicDescription,
     };
 
     let source = AudioStreamBasicDescription::linear_pcm_i16(
@@ -183,6 +230,36 @@ fn platform_encode_aac_from_interleaved_i16(
         .map_err(|error| AudioEncodeError::BackendFailed {
             reason: error.to_string(),
         })?;
+    Ok(AudioToolboxAacEncoderSession {
+        format,
+        bitrate,
+        encoded_batches: 0,
+        clock: AudioSampleClock::new(AudioClockConfig {
+            sample_rate: format.sample_rate,
+            discontinuity_threshold_ms: 100,
+        }),
+        destination,
+        converter,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn platform_encode_aac_with_retained_session(
+    retained: &mut AudioToolboxAacEncoderSession,
+    pcm: &[i16],
+) -> Result<EncodedAudioOutput, AudioEncodeError> {
+    use audiotoolbox::{AudioConversionInput, AudioConverter};
+
+    let format = retained.format;
+    let destination = retained.destination;
+    let converter: &AudioConverter = &retained.converter;
+    if retained.encoded_batches > 0 {
+        converter
+            .reset()
+            .map_err(|error| AudioEncodeError::BackendFailed {
+                reason: error.to_string(),
+            })?;
+    }
 
     let pcm_bytes = i16_slice_as_ne_bytes(pcm);
     let input_frames = u32::try_from(pcm.len() / format.channels as usize).map_err(|_| {
@@ -217,7 +294,7 @@ fn platform_encode_aac_from_interleaved_i16(
         &encoded.packet_descriptions,
         encoded.packet_count,
         destination.mFramesPerPacket.max(1),
-        format,
+        &mut retained.clock,
     )?;
 
     Ok(EncodedAudioOutput { stream, frames })
@@ -238,15 +315,15 @@ fn split_aac_packets(
     packet_descriptions: &[audiotoolbox::AudioStreamPacketDescription],
     packet_count: u32,
     packet_samples: u32,
-    format: PcmAudioFormat,
+    clock: &mut AudioSampleClock,
 ) -> Result<Vec<EncodedAudioFrame>, AudioEncodeError> {
     split_audio_packets(
         data,
         packet_descriptions,
         packet_count,
         packet_samples,
-        format,
         "AAC",
+        clock,
     )
 }
 
@@ -256,18 +333,14 @@ fn split_audio_packets(
     packet_descriptions: &[audiotoolbox::AudioStreamPacketDescription],
     packet_count: u32,
     packet_samples: u32,
-    format: PcmAudioFormat,
     label: &str,
+    clock: &mut AudioSampleClock,
 ) -> Result<Vec<EncodedAudioFrame>, AudioEncodeError> {
-    let mut clock = AudioSampleClock::new(AudioClockConfig {
-        sample_rate: format.sample_rate,
-        discontinuity_threshold_ms: 100,
-    });
     if packet_descriptions.is_empty() {
         if data.is_empty() || packet_count == 0 {
             return Ok(Vec::new());
         }
-        return Ok(vec![frame_from_payload(&mut clock, data, packet_samples)]);
+        return Ok(vec![frame_from_payload(clock, data, packet_samples)]);
     }
 
     let mut frames = Vec::with_capacity(packet_descriptions.len());
@@ -293,16 +366,25 @@ fn split_audio_packets(
         } else {
             desc.mVariableFramesInPacket
         };
-        frames.push(frame_from_payload(&mut clock, payload, samples));
+        frames.push(frame_from_payload(clock, payload, samples));
     }
     Ok(frames)
 }
 
 #[cfg(not(target_os = "macos"))]
-fn platform_encode_aac_from_interleaved_i16(
+fn platform_new_aac_encoder_session(
     _format: PcmAudioFormat,
-    _pcm: &[i16],
     _bitrate: u32,
+) -> Result<AudioToolboxAacEncoderSession, AudioEncodeError> {
+    Err(AudioEncodeError::BackendUnavailable {
+        reason: "AudioToolbox AAC encode is only available on macOS".to_string(),
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn platform_encode_aac_with_retained_session(
+    _retained: &mut AudioToolboxAacEncoderSession,
+    _pcm: &[i16],
 ) -> Result<EncodedAudioOutput, AudioEncodeError> {
     Err(AudioEncodeError::BackendUnavailable {
         reason: "AudioToolbox AAC encode is only available on macOS".to_string(),
@@ -365,6 +447,46 @@ mod tests {
                 pair[1].timing.start_sample
             );
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_aac_session_reuses_converter_and_clock() {
+        let format = PcmAudioFormat {
+            sample_rate: 48_000,
+            channels: 2,
+        };
+        let pcm = silent_pcm(format, 4096);
+        let mut session = AudioToolboxAacEncoderSession::new(format, 128_000)
+            .expect("create retained AAC session");
+
+        let first = session.encode(&pcm).expect("encode first AAC batch");
+        let second = session.encode(&pcm).expect("encode second AAC batch");
+
+        assert_eq!(session.encoded_batches(), 2);
+        let first_end = first
+            .frames
+            .last()
+            .expect("first frame")
+            .timing
+            .start_sample
+            + u64::from(
+                first
+                    .frames
+                    .last()
+                    .expect("first frame")
+                    .timing
+                    .sample_count,
+            );
+        assert_eq!(
+            second
+                .frames
+                .first()
+                .expect("second frame")
+                .timing
+                .start_sample,
+            first_end
+        );
     }
 
     fn silent_pcm(format: PcmAudioFormat, frames: usize) -> Vec<i16> {

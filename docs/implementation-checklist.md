@@ -6,7 +6,7 @@
 - [x] Move CLI implementation behind the library entrypoint so the binary is only a launcher.
 - [x] Narrow public API to an explicit crate-root facade; keep parser/muxer implementation modules crate-private.
 - [x] Define native `MediaProbe` JSON with typed tracks, source facts, and capability hints.
-- [x] Define command surface: `probe`, `plan`, `manifest`, `chunks`, `codec-config`, `h264-nalus`, `h264-annex-b`, `hevc-annex-b`, `aac-adts`, `extract-chunk`, `extract-window`, `hls`, `hls-plan`, `hls-segment`, `hls-segments`, `remux-mp4`, `encoder-probe`, `warmup`.
+- [x] Define command surface: `probe`, `plan`, `manifest`, `chunks`, `codec-config`, `h264-nalus`, `h264-annex-b`, `hevc-annex-b`, `aac-adts`, `extract-chunk`, `extract-window`, `hls`, `hls-plan`, `hls-segment`, `hls-segments`, `transcode-fmp4-segments`, `remux-mp4`, `encoder-probe`, `warmup`.
 - [x] Define native playback `plan` command with target-specific pipeline stages.
 - [x] Add real-library smoke script for mounted media under `/Volumes/Movies`, `/Volumes/TV Shows`, or `/Volumes/TVShows`.
 - [x] Add sanitized real-library probe fixtures from `/Volumes/Movies` and `/Volumes/TVShows`.
@@ -131,13 +131,16 @@
 - [x] Native video decoder backend matrix. `decoder-probe` now reports H.264/HEVC decode backends and BGRA output format separately from encoder capabilities, with macOS VideoToolbox availability backed by native hardware decode support checks.
 - [x] Native VideoToolbox decoder session probes. H.264 and HEVC probes parse avcC/hvcC decoder config into parameter sets, create CoreMedia format descriptions, and open real VTDecompressionSession instances before the engine trusts a source for native decode.
 - [x] Stateful native fMP4 transcode session. Source snapshot, track selection, packet indexes, and keyframe chunk plan are retained across segment requests; lifecycle stats expose source opens, index parses, requests, and validations.
+- [x] Retained native codec sessions. Sequential fMP4 requests reuse one VideoToolbox decoder and H.264 encoder; random seeks reset both, and session stats expose creations, reuse, and resets.
+- [x] Bounded decode/encode pump. Long keyframe spans are processed in small packet batches rather than accumulating every decoded BGRA frame before encoding.
 - [x] Cross-platform hardware decode contract. Decoder probes now model macOS VideoToolbox, Linux VAAPI/NVDEC/QSV, and Windows D3D11VA/D3D12VA/DXVA2/QSV/AMF/NVDEC paths with explicit `designed`, `detected`, `available`, and `verified` capability states instead of marking modeled placeholders as executable.
 - [x] macOS VideoToolbox BGRA decode primitive. Chroma Engine can now accept H.264/HEVC compressed packet batches plus avcC/hvcC config and return owned decoded BGRA frames through a Rust-first API.
-- [ ] Native compressed video decode backend for HEVC/H.264 sources that need target-native HLS output. Preserve the FFmpeg send/receive/drain lesson as a bounded state machine, but expose only Chroma Engine stage events and frames.
+- [x] Native compressed video decode backend for HEVC/H.264 Matroska sources that need target-native fMP4 HLS output. VideoToolbox feeds a bounded BGRA-to-H.264 pump owned by the retained transcode session.
 - [ ] Native DTS/TrueHD decode bridge for MKV audio tracks that have no AAC/AC-3/E-AC-3 alternate. Follow the FFmpeg send/receive/drain state-machine shape and AetherEngine's copy-first/bridge-only policy, but keep the API Chroma-native.
 
 ## Integration
 
+- [x] Transcode a real 720p HEVC/AAC Matroska source to H.264/AAC fMP4 with retained native codec sessions and play the generated two-segment HLS window in Chromium with hls.js. Verified 1280x720 decode, ready state 4, playback beyond 4.3 seconds, and no media error using `scripts/smoke-native-transcode-session.sh` output.
 - [x] **Milestone: ready to update GenusServer and test in the web player.** Verified with `/Volumes/TVShows/Big Fat Quiz/Season 2026/Big.Fat.Quiz.S2026E01.The.Big.Fat.Quiz.of.Telly.1080p.ALL4.WEB-DL.AAC2.0.H.264-RAWR.mp4`: Chroma Engine emits an fMP4 HLS playlist with `#EXT-X-MAP`, `init.mp4`, and `.m4s` media fragments without FFmpeg. Test artifact: `/tmp/chroma-engine-milestone-aac-20260720-111252`. `/Volumes/Movies/42.mp4` is now correctly rejected for native browser HLS because its `mp4a` object type is DTS (`mp4a.a9`), not AAC.
 - [x] Define minimum web-player test contract: Chroma-native manifest, selected tracks, codec config, chunk URLs, timestamp model, and error shape. See `docs/web-player-test-contract.md`.
 - [x] Emit browser-playable or WebCodecs-ready H.264/AAC output for one real MP4. Covered by `scripts/smoke-web-player-output.sh`.

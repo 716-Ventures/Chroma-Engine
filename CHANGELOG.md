@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Added retained VideoToolbox H.264/HEVC decoder and H.264 encoder sessions plus retained
+  AudioToolbox AAC converter sessions, with explicit batch counters and discontinuity resets.
+- Added `transcode-fmp4-segments` and `Engine::open_native_fmp4_transcode_session` for host-driven,
+  contiguous native HLS transcode windows, including an atomically published media playlist.
+- Bounded the BGRA decode/encode pump to 16 packets per batch. The 720p HEVC/AAC real-media
+  benchmark reduced maximum resident size from about 1.09 GB to 238 MB while preserving output.
+- Normalized target H.264 DTS to presentation order when frame reordering is disabled, fixing
+  B-frame sources that previously failed the encoder's monotonic-DTS validation.
 - Replaced file-sized heap snapshots with file-backed media views. macOS uses an APFS-compatible
   private copy-on-write clone when available; other filesystems retain a read handle and validate
   source identity around operations without an eager disk copy.

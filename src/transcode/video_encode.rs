@@ -46,6 +46,62 @@ pub struct VideoEncodeSessionInfo {
     pub prepared: bool,
 }
 
+/// Retained VideoToolbox H.264 encoder for a sequence of frame batches.
+pub struct VideoToolboxH264EncoderSession {
+    format: RawVideoFormat,
+    bitrate: u32,
+    encoded_batches: u64,
+    #[cfg(target_os = "macos")]
+    session: video_toolbox::compression_session::VTCompressionSession,
+}
+
+impl std::fmt::Debug for VideoToolboxH264EncoderSession {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("VideoToolboxH264EncoderSession")
+            .field("format", &self.format)
+            .field("bitrate", &self.bitrate)
+            .field("encoded_batches", &self.encoded_batches)
+            .finish_non_exhaustive()
+    }
+}
+
+impl VideoToolboxH264EncoderSession {
+    /// Creates and prepares one H.264 encoder that can serve multiple batches.
+    pub fn new(format: RawVideoFormat, bitrate: u32) -> Result<Self, VideoEncodeError> {
+        validate_raw_video_format(format)?;
+        if bitrate == 0 {
+            return Err(VideoEncodeError::InvalidInput {
+                reason: "bitrate must be greater than zero".to_string(),
+            });
+        }
+        platform_new_h264_encoder_session(format, bitrate)
+    }
+
+    /// Encodes one ordered frame batch without recreating the native session.
+    pub fn encode(
+        &mut self,
+        frames: &[RawVideoFrameRef<'_>],
+    ) -> Result<EncodedVideoOutput, VideoEncodeError> {
+        validate_raw_video_frames(self.format, frames)?;
+        let output = platform_encode_h264_with_retained_session(self, frames)?;
+        self.encoded_batches = self.encoded_batches.saturating_add(1);
+        Ok(output)
+    }
+
+    /// Returns the number of batches encoded by this native session.
+    pub fn encoded_batches(&self) -> u64 {
+        self.encoded_batches
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for VideoToolboxH264EncoderSession {
+    fn drop(&mut self) {
+        self.session.invalidate();
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 /// Encoded video stream description plus emitted access units.
@@ -164,14 +220,7 @@ pub fn encode_h264_videotoolbox_bgra_frames(
     frames: &[RawVideoFrameRef<'_>],
     bitrate: u32,
 ) -> Result<EncodedVideoOutput, VideoEncodeError> {
-    validate_raw_video_format(format)?;
-    validate_raw_video_frames(format, frames)?;
-    if bitrate == 0 {
-        return Err(VideoEncodeError::InvalidInput {
-            reason: "bitrate must be greater than zero".to_string(),
-        });
-    }
-    platform_encode_h264_videotoolbox_bgra_frames(format, frames, bitrate)
+    VideoToolboxH264EncoderSession::new(format, bitrate)?.encode(frames)
 }
 
 /// Encodes one BGRA frame to HEVC using the native VideoToolbox backend.
@@ -503,14 +552,11 @@ fn platform_encode_h264_videotoolbox_bgra_frame(
 }
 
 #[cfg(target_os = "macos")]
-fn platform_encode_h264_videotoolbox_bgra_frames(
+fn platform_new_h264_encoder_session(
     format: RawVideoFormat,
-    input_frames: &[RawVideoFrameRef<'_>],
     bitrate: u32,
-) -> Result<EncodedVideoOutput, VideoEncodeError> {
-    use std::sync::{Arc, Mutex};
-
-    use core_media::{format_description::kCMVideoCodecType_H264, time::CMTime};
+) -> Result<VideoToolboxH264EncoderSession, VideoEncodeError> {
+    use core_media::format_description::kCMVideoCodecType_H264;
     use video_toolbox::{
         compression_properties::CompressionPropertyKey, compression_session::VTCompressionSession,
         session::TVTSession,
@@ -552,11 +598,30 @@ fn platform_encode_h264_videotoolbox_bgra_frames(
                 "VTCompressionSessionPrepareToEncodeFrames(H.264 batch) returned {status}"
             ),
         })?;
+    Ok(VideoToolboxH264EncoderSession {
+        format,
+        bitrate,
+        encoded_batches: 0,
+        session,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn platform_encode_h264_with_retained_session(
+    retained: &VideoToolboxH264EncoderSession,
+    input_frames: &[RawVideoFrameRef<'_>],
+) -> Result<EncodedVideoOutput, VideoEncodeError> {
+    use std::sync::{Arc, Mutex};
+
+    use core_media::time::CMTime;
+
+    let format = retained.format;
+    let session = &retained.session;
 
     let frames = Arc::new(Mutex::new(Vec::<EncodedVideoFrame>::new()));
     let decoder_config = Arc::new(Mutex::new(None::<Vec<u8>>));
     let callback_error = Arc::new(Mutex::new(None::<VideoEncodeError>));
-    for (index, input) in input_frames.iter().enumerate() {
+    for input in input_frames {
         let pixel_buffer = bgra_pixel_buffer(format, input.bytes)?;
         let image_buffer = image_buffer_from_pixel_buffer(&pixel_buffer);
         let frames_out = Arc::clone(&frames);
@@ -565,7 +630,7 @@ fn platform_encode_h264_videotoolbox_bgra_frames(
         let pts = input.pts;
         let dts = input.dts;
         let duration = input.duration;
-        let keyframe = index == 0 || input.keyframe;
+        let keyframe = input.keyframe;
         let frame_properties = keyframe.then(force_keyframe_dictionary);
 
         session
@@ -649,7 +714,6 @@ fn platform_encode_h264_videotoolbox_bgra_frames(
         .map_err(|status| VideoEncodeError::BackendFailed {
             reason: format!("VTCompressionSessionCompleteFrames(H.264 batch) returned {status}"),
         })?;
-    session.invalidate();
     if let Some(error) = take_encode_callback_error(&callback_error)? {
         return Err(error);
     }
@@ -682,6 +746,26 @@ fn platform_encode_h264_videotoolbox_bgra_frames(
             decoder_config,
         },
         frames,
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn platform_new_h264_encoder_session(
+    _format: RawVideoFormat,
+    _bitrate: u32,
+) -> Result<VideoToolboxH264EncoderSession, VideoEncodeError> {
+    Err(VideoEncodeError::BackendUnavailable {
+        reason: "VideoToolbox H.264 encode is only available on macOS".to_string(),
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn platform_encode_h264_with_retained_session(
+    _retained: &VideoToolboxH264EncoderSession,
+    _input_frames: &[RawVideoFrameRef<'_>],
+) -> Result<EncodedVideoOutput, VideoEncodeError> {
+    Err(VideoEncodeError::BackendUnavailable {
+        reason: "VideoToolbox H.264 encode is only available on macOS".to_string(),
     })
 }
 
@@ -1270,6 +1354,38 @@ mod tests {
                     config.first() == Some(&1) && config.windows(2).any(|w| w == [0xe1, 0x00])
                 })
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_h264_session_encodes_multiple_batches() {
+        let format = smoke_format();
+        let bgra = vec![0; format.width as usize * format.height as usize * 4];
+        let scale = TimeScale {
+            units_per_second: 24,
+        };
+        let mut session = VideoToolboxH264EncoderSession::new(format, 500_000)
+            .expect("create retained H.264 session");
+
+        for index in 0..2 {
+            let frames = [RawVideoFrameRef {
+                pts: TimePoint {
+                    units: index,
+                    scale,
+                },
+                dts: TimePoint {
+                    units: index,
+                    scale,
+                },
+                duration: TimeDelta { units: 1, scale },
+                bytes: &bgra,
+                keyframe: true,
+            }];
+            let encoded = session.encode(&frames).expect("encode retained batch");
+            assert!(!encoded.frames.is_empty());
+        }
+
+        assert_eq!(session.encoded_batches(), 2);
     }
 
     #[cfg(target_os = "macos")]

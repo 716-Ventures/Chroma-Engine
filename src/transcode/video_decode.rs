@@ -98,6 +98,63 @@ pub struct VideoDecodeSessionInfo {
     pub session_created: bool,
 }
 
+/// Retained VideoToolbox decoder for ordered H.264 or HEVC packet batches.
+pub struct VideoToolboxBgraDecoderSession {
+    codec: VideoCodec,
+    output_format: RawVideoFormat,
+    decoded_batches: u64,
+    #[cfg(target_os = "macos")]
+    video_description: core_media::format_description::CMVideoFormatDescription,
+    #[cfg(target_os = "macos")]
+    session: video_toolbox::decompression_session::VTDecompressionSession,
+}
+
+impl std::fmt::Debug for VideoToolboxBgraDecoderSession {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("VideoToolboxBgraDecoderSession")
+            .field("codec", &self.codec)
+            .field("output_format", &self.output_format)
+            .field("decoded_batches", &self.decoded_batches)
+            .finish_non_exhaustive()
+    }
+}
+
+impl VideoToolboxBgraDecoderSession {
+    /// Creates one decoder that can serve multiple ordered packet batches.
+    pub fn new(
+        codec: VideoCodec,
+        output_format: RawVideoFormat,
+        decoder_config: &[u8],
+    ) -> Result<Self, VideoDecodeError> {
+        validate_decoded_video_format(output_format)?;
+        if decoder_config.is_empty() {
+            return Err(VideoDecodeError::MissingDecoderConfig);
+        }
+        platform_new_videotoolbox_bgra_decoder(codec, output_format, decoder_config)
+    }
+
+    /// Decodes one packet batch without recreating the native session.
+    pub fn decode(
+        &mut self,
+        input: &VideoDecodeInput<'_>,
+    ) -> Result<DecodedVideoOutput, VideoDecodeError> {
+        if input.codec != self.codec {
+            return Err(VideoDecodeError::InvalidInput {
+                reason: "packet codec does not match retained decoder session".to_string(),
+            });
+        }
+        let output = platform_decode_with_retained_session(self, input)?;
+        self.decoded_batches = self.decoded_batches.saturating_add(1);
+        Ok(output)
+    }
+
+    /// Returns the number of batches decoded by this native session.
+    pub fn decoded_batches(&self) -> u64 {
+        self.decoded_batches
+    }
+}
+
 /// Decoder pump action used by native video decoder implementations.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", tag = "kind")]
@@ -207,7 +264,7 @@ pub fn decode_videotoolbox_bgra_frames(
     if decoder_config.is_empty() {
         return Err(VideoDecodeError::MissingDecoderConfig);
     }
-    platform_decode_videotoolbox_bgra_frames(input, output_format)
+    VideoToolboxBgraDecoderSession::new(input.codec, output_format, decoder_config)?.decode(input)
 }
 
 /// Builds zero-copy compressed video packets from extracted chunk metadata.
@@ -346,32 +403,21 @@ fn platform_probe_videotoolbox_hevc_decoder_session(
 }
 
 #[cfg(target_os = "macos")]
-fn platform_decode_videotoolbox_bgra_frames(
-    input: &VideoDecodeInput<'_>,
+fn platform_new_videotoolbox_bgra_decoder(
+    codec: VideoCodec,
     output_format: RawVideoFormat,
-) -> Result<DecodedVideoOutput, VideoDecodeError> {
-    use std::{
-        collections::BTreeMap,
-        sync::{Arc, Mutex},
-    };
-
+    decoder_config: &[u8],
+) -> Result<VideoToolboxBgraDecoderSession, VideoDecodeError> {
     use core_foundation::{
         base::TCFType, dictionary::CFDictionary, number::CFNumber, string::CFString,
     };
-    use core_media::sample_buffer::{CMSampleBuffer, CMSampleTimingInfo};
     use core_video::pixel_buffer::{CVPixelBufferKeys, kCVPixelFormatType_32BGRA};
-    use video_toolbox::{
-        decompression_session::VTDecompressionSession, errors::VTDecodeFrameFlags,
-    };
+    use video_toolbox::decompression_session::VTDecompressionSession;
 
-    let decoder_config = input
-        .decoder_config
-        .ok_or(VideoDecodeError::MissingDecoderConfig)?;
-    let video_description = match input.codec {
+    let video_description = match codec {
         VideoCodec::H264 => videotoolbox_h264_format_description(decoder_config)?,
         VideoCodec::Hevc => videotoolbox_hevc_format_description(decoder_config)?,
     };
-    let format_description = cm_format_description_from_video(&video_description);
     let attrs = CFDictionary::from_CFType_pairs(&[
         (
             CFString::from(CVPixelBufferKeys::PixelFormatType),
@@ -386,12 +432,35 @@ fn platform_decode_videotoolbox_bgra_frames(
             CFNumber::from(output_format.height as i32).as_CFType(),
         ),
     ]);
-    let session =
-        VTDecompressionSession::new(video_description, None, Some(&attrs)).map_err(|status| {
-            VideoDecodeError::BackendFailed {
-                reason: format!("VTDecompressionSessionCreate returned {status}"),
-            }
+    let session = VTDecompressionSession::new(video_description.clone(), None, Some(&attrs))
+        .map_err(|status| VideoDecodeError::BackendFailed {
+            reason: format!("VTDecompressionSessionCreate returned {status}"),
         })?;
+    Ok(VideoToolboxBgraDecoderSession {
+        codec,
+        output_format,
+        decoded_batches: 0,
+        video_description,
+        session,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn platform_decode_with_retained_session(
+    retained: &VideoToolboxBgraDecoderSession,
+    input: &VideoDecodeInput<'_>,
+) -> Result<DecodedVideoOutput, VideoDecodeError> {
+    use std::{
+        collections::BTreeMap,
+        sync::{Arc, Mutex},
+    };
+
+    use core_media::sample_buffer::{CMSampleBuffer, CMSampleTimingInfo};
+    use video_toolbox::errors::VTDecodeFrameFlags;
+
+    let output_format = retained.output_format;
+    let format_description = cm_format_description_from_video(&retained.video_description);
+    let session = &retained.session;
 
     let timing_by_pts = Arc::new(
         input
@@ -856,9 +925,20 @@ fn platform_probe_videotoolbox_hevc_decoder_session(
 }
 
 #[cfg(not(target_os = "macos"))]
-fn platform_decode_videotoolbox_bgra_frames(
-    _input: &VideoDecodeInput<'_>,
+fn platform_new_videotoolbox_bgra_decoder(
+    _codec: VideoCodec,
     _output_format: RawVideoFormat,
+    _decoder_config: &[u8],
+) -> Result<VideoToolboxBgraDecoderSession, VideoDecodeError> {
+    Err(VideoDecodeError::BackendUnavailable {
+        reason: "VideoToolbox BGRA decode is only available on macOS".to_string(),
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn platform_decode_with_retained_session(
+    _retained: &VideoToolboxBgraDecoderSession,
+    _input: &VideoDecodeInput<'_>,
 ) -> Result<DecodedVideoOutput, VideoDecodeError> {
     Err(VideoDecodeError::BackendUnavailable {
         reason: "VideoToolbox BGRA decode is only available on macOS".to_string(),

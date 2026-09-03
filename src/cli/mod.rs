@@ -22,8 +22,8 @@ use crate::probe::probe_media_source;
 use crate::session::{AudioSelection, PlaybackConstraints, PlaybackTarget, plan_playback};
 use crate::source::MappedMediaFile;
 use crate::transcode::{
-    AudioDecodeCodec, HlsTranscodeRequest, NativeFmp4TranscodeOptions, NativeFmp4VideoMode,
-    RawVideoFormat, RawVideoPixelFormat, VideoCodec, build_audio_decode_input,
+    AudioDecodeCodec, HlsTranscodeRequest, NativeFmp4TranscodeOptions, NativeFmp4TranscodeSession,
+    NativeFmp4VideoMode, RawVideoFormat, RawVideoPixelFormat, VideoCodec, build_audio_decode_input,
     build_video_decode_input, decode_videotoolbox_bgra_frames, plan_hls_transcode,
     probe_dts_audio_bridge, write_native_fmp4_transcode_init, write_native_fmp4_transcode_segment,
     write_native_fmp4_transcode_start,
@@ -216,6 +216,29 @@ enum Command {
         output: PathBuf,
         #[arg(long)]
         index: u32,
+        #[arg(long)]
+        video_track: Option<String>,
+        #[arg(long)]
+        audio_track: Option<String>,
+        #[arg(long, default_value_t = 4_000)]
+        segment_ms: u64,
+        #[arg(long, default_value_t = 16_000_000)]
+        video_bitrate: u32,
+        #[arg(long, default_value_t = 640_000)]
+        audio_bitrate: u32,
+        #[arg(long, value_enum, default_value_t = NativeFmp4VideoModeArg::Copy)]
+        video_mode: NativeFmp4VideoModeArg,
+    },
+    /// Write a contiguous fMP4 segment window with retained native codecs.
+    TranscodeFmp4Segments {
+        input: PathBuf,
+        output_dir: PathBuf,
+        #[arg(long)]
+        init_output: Option<PathBuf>,
+        #[arg(long, default_value_t = 0)]
+        start_index: u32,
+        #[arg(long, default_value_t = 2)]
+        count: u32,
         #[arg(long)]
         video_track: Option<String>,
         #[arg(long)]
@@ -844,6 +867,74 @@ pub fn run() -> Result<()> {
                 },
             )?;
             println!("{}", serde_json::to_string_pretty(&written)?);
+        }
+        Command::TranscodeFmp4Segments {
+            input,
+            output_dir,
+            init_output,
+            start_index,
+            count,
+            video_track,
+            audio_track,
+            segment_ms,
+            video_bitrate,
+            audio_bitrate,
+            video_mode,
+        } => {
+            let session = NativeFmp4TranscodeSession::open(
+                &input,
+                NativeFmp4TranscodeOptions {
+                    video_track_id: video_track,
+                    audio_track_id: audio_track,
+                    segment_ms,
+                    video_bitrate,
+                    audio_bitrate,
+                    video_mode: video_mode.into(),
+                },
+            )?;
+            let mut init = None;
+            let mut segments = Vec::new();
+            let mut init_uri = None;
+            let remaining_start = if let Some(init_output) = init_output {
+                if count == 0 {
+                    bail!("--init-output requires --count greater than zero");
+                }
+                let first_output = output_dir.join(format!("seg-{start_index:05}.m4s"));
+                let started = session.write_start(&init_output, &first_output, start_index)?;
+                init_uri = init_output
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(str::to_string);
+                init = Some(started);
+                start_index
+                    .checked_add(1)
+                    .ok_or_else(|| anyhow::anyhow!("transcode segment start index overflowed"))?
+            } else {
+                start_index
+            };
+            let remaining_count = count.saturating_sub(u32::from(init.is_some()));
+            segments.extend(session.write_segments(
+                &output_dir,
+                remaining_start,
+                remaining_count,
+            )?);
+            let playlist = if let Some(init_uri) = init_uri {
+                let playlist = output_dir.join("index.m3u8");
+                session.write_media_playlist(&playlist, &init_uri, start_index, count)?;
+                Some(playlist)
+            } else {
+                None
+            };
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "init": init,
+                    "plan": session.plan(),
+                    "playlist": playlist,
+                    "segments": segments,
+                    "stats": session.stats(),
+                }))?
+            );
         }
         Command::Warmup => {
             crate::platform::warmup()?;

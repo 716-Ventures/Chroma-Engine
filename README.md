@@ -17,6 +17,7 @@ The target is a native media architecture, not an FFmpeg-compatible facade. Chro
 - `remux-mp4`: remux supported sources into an efficient ISO-BMFF output path.
 - `encoder-probe`: report platform encoder capabilities.
 - `decoder-probe`: report platform decoder backend capabilities and status states, including native hardware surface families for macOS plus designed Linux/Windows targets.
+- `transcode-fmp4-segments`: emit a contiguous Matroska-to-fMP4 window while retaining native decoder and encoder sessions.
 - `warmup`: initialize selected hardware/software backends before the first playback session.
 
 This crate is intentionally not a general FFmpeg clone. It implements the container, codec, muxing, scheduling, and encoding behavior Chroma actually needs, with room to expose new capabilities instead of inheriting old command-line constraints.
@@ -31,6 +32,11 @@ handle and validates source identity around work without eagerly copying the fil
 `HlsVodPlan`, `PlaybackSession`, or `NativeFmp4TranscodeSession` keeps that view and its
 parsed/indexed state alive across segment requests. Generated artifacts are published atomically
 and treated as immutable; a conflicting concurrent writer receives an error.
+
+On macOS, the native fMP4 transcode session retains VideoToolbox decoder/encoder objects across
+sequential segments and pumps decoded video in bounded packet batches. Random seeks recreate the
+codec pair to isolate timestamp state. The `Engine::open_native_fmp4_transcode_session` API is the
+preferred host integration point.
 
 Capability status terms are:
 
@@ -55,6 +61,8 @@ cargo run -- h264-annex-b /path/to/media.mp4 /tmp/chunk0.h264 --chunk-index 0
 cargo run -- aac-adts /path/to/media.mp4 /tmp/chunk0.aac --track a0 --chunk-index 0
 cargo run -- extract-chunk /path/to/media.mp4 /tmp/chunk0.bin --chunk-index 0
 cargo run -- decoder-probe
+cargo run --release -- transcode-fmp4-segments /path/to/media.mkv /tmp/chroma-window \
+  --init-output /tmp/chroma-window/init.mp4 --count 2 --video-mode h264
 ```
 
 Quality gates:
@@ -68,4 +76,6 @@ cargo bench --bench engine_hot_paths
 cargo machete
 cargo +nightly fuzz run containers -- -runs=1
 scripts/smoke-real-media.sh
+scripts/smoke-native-transcode-session.sh
+scripts/benchmark-native-transcode.sh
 ```
