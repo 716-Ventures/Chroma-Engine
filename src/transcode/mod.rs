@@ -41,8 +41,9 @@ pub use video_decode::{
     validate_decoded_video_format,
 };
 pub use video_encode::{
-    EncodedVideoFrame, EncodedVideoOutput, EncodedVideoStream, RawVideoFormat, RawVideoFrameRef,
-    RawVideoPixelFormat, VideoEncodeError, VideoEncodeSessionInfo, VideoToolboxH264EncoderSession,
+    CpuH264EncoderSession, EncodedVideoFrame, EncodedVideoOutput, EncodedVideoStream,
+    RawVideoFormat, RawVideoFrameRef, RawVideoPixelFormat, VideoEncodeError,
+    VideoEncodeSessionInfo, VideoToolboxH264EncoderSession, encode_h264_cpu_bgra_frames,
     encode_h264_videotoolbox_bgra_frame, encode_h264_videotoolbox_bgra_frames,
     encode_hevc_videotoolbox_bgra_frame, probe_videotoolbox_h264_session,
     probe_videotoolbox_hevc_session,

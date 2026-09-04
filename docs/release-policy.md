@@ -9,7 +9,7 @@ Chroma Engine uses the same status terms in documentation and runtime DTOs:
 - `available`: Chroma Engine can open or initialize the backend, but the codec/profile has not completed a warmup smoke probe.
 - `verified`: Chroma Engine completed a real warmup or smoke probe for the codec/profile on the current host.
 
-Planning may only select `available` or `verified` backends. Linux and Windows hardware paths are currently designed/modeled, not executable.
+Planning may only select `available` or `verified` backends. Linux and Windows hardware paths are currently designed/modeled, not executable. The OpenH264 CPU H.264 backend is executable on all supported operating systems and is reported separately from hardware capability.
 
 ## Schema Compatibility
 
@@ -41,7 +41,7 @@ A release candidate must pass:
 
 Release artifacts must be built from a clean commit and published with checksums. Platform artifacts should include dependency metadata or an SBOM once release packaging is added.
 
-The CI `release-build` job uses `cargo auditable build --locked --release --bin chroma-engine` on macOS, Linux, and Windows so release binaries carry dependency metadata before packaging is formalized.
+The CI `release-build` job uses `cargo auditable build --locked --release --bin chroma-engine` on macOS, Linux, and Windows so release binaries carry dependency metadata before packaging is formalized. Dedicated native ARM64 jobs compile, test the portable codec, and produce release binaries on Ubuntu and Windows; Linux ARM64 is the baseline for ARM-based NAS deployments.
 
 The Apple video boundary uses the maintained `objc2` framework crates and `block2`; the legacy
 `block 0.1.6` graph and its local compatibility patch are absent. Keep

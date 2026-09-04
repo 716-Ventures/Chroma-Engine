@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added a retained, source-built OpenH264 CPU encoder that emits AVCC samples and avcC decoder
+  configuration on macOS, Windows, Linux, and Linux-based NAS targets.
+- Added native Ubuntu ARM64 and Windows ARM64 CI checks, portable-codec tests, and release builds.
 - Added retained VideoToolbox H.264/HEVC decoder and H.264 encoder sessions plus retained
   AudioToolbox AAC converter sessions, with explicit batch counters and discontinuity resets.
 - Added `transcode-fmp4-segments` and `Engine::open_native_fmp4_transcode_session` for host-driven,
@@ -23,8 +26,8 @@
 - Split MPEG-TS muxing and video scaling into focused implementation modules.
 - Made the mounted-library smoke test select a native-HLS-compatible fixture instead of the first
   media file it encounters.
-- Patched the legacy `block` ABI declaration used by the current Apple media crates, eliminating
-  the Rust future-incompatibility warning while migration to `objc2` remains future work.
+- Migrated Apple video bindings from the legacy `block` graph to maintained `objc2` framework
+  crates, eliminating the Rust future-incompatibility warning.
 - Added stateful playback sessions with lifecycle metrics for source opens, index parses, source validations, segment requests, and served payload bytes.
 - Hardened parser limits, source identity validation, and atomic output publishing.
 - Removed the experimental oxideav DTS/AC-3/E-AC-3 bridge path from production routing.

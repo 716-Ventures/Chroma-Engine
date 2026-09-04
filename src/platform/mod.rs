@@ -5,8 +5,8 @@ use crate::{
     error::EngineErrorCode,
     transcode::{
         AudioCodec, PcmAudioFormat, RawVideoFormat, RawVideoPixelFormat, VideoCodec,
-        encode_aac_from_interleaved_i16, encode_h264_videotoolbox_bgra_frame,
-        encode_hevc_videotoolbox_bgra_frame,
+        encode_aac_from_interleaved_i16, encode_h264_cpu_bgra_frames,
+        encode_h264_videotoolbox_bgra_frame, encode_hevc_videotoolbox_bgra_frame,
     },
 };
 
@@ -263,16 +263,11 @@ impl EncoderWarmupError {
 pub fn encoder_probe() -> EncoderProbe {
     let considered_encoders = native_candidate_names();
     let mut profiles = native_encoder_profiles();
-    let has_native_profile = !profiles.is_empty();
     let profile = profiles
         .first()
         .cloned()
         .unwrap_or_else(default_cpu_profile);
-    let alternatives = if has_native_profile {
-        profiles.drain(1..).chain([default_cpu_profile()]).collect()
-    } else {
-        Vec::new()
-    };
+    let alternatives = profiles.drain(1..).collect();
     let failure_notes = if profile.kind == HardwareKind::Cpu {
         considered_encoders
             .iter()
@@ -302,7 +297,7 @@ pub fn encoder_backend_plan() -> EncoderBackendPlan {
     let audio_backends = audio_backend_matrix();
     let warmup_tasks = video_backends
         .iter()
-        .filter(|backend| backend.available && backend.kind != HardwareKind::Cpu)
+        .filter(|backend| backend.available)
         .map(|backend| EncoderWarmupTask {
             encoder: backend.video_encoder.clone(),
             kind: EncoderWarmupKind::Video,
@@ -357,6 +352,7 @@ fn run_warmup_task(task: &EncoderWarmupTask) -> Result<(), EncoderWarmupError> {
     match (task.kind, task.encoder.as_str(), task.codec.as_str()) {
         (EncoderWarmupKind::Video, "chroma-videotoolbox-h264", "h264") => warm_h264_encoder(),
         (EncoderWarmupKind::Video, "chroma-videotoolbox-hevc", "hevc") => warm_hevc_encoder(),
+        (EncoderWarmupKind::Video, "chroma-cpu-h264", "h264") => warm_cpu_h264_encoder(),
         (EncoderWarmupKind::Audio, "chroma-audiotoolbox-aac", "aac") => warm_aac_encoder(),
         _ => Ok(()),
     }
@@ -399,6 +395,35 @@ fn warm_h264_encoder() -> Result<(), EncoderWarmupError> {
             }
         })?;
     }
+    Ok(())
+}
+
+fn warm_cpu_h264_encoder() -> Result<(), EncoderWarmupError> {
+    let format = RawVideoFormat {
+        width: 128,
+        height: 72,
+        frame_rate_num: 24,
+        frame_rate_den: 1,
+        pixel_format: RawVideoPixelFormat::Bgra,
+    };
+    let bgra = vec![0_u8; format.width as usize * format.height as usize * 4];
+    let scale = crate::packet::TimeScale {
+        units_per_second: 24,
+    };
+    encode_h264_cpu_bgra_frames(
+        format,
+        &[crate::transcode::RawVideoFrameRef {
+            pts: crate::packet::TimePoint { units: 0, scale },
+            dts: crate::packet::TimePoint { units: 0, scale },
+            duration: crate::packet::TimeDelta { units: 1, scale },
+            bytes: &bgra,
+            keyframe: true,
+        }],
+        500_000,
+    )
+    .map_err(|error| EncoderWarmupError {
+        reason: format!("CPU H.264 warmup failed: {error}"),
+    })?;
     Ok(())
 }
 
@@ -826,11 +851,12 @@ fn native_encoder_profiles() -> Vec<EncoderProfile> {
                 codec: VideoOutputCodec::Hevc,
                 hwaccel: Some("videotoolbox".to_string()),
             },
+            default_cpu_profile(),
         ]
     }
     #[cfg(not(target_os = "macos"))]
     {
-        Vec::new()
+        vec![default_cpu_profile()]
     }
 }
 
@@ -847,7 +873,7 @@ fn video_backend_matrix() -> Vec<EncoderBackend> {
                 VideoOutputCodec::Hevc,
                 "chroma-videotoolbox-hevc",
             ),
-            planned_video_backend(HardwareKind::Cpu, VideoOutputCodec::H264, "chroma-cpu-h264"),
+            executable_video_backend(HardwareKind::Cpu, VideoOutputCodec::H264, "chroma-cpu-h264"),
         ],
         "linux" => vec![
             planned_video_backend(
@@ -872,7 +898,7 @@ fn video_backend_matrix() -> Vec<EncoderBackend> {
             ),
             planned_video_backend(HardwareKind::Qsv, VideoOutputCodec::H264, "chroma-qsv-h264"),
             planned_video_backend(HardwareKind::Qsv, VideoOutputCodec::Hevc, "chroma-qsv-hevc"),
-            planned_video_backend(HardwareKind::Cpu, VideoOutputCodec::H264, "chroma-cpu-h264"),
+            executable_video_backend(HardwareKind::Cpu, VideoOutputCodec::H264, "chroma-cpu-h264"),
         ],
         "windows" => vec![
             planned_video_backend(
@@ -889,9 +915,9 @@ fn video_backend_matrix() -> Vec<EncoderBackend> {
             planned_video_backend(HardwareKind::Qsv, VideoOutputCodec::Hevc, "chroma-qsv-hevc"),
             planned_video_backend(HardwareKind::Amf, VideoOutputCodec::H264, "chroma-amf-h264"),
             planned_video_backend(HardwareKind::Amf, VideoOutputCodec::Hevc, "chroma-amf-hevc"),
-            planned_video_backend(HardwareKind::Cpu, VideoOutputCodec::H264, "chroma-cpu-h264"),
+            executable_video_backend(HardwareKind::Cpu, VideoOutputCodec::H264, "chroma-cpu-h264"),
         ],
-        _ => vec![planned_video_backend(
+        _ => vec![executable_video_backend(
             HardwareKind::Cpu,
             VideoOutputCodec::H264,
             "chroma-cpu-h264",
@@ -1097,13 +1123,17 @@ mod tests {
                     && task.encoder == "chroma-videotoolbox-hevc"
                     && task.codec == "hevc"
             }));
-        } else {
-            assert!(
-                plan.video_backends
-                    .iter()
-                    .any(|backend| backend.kind == HardwareKind::Cpu && !backend.available)
-            );
         }
+        assert!(plan.video_backends.iter().any(|backend| {
+            backend.kind == HardwareKind::Cpu
+                && backend.codec == VideoOutputCodec::H264
+                && backend.available
+        }));
+        assert!(plan.warmup_tasks.iter().any(|task| {
+            task.kind == EncoderWarmupKind::Video
+                && task.encoder == "chroma-cpu-h264"
+                && task.codec == "h264"
+        }));
     }
 
     #[test]
@@ -1271,8 +1301,14 @@ mod tests {
                 && task.codec == "hevc"
                 && task.encoder == "chroma-videotoolbox-hevc"
         });
+        let has_cpu_h264_warmup = plan.warmup_tasks.iter().any(|task| {
+            task.kind == EncoderWarmupKind::Video
+                && task.codec == "h264"
+                && task.encoder == "chroma-cpu-h264"
+        });
 
         assert_eq!(has_h264_warmup, cfg!(target_os = "macos"));
         assert_eq!(has_hevc_warmup, cfg!(target_os = "macos"));
+        assert!(has_cpu_h264_warmup);
     }
 }

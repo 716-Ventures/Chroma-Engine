@@ -95,6 +95,222 @@ impl VideoToolboxH264EncoderSession {
     }
 }
 
+/// Retained cross-platform OpenH264 CPU encoder for a sequence of frame batches.
+pub struct CpuH264EncoderSession {
+    format: RawVideoFormat,
+    bitrate: u32,
+    encoded_batches: u64,
+    encoded_frames: u64,
+    decoder_config: Option<Vec<u8>>,
+    encoder: openh264::encoder::Encoder,
+}
+
+impl std::fmt::Debug for CpuH264EncoderSession {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CpuH264EncoderSession")
+            .field("format", &self.format)
+            .field("bitrate", &self.bitrate)
+            .field("encoded_batches", &self.encoded_batches)
+            .field("encoded_frames", &self.encoded_frames)
+            .finish_non_exhaustive()
+    }
+}
+
+impl CpuH264EncoderSession {
+    /// Creates one portable H.264 software encoder that can serve multiple batches.
+    pub fn new(format: RawVideoFormat, bitrate: u32) -> Result<Self, VideoEncodeError> {
+        validate_raw_video_format(format)?;
+        validate_openh264_format(format)?;
+        if bitrate == 0 {
+            return Err(VideoEncodeError::InvalidInput {
+                reason: "bitrate must be greater than zero".to_string(),
+            });
+        }
+        let frame_rate = format.frame_rate_num as f32 / format.frame_rate_den as f32;
+        let config = openh264::encoder::EncoderConfig::new()
+            .bitrate(openh264::encoder::BitRate::from_bps(bitrate))
+            .max_frame_rate(openh264::encoder::FrameRate::from_hz(frame_rate))
+            .rate_control_mode(openh264::encoder::RateControlMode::Bitrate)
+            .profile(openh264::encoder::Profile::Main)
+            .skip_frames(true)
+            .vui(openh264::encoder::VuiConfig::bt709());
+        let encoder = openh264::encoder::Encoder::with_api_config(
+            openh264::OpenH264API::from_source(),
+            config,
+        )
+        .map_err(|error| VideoEncodeError::BackendFailed {
+            reason: format!("OpenH264 encoder initialization failed: {error}"),
+        })?;
+        Ok(Self {
+            format,
+            bitrate,
+            encoded_batches: 0,
+            encoded_frames: 0,
+            decoder_config: None,
+            encoder,
+        })
+    }
+
+    /// Encodes one ordered BGRA frame batch without recreating the software encoder.
+    pub fn encode(
+        &mut self,
+        frames: &[RawVideoFrameRef<'_>],
+    ) -> Result<EncodedVideoOutput, VideoEncodeError> {
+        validate_raw_video_frames(self.format, frames)?;
+        let mut encoded_frames = Vec::with_capacity(frames.len());
+        for frame in frames {
+            if frame.keyframe && self.encoded_frames > 0 {
+                self.encoder.force_intra_frame();
+            }
+            let bgra = openh264::formats::BgraSliceU8::new(
+                frame.bytes,
+                (self.format.width as usize, self.format.height as usize),
+            );
+            let yuv = openh264::formats::YUVBuffer::from_bgra8_source(bgra);
+            let timestamp = openh264_timestamp(frame.pts);
+            let bitstream = self.encoder.encode_at(&yuv, timestamp).map_err(|error| {
+                VideoEncodeError::BackendFailed {
+                    reason: format!("OpenH264 frame encode failed: {error}"),
+                }
+            })?;
+            let access_unit = copy_openh264_access_unit(&bitstream)?;
+            if !access_unit.parameter_sets.is_empty() {
+                self.decoder_config = build_avc_decoder_config(&access_unit.parameter_sets, 4);
+            }
+            encoded_frames.push(EncodedVideoFrame {
+                pts: frame.pts,
+                dts: frame.dts,
+                duration: frame.duration,
+                payload: access_unit.payload,
+                keyframe: access_unit.keyframe,
+            });
+            self.encoded_frames = self.encoded_frames.saturating_add(1);
+        }
+        let decoder_config =
+            self.decoder_config
+                .clone()
+                .ok_or_else(|| VideoEncodeError::BackendFailed {
+                    reason: "OpenH264 emitted no SPS/PPS decoder configuration".to_string(),
+                })?;
+        self.encoded_batches = self.encoded_batches.saturating_add(1);
+        Ok(EncodedVideoOutput {
+            stream: EncodedVideoStream {
+                codec: VideoCodec::H264,
+                width: self.format.width,
+                height: self.format.height,
+                time_scale: frames[0].pts.scale,
+                decoder_config: Some(decoder_config),
+            },
+            frames: encoded_frames,
+        })
+    }
+
+    /// Returns the number of batches encoded by this software session.
+    pub fn encoded_batches(&self) -> u64 {
+        self.encoded_batches
+    }
+}
+
+#[derive(Debug)]
+struct OpenH264AccessUnit {
+    payload: Vec<u8>,
+    parameter_sets: Vec<Vec<u8>>,
+    keyframe: bool,
+}
+
+fn copy_openh264_access_unit(
+    bitstream: &openh264::encoder::EncodedBitStream<'_>,
+) -> Result<OpenH264AccessUnit, VideoEncodeError> {
+    let mut payload = Vec::new();
+    let mut parameter_sets = Vec::new();
+    let mut keyframe = false;
+    for layer_index in 0..bitstream.num_layers() {
+        let layer =
+            bitstream
+                .layer(layer_index)
+                .ok_or_else(|| VideoEncodeError::BackendFailed {
+                    reason: "OpenH264 returned an invalid layer index".to_string(),
+                })?;
+        for nal_index in 0..layer.nal_count() {
+            let encoded_nal =
+                layer
+                    .nal_unit(nal_index)
+                    .ok_or_else(|| VideoEncodeError::BackendFailed {
+                        reason: "OpenH264 returned an invalid NAL index".to_string(),
+                    })?;
+            let nal = strip_annex_b_start_code(encoded_nal).ok_or_else(|| {
+                VideoEncodeError::BackendFailed {
+                    reason: "OpenH264 returned an empty or malformed Annex-B NAL unit".to_string(),
+                }
+            })?;
+            match nal[0] & 0x1f {
+                7 | 8 => parameter_sets.push(nal.to_vec()),
+                9 => {}
+                nal_type => {
+                    keyframe |= nal_type == 5;
+                    let nal_len =
+                        u32::try_from(nal.len()).map_err(|_| VideoEncodeError::BackendFailed {
+                            reason: "OpenH264 NAL unit exceeds the AVCC size limit".to_string(),
+                        })?;
+                    payload.extend_from_slice(&nal_len.to_be_bytes());
+                    payload.extend_from_slice(nal);
+                }
+            }
+        }
+    }
+    if payload.is_empty() {
+        return Err(VideoEncodeError::BackendFailed {
+            reason: format!(
+                "OpenH264 emitted no video NAL units for {:?} frame",
+                bitstream.frame_type()
+            ),
+        });
+    }
+    Ok(OpenH264AccessUnit {
+        payload,
+        parameter_sets,
+        keyframe,
+    })
+}
+
+fn strip_annex_b_start_code(encoded_nal: &[u8]) -> Option<&[u8]> {
+    let nal = if encoded_nal.starts_with(&[0, 0, 0, 1]) {
+        &encoded_nal[4..]
+    } else if encoded_nal.starts_with(&[0, 0, 1]) {
+        &encoded_nal[3..]
+    } else {
+        return None;
+    };
+    (!nal.is_empty()).then_some(nal)
+}
+
+fn openh264_timestamp(pts: TimePoint) -> openh264::Timestamp {
+    let millis = u128::from(pts.units)
+        .saturating_mul(1_000)
+        .checked_div(u128::from(pts.scale.units_per_second))
+        .unwrap_or(0)
+        .min(i64::MAX as u128) as u64;
+    openh264::Timestamp::from_millis(millis)
+}
+
+fn validate_openh264_format(format: RawVideoFormat) -> Result<(), VideoEncodeError> {
+    if !format.width.is_multiple_of(2) || !format.height.is_multiple_of(2) {
+        return Err(VideoEncodeError::InvalidInput {
+            reason: "OpenH264 requires even width and height for I420 input".to_string(),
+        });
+    }
+    let greater_dimension = format.width.max(format.height);
+    let smaller_dimension = format.width.min(format.height);
+    if greater_dimension > 3_840 || smaller_dimension > 2_160 {
+        return Err(VideoEncodeError::InvalidInput {
+            reason: "OpenH264 supports at most 3840x2160 landscape or 2160x3840 portrait"
+                .to_string(),
+        });
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "macos")]
 impl Drop for VideoToolboxH264EncoderSession {
     fn drop(&mut self) {
@@ -227,6 +443,15 @@ pub fn encode_h264_videotoolbox_bgra_frames(
     VideoToolboxH264EncoderSession::new(format, bitrate)?.encode(frames)
 }
 
+/// Encodes a contiguous BGRA frame batch to H.264 using portable CPU software.
+pub fn encode_h264_cpu_bgra_frames(
+    format: RawVideoFormat,
+    frames: &[RawVideoFrameRef<'_>],
+    bitrate: u32,
+) -> Result<EncodedVideoOutput, VideoEncodeError> {
+    CpuH264EncoderSession::new(format, bitrate)?.encode(frames)
+}
+
 /// Encodes one BGRA frame to HEVC using the native VideoToolbox backend.
 pub fn encode_hevc_videotoolbox_bgra_frame(
     format: RawVideoFormat,
@@ -261,7 +486,7 @@ fn validate_raw_video_format(format: RawVideoFormat) -> Result<(), VideoEncodeEr
     }
     if format.width > i32::MAX as u32 || format.height > i32::MAX as u32 {
         return Err(VideoEncodeError::InvalidInput {
-            reason: "dimensions exceed VideoToolbox session limits".to_string(),
+            reason: "dimensions exceed native encoder integer limits".to_string(),
         });
     }
     Ok(())
@@ -1133,7 +1358,6 @@ unsafe fn hevc_decoder_config_from_objc2_format(
     build_hevc_decoder_config(&parameter_sets, nal_length)
 }
 
-#[cfg(target_os = "macos")]
 fn build_avc_decoder_config(parameter_sets: &[Vec<u8>], nal_length_size: i32) -> Option<Vec<u8>> {
     let mut sps = Vec::new();
     let mut pps = Vec::new();
@@ -1290,6 +1514,66 @@ mod tests {
             .expect_err("reject bad BGRA frame size");
 
         assert!(err.to_string().contains("BGRA"));
+    }
+
+    #[test]
+    fn cpu_h264_encodes_avcc_and_reuses_session() {
+        let format = smoke_format();
+        let bgra = vec![0; format.width as usize * format.height as usize * 4];
+        let scale = TimeScale {
+            units_per_second: 24,
+        };
+        let mut session =
+            CpuH264EncoderSession::new(format, 500_000).expect("create retained CPU H.264 session");
+
+        for index in 0..2 {
+            let encoded = session
+                .encode(&[RawVideoFrameRef {
+                    pts: TimePoint {
+                        units: index,
+                        scale,
+                    },
+                    dts: TimePoint {
+                        units: index,
+                        scale,
+                    },
+                    duration: TimeDelta { units: 1, scale },
+                    bytes: &bgra,
+                    keyframe: index == 0,
+                }])
+                .expect("encode CPU H.264 batch");
+
+            assert_eq!(encoded.frames.len(), 1);
+            assert!(!encoded.frames[0].payload.is_empty());
+            let config = encoded.stream.decoder_config.as_deref().expect("avcC");
+            let parsed = crate::codec::h264::parse_avc_decoder_config(config).expect("parse avcC");
+            assert_eq!(parsed.nalu_length_size, 4);
+            assert!(!parsed.sps.is_empty());
+            assert!(!parsed.pps.is_empty());
+            crate::codec::h264::parse_avc_sample_nalus(
+                0,
+                0,
+                &encoded.frames[0].payload,
+                parsed.nalu_length_size,
+            )
+            .expect("parse AVCC sample");
+        }
+
+        assert_eq!(session.encoded_batches(), 2);
+    }
+
+    #[test]
+    fn cpu_h264_rejects_odd_dimensions() {
+        let error = CpuH264EncoderSession::new(
+            RawVideoFormat {
+                width: 127,
+                ..smoke_format()
+            },
+            500_000,
+        )
+        .expect_err("reject odd width");
+
+        assert!(error.to_string().contains("even width and height"));
     }
 
     #[cfg(target_os = "macos")]
