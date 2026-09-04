@@ -4,7 +4,7 @@ use thiserror::Error;
 use crate::{
     codec::dts::{DtsCoreFrameHeader, DtsParseError, parse_dts_core_frames},
     packet::{ChunkSample, TimeDelta, TimePoint, TimeScale},
-    transcode::PcmAudioFormat,
+    transcode::{AudioClockConfig, AudioFrameTiming, AudioSampleClock, PcmAudioFormat},
 };
 
 /// Source audio codecs accepted by Chroma Engine's decode-facing bridge API.
@@ -13,6 +13,188 @@ use crate::{
 pub enum AudioDecodeCodec {
     /// DTS or DTS-HD source packets with a DTS core substream.
     Dts,
+    /// Dolby TrueHD/MLP source packets.
+    TrueHd,
+}
+
+/// One decoded interleaved signed 16-bit PCM frame.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DecodedPcmAudioFrame {
+    /// Sample-clock timing for this PCM frame.
+    pub timing: AudioFrameTiming,
+    /// Interleaved signed 16-bit PCM samples.
+    pub samples: Vec<i16>,
+}
+
+/// Decoded PCM stream description and frames.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DecodedPcmAudioOutput {
+    /// Stable PCM output shape.
+    pub format: PcmAudioFormat,
+    /// Decoded PCM frames.
+    pub frames: Vec<DecodedPcmAudioFrame>,
+}
+
+/// Retained portable TrueHD decoder.
+pub struct TrueHdAudioDecoderSession {
+    extractor: truehd::process::extract::Extractor,
+    parser: truehd::process::parse::Parser,
+    decoder: truehd::process::decode::Decoder,
+    format: Option<PcmAudioFormat>,
+    clock: Option<AudioSampleClock>,
+    pending_pts: std::collections::VecDeque<TimePoint>,
+    decoded_batches: u64,
+}
+
+impl std::fmt::Debug for TrueHdAudioDecoderSession {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TrueHdAudioDecoderSession")
+            .field("format", &self.format)
+            .field("pending_timestamps", &self.pending_pts.len())
+            .field("decoded_batches", &self.decoded_batches)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Default for TrueHdAudioDecoderSession {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TrueHdAudioDecoderSession {
+    /// Creates a portable TrueHD decoder with no stream state.
+    pub fn new() -> Self {
+        Self {
+            extractor: truehd::process::extract::Extractor::default(),
+            parser: truehd::process::parse::Parser::default(),
+            decoder: truehd::process::decode::Decoder::default(),
+            format: None,
+            clock: None,
+            pending_pts: std::collections::VecDeque::new(),
+            decoded_batches: 0,
+        }
+    }
+
+    /// Decodes one ordered TrueHD packet batch to interleaved signed 16-bit PCM.
+    pub fn decode(
+        &mut self,
+        input: &AudioDecodeInput<'_>,
+    ) -> Result<DecodedPcmAudioOutput, AudioDecodeError> {
+        if input.codec != AudioDecodeCodec::TrueHd {
+            return Err(AudioDecodeError::UnsupportedCodec);
+        }
+        if input.time_scale.units_per_second == 0 {
+            return Err(AudioDecodeError::BackendFailed {
+                reason: "packet time scale must be greater than zero".to_string(),
+            });
+        }
+        for packet in &input.packets {
+            if packet.pts.scale != input.time_scale
+                || packet.dts.scale != input.time_scale
+                || packet.duration.scale != input.time_scale
+            {
+                return Err(AudioDecodeError::BackendFailed {
+                    reason: "packet timestamps must match the audio input time scale".to_string(),
+                });
+            }
+            self.pending_pts.push_back(packet.pts);
+            self.extractor.push_bytes(packet.bytes);
+        }
+
+        let mut frames = Vec::new();
+        loop {
+            let extracted = match self.extractor.next() {
+                Some(Ok(frame)) => frame,
+                Some(Err(truehd::utils::errors::ExtractError::InsufficientData)) | None => break,
+                Some(Err(error)) => {
+                    return Err(AudioDecodeError::BackendFailed {
+                        reason: format!("TrueHD frame extraction failed: {error}"),
+                    });
+                }
+            };
+            let access_unit =
+                self.parser
+                    .parse(&extracted)
+                    .map_err(|error| AudioDecodeError::BackendFailed {
+                        reason: format!("TrueHD access-unit parse failed: {error}"),
+                    })?;
+            let decoded = self
+                .decoder
+                // Presentation 1 is the format-defined six-channel presentation. The
+                // decoder resolves it to the closest available presentation, including
+                // the stereo presentation or the embedded downmix of a larger stream.
+                .decode_presentation(&access_unit, 1)
+                .map_err(|error| AudioDecodeError::BackendFailed {
+                    reason: format!("TrueHD decode failed: {error}"),
+                })?;
+            let source_pts = self.pending_pts.pop_front();
+            if decoded.is_duplicate {
+                continue;
+            }
+            let channels = u32::try_from(decoded.channel_count).map_err(|_| {
+                AudioDecodeError::BackendFailed {
+                    reason: "TrueHD channel count exceeds u32".to_string(),
+                }
+            })?;
+            let format = PcmAudioFormat {
+                sample_rate: decoded.sampling_frequency,
+                channels,
+            };
+            if let Some(existing) = self.format {
+                if existing != format || decoded.substream_info_changed {
+                    return Err(AudioDecodeError::FormatChanged);
+                }
+            } else {
+                self.format = Some(format);
+                self.clock = Some(AudioSampleClock::new(AudioClockConfig {
+                    sample_rate: format.sample_rate,
+                    discontinuity_threshold_ms: 100,
+                }));
+            }
+            let sample_count = u32::try_from(decoded.sample_length).map_err(|_| {
+                AudioDecodeError::BackendFailed {
+                    reason: "TrueHD sample count exceeds u32".to_string(),
+                }
+            })?;
+            let capacity = decoded
+                .sample_length
+                .checked_mul(decoded.channel_count)
+                .ok_or_else(|| AudioDecodeError::BackendFailed {
+                    reason: "TrueHD PCM sample count overflowed".to_string(),
+                })?;
+            let mut samples = Vec::with_capacity(capacity);
+            for sample in decoded.pcm_data.iter().take(decoded.sample_length) {
+                samples.extend(sample.iter().take(decoded.channel_count).map(|value| {
+                    (value >> 8).clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16
+                }));
+            }
+            let timing = self
+                .clock
+                .as_mut()
+                .expect("clock initialized with TrueHD format")
+                .stamp_frame(source_pts, sample_count);
+            frames.push(DecodedPcmAudioFrame { timing, samples });
+        }
+        self.decoded_batches = self.decoded_batches.saturating_add(1);
+        let format = self.format.ok_or(AudioDecodeError::NoFrames)?;
+        Ok(DecodedPcmAudioOutput { format, frames })
+    }
+
+    /// Returns the number of packet batches decoded by this session.
+    pub fn decoded_batches(&self) -> u64 {
+        self.decoded_batches
+    }
+}
+
+/// Decodes one TrueHD packet batch using portable CPU software.
+pub fn decode_truehd_to_interleaved_i16(
+    input: &AudioDecodeInput<'_>,
+) -> Result<DecodedPcmAudioOutput, AudioDecodeError> {
+    TrueHdAudioDecoderSession::new().decode(input)
 }
 
 /// Borrowed compressed audio packet ready for native bridge analysis or decode.
@@ -235,5 +417,29 @@ mod tests {
         .expect_err("reject out-of-bounds sample");
 
         assert_eq!(err, AudioDecodeError::PacketOutOfBounds);
+    }
+
+    #[test]
+    fn truehd_fixture_decodes_to_clocked_pcm() {
+        let input = AudioDecodeInput {
+            codec: AudioDecodeCodec::TrueHd,
+            time_scale: TimeScale::MILLIS,
+            packets: vec![CompressedAudioPacket {
+                index: 0,
+                pts: TimePoint::millis(500),
+                dts: TimePoint::millis(500),
+                duration: TimeDelta::millis(10),
+                bytes: truehd::process::EXAMPLE_DATA,
+            }],
+            end_of_stream: true,
+        };
+
+        let output = decode_truehd_to_interleaved_i16(&input).expect("decode TrueHD fixture");
+
+        assert!(!output.frames.is_empty());
+        assert!(output.format.sample_rate > 0);
+        assert!(output.format.channels > 0);
+        assert_eq!(output.frames[0].timing.pts.as_millis(), 500);
+        assert!(output.frames.iter().all(|frame| !frame.samples.is_empty()));
     }
 }

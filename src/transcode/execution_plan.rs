@@ -244,7 +244,7 @@ pub fn plan_hls_transcode(
                     "audio-decode0",
                     TranscodeStageKind::AudioDecode,
                     vec![track.id.clone()],
-                    "native audio decode can feed the target-native audio bridge",
+                    "portable TrueHD decode can feed the target-native audio bridge",
                 ));
             } else {
                 let missing = format!("audioDecode:{}", capability_label(track.codec.family));
@@ -346,19 +346,19 @@ fn video_can_copy_for_hls(track: &MediaTrack, target: PlaybackTarget) -> bool {
 }
 
 fn native_video_decode_ready(family: CodecFamily) -> bool {
-    family == CodecFamily::H264 || (cfg!(target_os = "macos") && family == CodecFamily::Hevc)
+    matches!(family, CodecFamily::H264 | CodecFamily::Hevc)
 }
 
 fn native_video_decode_reason(family: CodecFamily) -> &'static str {
     if family == CodecFamily::H264 {
         "preferred native H.264 decode with portable OpenH264 fallback emits BGRA frames"
     } else {
-        "native VideoToolbox decode can convert compressed packets into BGRA frames"
+        "preferred native HEVC decode with portable safe-Rust fallback emits BGRA frames"
     }
 }
 
-fn native_audio_decode_ready(_family: CodecFamily) -> bool {
-    false
+fn native_audio_decode_ready(family: CodecFamily) -> bool {
+    family == CodecFamily::TrueHd
 }
 
 fn audio_can_copy_for_hls(track: &MediaTrack, target: PlaybackTarget) -> bool {
@@ -403,6 +403,9 @@ fn audio_transcode_codec(target: PlaybackTarget, _family: CodecFamily) -> AudioC
 
 fn audio_transcode_channels(track: &MediaTrack, codec: AudioCodec) -> u32 {
     match codec {
+        AudioCodec::Aac if track.codec.family == CodecFamily::TrueHd => {
+            audio_channels(track).min(6)
+        }
         AudioCodec::Aac => audio_channels(track).min(2),
         AudioCodec::Ac3 | AudioCodec::Eac3 => audio_channels(track).min(6),
     }
@@ -616,20 +619,11 @@ mod tests {
         assert_eq!(plan.output.video.as_ref().unwrap().codec, VideoCodec::H264);
         assert!(!plan.output.video.as_ref().unwrap().packet_copy);
         assert_eq!(plan.output.video.as_ref().unwrap().bitrate_bps, 16_000_000);
-        if cfg!(target_os = "macos") {
-            assert!(plan.engine_executable);
-            assert!(plan.stages.iter().any(|stage| {
-                stage.kind == TranscodeStageKind::VideoDecode
-                    && stage.status == TranscodeStageStatus::NativeReady
-            }));
-        } else {
-            assert!(!plan.engine_executable);
-            assert!(
-                plan.missing_capabilities
-                    .iter()
-                    .any(|capability| capability == "videoDecode:hevc")
-            );
-        }
+        assert!(plan.engine_executable);
+        assert!(plan.stages.iter().any(|stage| {
+            stage.kind == TranscodeStageKind::VideoDecode
+                && stage.status == TranscodeStageStatus::NativeReady
+        }));
     }
 
     #[test]
@@ -653,6 +647,28 @@ mod tests {
         assert!(plan.stages.iter().any(|stage| {
             stage.kind == TranscodeStageKind::AudioDecode
                 && stage.status == TranscodeStageStatus::NativeMissing
+        }));
+    }
+
+    #[test]
+    fn truehd_audio_uses_portable_decode_and_aac_encode() {
+        let probe = probe_with_tracks(vec![
+            video_track("v0", CodecFamily::H264, 1_920, 1_080, 8_000_000, None),
+            audio_track("a0", CodecFamily::TrueHd, true, 8, 48_000, Some(4_000_000)),
+        ]);
+
+        let plan = plan_hls_transcode(&probe, request(PlaybackTarget::Browser, false, None));
+
+        assert!(plan.engine_executable);
+        assert!(plan.missing_capabilities.is_empty());
+        let audio = plan.output.audio.as_ref().unwrap();
+        assert_eq!(audio.codec, AudioCodec::Aac);
+        assert!(!audio.packet_copy);
+        assert_eq!(audio.channels, 6);
+        assert!(plan.stages.iter().any(|stage| {
+            stage.kind == TranscodeStageKind::AudioDecode
+                && stage.status == TranscodeStageStatus::NativeReady
+                && stage.reason.contains("portable TrueHD")
         }));
     }
 

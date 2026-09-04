@@ -13,7 +13,8 @@ use crate::{
     container::matroska::{MatroskaTrack, MatroskaTrackKind, looks_like_ebml},
     fmp4::{
         Fmp4SampleEntry, Fmp4Track, Fmp4TrackKind, fragment_track_from_chunk_samples,
-        fragment_track_from_encoded_video_frames, init_segment, media_fragment,
+        fragment_track_from_encoded_audio_frames, fragment_track_from_encoded_video_frames,
+        init_segment, media_fragment,
     },
     output::publish_bytes,
     packet::{
@@ -22,8 +23,9 @@ use crate::{
     },
     source::MappedMediaFile,
     transcode::{
-        BgraDecoderSession, H264EncoderSession, RawVideoFormat, RawVideoFrameRef,
-        RawVideoPixelFormat, VideoCodec, build_video_decode_input,
+        AudioDecodeCodec, BgraDecoderSession, H264EncoderSession, RawVideoFormat, RawVideoFrameRef,
+        RawVideoPixelFormat, VideoCodec, build_audio_decode_input, build_video_decode_input,
+        decode_truehd_to_interleaved_i16, encode_aac_from_interleaved_i16,
     },
 };
 
@@ -46,7 +48,7 @@ pub struct NativeFmp4TranscodeOptions {
     pub segment_ms: u64,
     /// Target H.264 bitrate.
     pub video_bitrate: u32,
-    /// Target E-AC-3 bitrate.
+    /// Target bitrate for transcoded audio.
     pub audio_bitrate: u32,
     /// Output video path.
     pub video_mode: NativeFmp4VideoMode,
@@ -659,6 +661,7 @@ fn transcode_prepared_segment(
         video_start_ms,
         video_end_ms,
         index,
+        prepared.audio_track.codec == "truehd",
     )?;
 
     let video_segment = matroska_video_segment(
@@ -750,8 +753,9 @@ fn extract_indexed_time_range(
     start_ms: u64,
     end_ms: u64,
     index: u32,
+    preroll_to_truehd_sync: bool,
 ) -> Result<(ExtractedChunk, Vec<u8>)> {
-    let start = packets
+    let target_start = packets
         .iter()
         .position(|packet| {
             packet
@@ -761,6 +765,14 @@ fn extract_indexed_time_range(
                 > start_ms
         })
         .ok_or_else(|| anyhow::anyhow!("audio track has no packets for segment {index}"))?;
+    let start = if preroll_to_truehd_sync {
+        (0..=target_start)
+            .rev()
+            .find(|packet_index| packet_contains_truehd_major_sync(bytes, &packets[*packet_index]))
+            .unwrap_or(0)
+    } else {
+        target_start
+    };
     let end = packets
         .iter()
         .enumerate()
@@ -781,6 +793,21 @@ fn extract_indexed_time_range(
         key_aligned: true,
     };
     extract_indexed_chunk(bytes, track_id, packets, chunk)
+}
+
+fn packet_contains_truehd_major_sync(bytes: &[u8], packet: &PacketRef) -> bool {
+    let Ok(start) = usize::try_from(packet.source_offset) else {
+        return false;
+    };
+    let Some(end) = start.checked_add(packet.size as usize) else {
+        return false;
+    };
+    let Some(payload) = bytes.get(start..end) else {
+        return false;
+    };
+    payload
+        .windows(4)
+        .any(|window| matches!(window, [0xF8, 0x72, 0x6F, 0xBA] | [0xF8, 0x72, 0x6F, 0xBB]))
 }
 
 fn select_matroska_track<'a>(
@@ -1048,16 +1075,119 @@ fn matroska_audio_segment(
     track: &MatroskaTrack,
     manifest: ExtractedChunk,
     payload: Vec<u8>,
-    _bitrate: u32,
+    bitrate: u32,
 ) -> Result<AudioSegment> {
     match track.codec.as_str() {
         "dts" => bail!(
             "DTS audio track {} requires a native decoder capability that is not currently executable",
             track.index
         ),
+        "truehd" => transcode_truehd_audio_segment(manifest, payload, bitrate),
         "aac" | "ac3" | "eac3" => copy_matroska_audio_segment(track, manifest, payload),
         other => bail!("selected audio track codec {other} is not supported by native fMP4 output"),
     }
+}
+
+fn transcode_truehd_audio_segment(
+    manifest: ExtractedChunk,
+    payload: Vec<u8>,
+    bitrate: u32,
+) -> Result<AudioSegment> {
+    let input = build_audio_decode_input(
+        AudioDecodeCodec::TrueHd,
+        chunk_time_scale(&manifest),
+        &manifest.samples,
+        &payload,
+        true,
+    )?;
+    let decoded = decode_truehd_to_interleaved_i16(&input)?;
+    let output_scale = decoded.format.sample_rate;
+    let window_start = rescale_units(
+        manifest.chunk.start.units,
+        manifest.chunk.start.scale,
+        output_scale,
+    );
+    let window_end = window_start.saturating_add(rescale_units(
+        manifest.chunk.duration.units,
+        manifest.chunk.duration.scale,
+        output_scale,
+    ));
+    let channels = decoded.format.channels as usize;
+    let mut first_sample = None;
+    let mut reanchored = false;
+    let mut pcm = Vec::new();
+    for frame in &decoded.frames {
+        let frame_start = frame.timing.start_sample;
+        let frame_end = frame_start.saturating_add(u64::from(frame.timing.sample_count));
+        let overlap_start = frame_start.max(window_start);
+        let overlap_end = frame_end.min(window_end);
+        if overlap_start >= overlap_end {
+            continue;
+        }
+        let first_frame = first_sample.is_none();
+        first_sample.get_or_insert(overlap_start);
+        if first_frame {
+            reanchored = frame.timing.reanchored || overlap_start != frame_start;
+        }
+        let skip_frames = usize::try_from(overlap_start.saturating_sub(frame_start))?;
+        let take_frames = usize::try_from(overlap_end.saturating_sub(overlap_start))?;
+        let sample_start = skip_frames
+            .checked_mul(channels)
+            .ok_or_else(|| anyhow::anyhow!("TrueHD PCM crop offset overflowed"))?;
+        let sample_count = take_frames
+            .checked_mul(channels)
+            .ok_or_else(|| anyhow::anyhow!("TrueHD PCM crop length overflowed"))?;
+        let sample_end = sample_start
+            .checked_add(sample_count)
+            .ok_or_else(|| anyhow::anyhow!("TrueHD PCM crop range overflowed"))?;
+        pcm.extend_from_slice(
+            frame
+                .samples
+                .get(sample_start..sample_end)
+                .ok_or_else(|| anyhow::anyhow!("TrueHD PCM frame was shorter than declared"))?,
+        );
+    }
+    let first_sample = first_sample
+        .ok_or_else(|| anyhow::anyhow!("TrueHD decoder emitted no PCM in the segment window"))?;
+    let mut encoded = encode_aac_from_interleaved_i16(decoded.format, &pcm, bitrate)?;
+    for (index, frame) in encoded.frames.iter_mut().enumerate() {
+        frame.timing.start_sample = frame.timing.start_sample.saturating_add(first_sample);
+        frame.timing.pts.units = frame.timing.pts.units.saturating_add(first_sample);
+        if index == 0 {
+            frame.timing.reanchored = reanchored;
+            frame.discontinuity = reanchored;
+        }
+    }
+
+    let decoder_config = encoded
+        .stream
+        .decoder_config
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("AAC encoder returned no decoder configuration"))?;
+    let channel_count = u16::try_from(encoded.stream.channels)
+        .map_err(|_| anyhow::anyhow!("AAC channel count exceeds u16"))?;
+    let timescale = encoded.stream.sample_rate;
+    let default_sample_duration = encoded
+        .frames
+        .first()
+        .map(|frame| frame.timing.sample_count.max(1))
+        .unwrap_or(1);
+    let first_pts = encoded.frames.first().map(|frame| frame.timing.pts);
+    let fragment = fragment_track_from_encoded_audio_frames(AUDIO_TRACK_ID, &encoded.frames)?;
+
+    Ok(AudioSegment {
+        fragment,
+        sample_entry: Fmp4SampleEntry::Aac {
+            decoder_config,
+            channel_count,
+            sample_rate: timescale,
+        },
+        codec: "aac".to_string(),
+        timescale,
+        default_sample_duration,
+        encoded_frame_count: encoded.frames.len(),
+        first_pts,
+    })
 }
 
 fn copy_matroska_audio_segment(
@@ -1171,6 +1301,43 @@ fn rescale_units(units: u64, from: TimeScale, to_units_per_second: u32) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transcodes_truehd_fixture_to_clocked_aac_fragment() {
+        let payload = truehd::process::EXAMPLE_DATA.to_vec();
+        let source_pts = TimePoint::millis(500);
+        let manifest = ExtractedChunk {
+            track_id: "a0".to_string(),
+            chunk: NativeChunk {
+                index: 0,
+                start: source_pts,
+                duration: TimeDelta::millis(10),
+                packet_range: PacketRange { start: 0, end: 1 },
+                key_aligned: true,
+            },
+            packet_count: 1,
+            byte_count: payload.len() as u64,
+            samples: vec![ChunkSample {
+                index: 0,
+                payload_offset: 0,
+                byte_count: payload.len() as u32,
+                pts: source_pts,
+                dts: source_pts,
+                duration: TimeDelta::millis(10),
+                keyframe: true,
+            }],
+        };
+
+        let segment = transcode_truehd_audio_segment(manifest, payload, 384_000)
+            .expect("transcode TrueHD fixture");
+
+        assert_eq!(segment.codec, "aac");
+        assert!(segment.encoded_frame_count > 0);
+        assert_eq!(segment.fragment.samples.len(), segment.encoded_frame_count);
+        assert!(!segment.fragment.payload.is_empty());
+        assert_eq!(segment.first_pts.unwrap().as_millis(), 500);
+        assert!(matches!(segment.sample_entry, Fmp4SampleEntry::Aac { .. }));
+    }
 
     #[test]
     fn scaler_borrows_frames_when_dimensions_already_match() {

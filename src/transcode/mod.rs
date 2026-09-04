@@ -15,7 +15,9 @@ mod video_encode;
 pub use audio_clock::{AudioClockConfig, AudioFrameTiming, AudioSampleClock};
 pub use audio_decode::{
     AudioDecodeCodec, AudioDecodeError, AudioDecodeInput, CompressedAudioPacket,
-    DtsAudioBridgeProbe, DtsAudioPacketProbe, build_audio_decode_input, probe_dts_audio_bridge,
+    DecodedPcmAudioFrame, DecodedPcmAudioOutput, DtsAudioBridgeProbe, DtsAudioPacketProbe,
+    TrueHdAudioDecoderSession, build_audio_decode_input, decode_truehd_to_interleaved_i16,
+    probe_dts_audio_bridge,
 };
 pub use audio_encode::{
     AacEncoderSession, AudioEncodeError, AudioToolboxAacEncoderSession, CpuAacEncoderSession,

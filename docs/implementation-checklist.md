@@ -125,7 +125,8 @@
 - [x] Portable CPU H.264 encoder. A retained OpenH264 session accepts BGRA frames and emits AVCC access units plus avcC decoder configuration on macOS, Windows, Linux, and Linux-based NAS hosts.
 - [x] Portable CPU H.264 decoder. A retained OpenH264 session converts AVCC packets into timestamped BGRA frames and can feed the same bounded decode/scale/encode pipeline as VideoToolbox.
 - [x] Portable HEVC Main/Main10 video decoder. A retained safe-Rust session accepts hvcC/length-prefixed packets, decodes 8-bit and 10-bit YUV420, and emits BGRA through the same bounded pipeline on macOS, Windows, Linux, and Linux-based NAS hosts.
-- [ ] Portable compressed-audio decoder. Portable H.264/HEVC decode, H.264 encode, and AAC encode are executable, but non-macOS full transcode still requires copy-compatible input audio until native audio decode lands.
+- [x] Portable TrueHD audio decoder. Safe Rust TrueHD decoding selects the format-defined six-channel-or-smaller presentation and feeds the portable AAC/fMP4 bridge on macOS, Windows, Linux, and Linux-based NAS hosts.
+- [ ] Portable DTS audio decoder. DTS remains a deterministic missing capability; the rejected oxideav implementation must not return without real-media latency evidence.
 - [ ] Linux executable VAAPI/NVENC/QSV path. Capability models exist, but no Linux decode/encode backend is executable or verified yet.
 - [ ] Windows executable NVENC/QSV/AMF/D3D path. Capability models exist, but no Windows decode/encode backend is executable or verified yet.
 - [x] Warm encoder session initialization. AAC AudioToolbox, portable CPU AAC, VideoToolbox H.264/HEVC, and portable OpenH264 backends run tiny real encodes before playback so startup failures surface before the first segment request.
@@ -139,7 +140,8 @@
 - [x] Cross-platform hardware decode contract. Decoder probes now model macOS VideoToolbox, Linux VAAPI/NVDEC/QSV, and Windows D3D11VA/D3D12VA/DXVA2/QSV/AMF/NVDEC paths with explicit `designed`, `detected`, `available`, and `verified` capability states instead of marking modeled placeholders as executable.
 - [x] macOS VideoToolbox BGRA decode primitive. Chroma Engine can now accept H.264/HEVC compressed packet batches plus avcC/hvcC config and return owned decoded BGRA frames through a Rust-first API.
 - [x] Native compressed video decode backend for HEVC/H.264 Matroska sources that need target-native fMP4 HLS output. VideoToolbox feeds a bounded BGRA-to-H.264 pump owned by the retained transcode session.
-- [ ] Native DTS/TrueHD decode bridge for MKV audio tracks that have no AAC/AC-3/E-AC-3 alternate. Follow the FFmpeg send/receive/drain state-machine shape and AetherEngine's copy-first/bridge-only policy, but keep the API Chroma-native.
+- [x] Native TrueHD decode bridge for MKV audio tracks that have no AAC/AC-3/E-AC-3 alternate. The portable decoder feeds AAC-LC access units into fMP4 while preserving the source sample-clock anchor.
+- [ ] Native DTS decode bridge for MKV audio tracks that have no copy-compatible alternate. Follow the FFmpeg send/receive/drain state-machine shape and AetherEngine's copy-first/bridge-only policy, but keep the API Chroma-native.
 
 ## Integration
 
