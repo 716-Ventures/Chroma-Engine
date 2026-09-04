@@ -124,7 +124,8 @@
 - [ ] AC-3/E-AC-3 bridge encode. The previous oxideav experiment was removed because it was not suitable for real playback latency; this remains a native backend gap.
 - [x] Portable CPU H.264 encoder. A retained OpenH264 session accepts BGRA frames and emits AVCC access units plus avcC decoder configuration on macOS, Windows, Linux, and Linux-based NAS hosts.
 - [x] Portable CPU H.264 decoder. A retained OpenH264 session converts AVCC packets into timestamped BGRA frames and can feed the same bounded decode/scale/encode pipeline as VideoToolbox.
-- [ ] Portable HEVC video decoder and compressed-audio decoder. Portable H.264 decode/encode and AAC encode are executable, but non-macOS full transcode still requires copy-compatible input audio until native audio decode lands.
+- [x] Portable HEVC Main/Main10 video decoder. A retained safe-Rust session accepts hvcC/length-prefixed packets, decodes 8-bit and 10-bit YUV420, and emits BGRA through the same bounded pipeline on macOS, Windows, Linux, and Linux-based NAS hosts.
+- [ ] Portable compressed-audio decoder. Portable H.264/HEVC decode, H.264 encode, and AAC encode are executable, but non-macOS full transcode still requires copy-compatible input audio until native audio decode lands.
 - [ ] Linux executable VAAPI/NVENC/QSV path. Capability models exist, but no Linux decode/encode backend is executable or verified yet.
 - [ ] Windows executable NVENC/QSV/AMF/D3D path. Capability models exist, but no Windows decode/encode backend is executable or verified yet.
 - [x] Warm encoder session initialization. AAC AudioToolbox, portable CPU AAC, VideoToolbox H.264/HEVC, and portable OpenH264 backends run tiny real encodes before playback so startup failures surface before the first segment request.

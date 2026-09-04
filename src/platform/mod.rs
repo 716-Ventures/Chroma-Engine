@@ -492,6 +492,7 @@ fn video_decoder_backend_matrix_for_os(os: &str) -> Vec<VideoDecoderBackend> {
                 ],
             ),
             cpu_h264_decoder_backend("macos"),
+            cpu_hevc_decoder_backend("macos"),
         ],
         "linux" => vec![
             video_decoder_backend(
@@ -558,6 +559,7 @@ fn video_decoder_backend_matrix_for_os(os: &str) -> Vec<VideoDecoderBackend> {
                 ],
             ),
             cpu_h264_decoder_backend("linux"),
+            cpu_hevc_decoder_backend("linux"),
         ],
         "windows" => vec![
             video_decoder_backend(
@@ -687,8 +689,9 @@ fn video_decoder_backend_matrix_for_os(os: &str) -> Vec<VideoDecoderBackend> {
                 ],
             ),
             cpu_h264_decoder_backend("windows"),
+            cpu_hevc_decoder_backend("windows"),
         ],
-        _ => vec![cpu_h264_decoder_backend(os)],
+        _ => vec![cpu_h264_decoder_backend(os), cpu_hevc_decoder_backend(os)],
     }
 }
 
@@ -698,6 +701,16 @@ fn cpu_h264_decoder_backend(os: &str) -> VideoDecoderBackend {
         HardwareKind::Cpu,
         VideoCodec::H264,
         "chroma-cpu-h264-decoder",
+        &[VideoDecodeSurfaceFormat::Bgra],
+    )
+}
+
+fn cpu_hevc_decoder_backend(os: &str) -> VideoDecoderBackend {
+    video_decoder_backend(
+        os,
+        HardwareKind::Cpu,
+        VideoCodec::Hevc,
+        "chroma-cpu-hevc-decoder",
         &[VideoDecodeSurfaceFormat::Bgra],
     )
 }
@@ -767,7 +780,7 @@ fn video_decode_backend_state(os: &str, kind: HardwareKind, codec: VideoCodec) -
         return CapabilityState::Modeled;
     }
     match (os, kind) {
-        (_, HardwareKind::Cpu) if codec == VideoCodec::H264 => CapabilityState::Executable,
+        (_, HardwareKind::Cpu) => CapabilityState::Executable,
         ("macos", HardwareKind::VideoToolbox) if video_toolbox_decode_supported(codec) => {
             CapabilityState::Executable
         }
@@ -1222,6 +1235,14 @@ mod tests {
             backend.kind == HardwareKind::Cpu
                 && backend.codec == VideoCodec::H264
                 && backend.decoder == "chroma-cpu-h264-decoder"
+                && backend.state == CapabilityState::Executable
+                && backend.available
+                && backend.hwaccel.is_none()
+        }));
+        assert!(plan.video_backends.iter().any(|backend| {
+            backend.kind == HardwareKind::Cpu
+                && backend.codec == VideoCodec::Hevc
+                && backend.decoder == "chroma-cpu-hevc-decoder"
                 && backend.state == CapabilityState::Executable
                 && backend.available
                 && backend.hwaccel.is_none()

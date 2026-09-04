@@ -177,6 +177,131 @@ pub struct CpuH264BgraDecoderSession {
     decoder: openh264::decoder::Decoder,
 }
 
+/// Retained, portable HEVC Main/Main10 decoder that emits tightly packed BGRA frames.
+pub struct CpuHevcBgraDecoderSession {
+    output_format: RawVideoFormat,
+    decoded_batches: u64,
+    nalu_length_size: u8,
+    pending_timing: Vec<CpuDecodeTiming>,
+    decoder: rust_h265::Decoder,
+}
+
+impl std::fmt::Debug for CpuHevcBgraDecoderSession {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CpuHevcBgraDecoderSession")
+            .field("output_format", &self.output_format)
+            .field("decoded_batches", &self.decoded_batches)
+            .field("pending_frames", &self.pending_timing.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl CpuHevcBgraDecoderSession {
+    /// Creates a portable HEVC decoder from an HEVCDecoderConfigurationRecord.
+    pub fn new(
+        output_format: RawVideoFormat,
+        decoder_config: &[u8],
+    ) -> Result<Self, VideoDecodeError> {
+        validate_decoded_video_format(output_format)?;
+        if decoder_config.is_empty() {
+            return Err(VideoDecodeError::MissingDecoderConfig);
+        }
+        let config =
+            crate::codec::hevc::parse_hevc_decoder_config(decoder_config).map_err(|error| {
+                VideoDecodeError::InvalidDecoderConfig {
+                    reason: error.to_string(),
+                }
+            })?;
+        if !(32..=34).all(|nal_type| {
+            config
+                .arrays
+                .iter()
+                .any(|array| array.nal_unit_type == nal_type && !array.units.is_empty())
+        }) {
+            return Err(VideoDecodeError::InvalidDecoderConfig {
+                reason: "HEVC decoder configuration does not contain VPS/SPS/PPS".to_string(),
+            });
+        }
+        let parameter_sets = crate::codec::hevc::hevc_parameter_sets_to_annex_b(&config);
+        let mut decoder = rust_h265::Decoder::new();
+        feed_hevc_nals(&mut decoder, &parameter_sets)?;
+        Ok(Self {
+            output_format,
+            decoded_batches: 0,
+            nalu_length_size: config.nalu_length_size,
+            pending_timing: Vec::new(),
+            decoder,
+        })
+    }
+
+    /// Decodes one ordered HEVC packet batch without recreating the software decoder.
+    pub fn decode(
+        &mut self,
+        input: &VideoDecodeInput<'_>,
+    ) -> Result<DecodedVideoOutput, VideoDecodeError> {
+        if input.codec != VideoCodec::Hevc {
+            return Err(VideoDecodeError::UnsupportedCodec);
+        }
+        if input.time_scale.units_per_second == 0 {
+            return Err(VideoDecodeError::InvalidInput {
+                reason: "packet time scale must be greater than zero".to_string(),
+            });
+        }
+        let mut output_frames = Vec::new();
+        for packet in &input.packets {
+            validate_packet_time_scale(packet, input.time_scale)?;
+            let annex_b =
+                crate::codec::hevc::hevc_sample_to_annex_b(packet.bytes, self.nalu_length_size)
+                    .map_err(|error| VideoDecodeError::InvalidInput {
+                        reason: format!("invalid HEVC packet: {error}"),
+                    })?;
+            insert_cpu_decode_timing(
+                &mut self.pending_timing,
+                CpuDecodeTiming {
+                    pts: packet.pts,
+                    dts: packet.dts,
+                    duration: packet.duration,
+                    keyframe: packet.keyframe,
+                },
+            );
+            for decoded in feed_hevc_nals(&mut self.decoder, &annex_b)? {
+                let timing = take_cpu_decode_timing(&mut self.pending_timing, "HEVC")?;
+                output_frames.push(copy_hevc_bgra_frame(decoded, self.output_format, timing)?);
+            }
+        }
+        if input.end_of_stream {
+            if let Some(decoded) = self.decoder.flush() {
+                let timing = take_cpu_decode_timing(&mut self.pending_timing, "HEVC")?;
+                output_frames.push(copy_hevc_bgra_frame(decoded, self.output_format, timing)?);
+            }
+            if !self.pending_timing.is_empty() {
+                return Err(VideoDecodeError::BackendFailed {
+                    reason: format!(
+                        "HEVC decoder drained with {} packet timing record(s) unmatched",
+                        self.pending_timing.len()
+                    ),
+                });
+            }
+        }
+        output_frames.sort_by_key(|frame| (frame.pts.units, frame.pts.scale.units_per_second));
+        self.decoded_batches = self.decoded_batches.saturating_add(1);
+        Ok(DecodedVideoOutput {
+            stream: DecodedVideoStream {
+                format: self.output_format,
+                source_codec: VideoCodec::Hevc,
+                decoder: "chroma-cpu-hevc-decoder".to_string(),
+            },
+            frames: output_frames,
+        })
+    }
+
+    /// Returns the number of batches decoded by this software session.
+    pub fn decoded_batches(&self) -> u64 {
+        self.decoded_batches
+    }
+}
+
 impl std::fmt::Debug for CpuH264BgraDecoderSession {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -279,7 +404,7 @@ impl CpuH264BgraDecoderSession {
                         reason: format!("OpenH264 packet decode failed: {error}"),
                     })?;
             if let Some(decoded) = decoded {
-                let timing = take_cpu_decode_timing(&mut self.pending_timing)?;
+                let timing = take_cpu_decode_timing(&mut self.pending_timing, "OpenH264")?;
                 output_frames.push(copy_openh264_bgra_frame(
                     &decoded,
                     self.output_format,
@@ -294,7 +419,7 @@ impl CpuH264BgraDecoderSession {
                 }
             })?;
             for decoded in remaining {
-                let timing = take_cpu_decode_timing(&mut self.pending_timing)?;
+                let timing = take_cpu_decode_timing(&mut self.pending_timing, "OpenH264")?;
                 output_frames.push(copy_openh264_bgra_frame(
                     &decoded,
                     self.output_format,
@@ -335,6 +460,8 @@ pub enum BgraDecoderSession {
     VideoToolbox(VideoToolboxBgraDecoderSession),
     /// Portable OpenH264 software decoder.
     CpuH264(Box<CpuH264BgraDecoderSession>),
+    /// Portable safe-Rust HEVC software decoder.
+    CpuHevc(Box<CpuHevcBgraDecoderSession>),
 }
 
 impl BgraDecoderSession {
@@ -345,17 +472,16 @@ impl BgraDecoderSession {
         decoder_config: &[u8],
     ) -> Result<Self, VideoDecodeError> {
         #[cfg(target_os = "macos")]
-        match VideoToolboxBgraDecoderSession::new(codec, output_format, decoder_config) {
-            Ok(session) => return Ok(Self::VideoToolbox(session)),
-            Err(error) if codec == VideoCodec::Hevc => return Err(error),
-            Err(_) => {}
+        if let Ok(session) =
+            VideoToolboxBgraDecoderSession::new(codec, output_format, decoder_config)
+        {
+            return Ok(Self::VideoToolbox(session));
         }
         match codec {
             VideoCodec::H264 => CpuH264BgraDecoderSession::new(output_format, decoder_config)
                 .map(|session| Self::CpuH264(Box::new(session))),
-            VideoCodec::Hevc => Err(VideoDecodeError::BackendUnavailable {
-                reason: "no executable HEVC decoder is available on this host".to_string(),
-            }),
+            VideoCodec::Hevc => CpuHevcBgraDecoderSession::new(output_format, decoder_config)
+                .map(|session| Self::CpuHevc(Box::new(session))),
         }
     }
 
@@ -367,6 +493,7 @@ impl BgraDecoderSession {
         match self {
             Self::VideoToolbox(session) => session.decode(input),
             Self::CpuH264(session) => session.decode(input),
+            Self::CpuHevc(session) => session.decode(input),
         }
     }
 
@@ -375,6 +502,7 @@ impl BgraDecoderSession {
         match self {
             Self::VideoToolbox(session) => session.decoded_batches(),
             Self::CpuH264(session) => session.decoded_batches(),
+            Self::CpuHevc(session) => session.decoded_batches(),
         }
     }
 
@@ -386,6 +514,7 @@ impl BgraDecoderSession {
                 VideoCodec::Hevc => "chroma-videotoolbox-hevc-decoder",
             },
             Self::CpuH264(_) => "chroma-cpu-h264-decoder",
+            Self::CpuHevc(_) => "chroma-cpu-hevc-decoder",
         }
     }
 }
@@ -408,13 +537,145 @@ fn insert_cpu_decode_timing(pending: &mut Vec<CpuDecodeTiming>, timing: CpuDecod
 
 fn take_cpu_decode_timing(
     pending: &mut Vec<CpuDecodeTiming>,
+    backend: &str,
 ) -> Result<CpuDecodeTiming, VideoDecodeError> {
     if pending.is_empty() {
         return Err(VideoDecodeError::BackendFailed {
-            reason: "OpenH264 emitted a frame without matching packet timing".to_string(),
+            reason: format!("{backend} emitted a frame without matching packet timing"),
         });
     }
     Ok(pending.remove(0))
+}
+
+fn validate_packet_time_scale(
+    packet: &CompressedVideoPacket<'_>,
+    time_scale: TimeScale,
+) -> Result<(), VideoDecodeError> {
+    if packet.pts.scale != time_scale
+        || packet.dts.scale != time_scale
+        || packet.duration.scale != time_scale
+    {
+        return Err(VideoDecodeError::InvalidInput {
+            reason: "packet timestamps must match the decode input time scale".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn feed_hevc_nals(
+    decoder: &mut rust_h265::Decoder,
+    annex_b: &[u8],
+) -> Result<Vec<rust_h265::Frame>, VideoDecodeError> {
+    let nals = rust_h265::parse_annex_b(annex_b);
+    if nals.is_empty() {
+        return Err(VideoDecodeError::InvalidInput {
+            reason: "HEVC Annex-B packet contains no NAL units".to_string(),
+        });
+    }
+    let mut frames = Vec::new();
+    for nal in &nals {
+        if let Some(frame) =
+            decoder
+                .decode_nal(nal)
+                .map_err(|error| VideoDecodeError::BackendFailed {
+                    reason: format!("HEVC packet decode failed: {error}"),
+                })?
+        {
+            frames.push(frame);
+        }
+    }
+    Ok(frames)
+}
+
+fn copy_hevc_bgra_frame(
+    decoded: rust_h265::Frame,
+    format: RawVideoFormat,
+    timing: CpuDecodeTiming,
+) -> Result<DecodedVideoFrame, VideoDecodeError> {
+    if (decoded.width, decoded.height) != (format.width, format.height) {
+        return Err(VideoDecodeError::InvalidOutputFormat {
+            reason: format!(
+                "HEVC decoded {}x{}, expected {}x{}",
+                decoded.width, decoded.height, format.width, format.height
+            ),
+        });
+    }
+    let width = format.width as usize;
+    let height = format.height as usize;
+    let chroma_width = width.div_ceil(2);
+    let chroma_height = height.div_ceil(2);
+    let luma_pixels =
+        width
+            .checked_mul(height)
+            .ok_or_else(|| VideoDecodeError::InvalidOutputFormat {
+                reason: "HEVC decoded luma dimensions overflowed".to_string(),
+            })?;
+    let chroma_pixels = chroma_width.checked_mul(chroma_height).ok_or_else(|| {
+        VideoDecodeError::InvalidOutputFormat {
+            reason: "HEVC decoded chroma dimensions overflowed".to_string(),
+        }
+    })?;
+    if decoded.y.len() != luma_pixels
+        || decoded.u.len() != chroma_pixels
+        || decoded.v.len() != chroma_pixels
+    {
+        return Err(VideoDecodeError::InvalidOutputFormat {
+            reason: "HEVC decoder returned invalid YUV420 plane sizes".to_string(),
+        });
+    }
+    let byte_count =
+        luma_pixels
+            .checked_mul(4)
+            .ok_or_else(|| VideoDecodeError::InvalidOutputFormat {
+                reason: "HEVC decoded BGRA byte count overflowed".to_string(),
+            })?;
+    let mut pixels = vec![0_u8; byte_count];
+    for row in 0..height {
+        for column in 0..width {
+            let y = hevc_pixel_to_u8(&decoded.y, row * width + column, decoded.bit_depth)?;
+            let chroma_index = (row / 2) * chroma_width + column / 2;
+            let u = hevc_pixel_to_u8(&decoded.u, chroma_index, decoded.bit_depth)?;
+            let v = hevc_pixel_to_u8(&decoded.v, chroma_index, decoded.bit_depth)?;
+            let c = i32::from(y).saturating_sub(16);
+            let d = i32::from(u) - 128;
+            let e = i32::from(v) - 128;
+            let red = ((298 * c + 459 * e + 128) >> 8).clamp(0, 255) as u8;
+            let green = ((298 * c - 55 * d - 136 * e + 128) >> 8).clamp(0, 255) as u8;
+            let blue = ((298 * c + 541 * d + 128) >> 8).clamp(0, 255) as u8;
+            let offset = (row * width + column) * 4;
+            pixels[offset..offset + 4].copy_from_slice(&[blue, green, red, 255]);
+        }
+    }
+    Ok(DecodedVideoFrame {
+        pts: timing.pts,
+        dts: timing.dts,
+        duration: timing.duration,
+        format,
+        pixels,
+        keyframe: timing.keyframe,
+    })
+}
+
+fn hevc_pixel_to_u8(
+    plane: &rust_h265::PixelData,
+    index: usize,
+    bit_depth: u8,
+) -> Result<u8, VideoDecodeError> {
+    if !(8..=16).contains(&bit_depth) {
+        return Err(VideoDecodeError::InvalidOutputFormat {
+            reason: format!("HEVC decoder returned unsupported {bit_depth}-bit pixels"),
+        });
+    }
+    match plane {
+        rust_h265::PixelData::U8(values) => values.get(index).copied(),
+        rust_h265::PixelData::U16(values) => values.get(index).map(|value| {
+            let shift = bit_depth.saturating_sub(8);
+            (value >> shift).min(255) as u8
+        }),
+    }
+    .ok_or_else(|| VideoDecodeError::InvalidOutputFormat {
+        reason: "HEVC decoder returned a truncated pixel plane".to_string(),
+    })
 }
 
 fn copy_openh264_bgra_frame(
@@ -579,6 +840,20 @@ pub fn decode_h264_cpu_bgra_frames(
         .decoder_config
         .ok_or(VideoDecodeError::MissingDecoderConfig)?;
     CpuH264BgraDecoderSession::new(output_format, decoder_config)?.decode(input)
+}
+
+/// Decodes HEVC length-prefixed packets to tightly packed BGRA using portable CPU software.
+pub fn decode_hevc_cpu_bgra_frames(
+    input: &VideoDecodeInput<'_>,
+    output_format: RawVideoFormat,
+) -> Result<DecodedVideoOutput, VideoDecodeError> {
+    if input.codec != VideoCodec::Hevc {
+        return Err(VideoDecodeError::UnsupportedCodec);
+    }
+    let decoder_config = input
+        .decoder_config
+        .ok_or(VideoDecodeError::MissingDecoderConfig)?;
+    CpuHevcBgraDecoderSession::new(output_format, decoder_config)?.decode(input)
 }
 
 /// Builds zero-copy compressed video packets from extracted chunk metadata.
@@ -1607,6 +1882,139 @@ mod tests {
                 .iter()
                 .all(|frame| { frame.format == format && frame.pixels.len() == frame_bytes })
         );
+    }
+
+    #[test]
+    fn cpu_hevc_decodes_real_access_unit_to_bgra() {
+        const VPS: &[u8] = &[
+            0x40, 0x01, 0x0c, 0x01, 0xff, 0xff, 0x03, 0x70, 0x00, 0x00, 0x03, 0x00, 0x90, 0x00,
+            0x00, 0x03, 0x00, 0x00, 0x03, 0x00, 0x1e, 0xba, 0x02, 0x40,
+        ];
+        const SPS: &[u8] = &[
+            0x42, 0x01, 0x01, 0x03, 0x70, 0x00, 0x00, 0x03, 0x00, 0x90, 0x00, 0x00, 0x03, 0x00,
+            0x00, 0x03, 0x00, 0x1e, 0xa0, 0x88, 0x45, 0x96, 0xe9, 0x7c, 0x2e, 0x01, 0x00, 0x00,
+            0x03, 0x03, 0xe8, 0x00, 0x00, 0x03, 0x03, 0xe8, 0x08,
+        ];
+        const PPS: &[u8] = &[0x44, 0x01, 0xc0, 0x71, 0x81, 0xa4, 0x80];
+        const IDR: &[u8] = &[0x28, 0x01, 0xac, 0x4c, 0xed, 0xdb, 0xaf, 0xfc, 0x42, 0x40];
+
+        let decoder_config = hevc_test_config(&[(32, VPS), (33, SPS), (34, PPS)]);
+        let mut packet = Vec::with_capacity(IDR.len() + 4);
+        packet.extend_from_slice(&(IDR.len() as u32).to_be_bytes());
+        packet.extend_from_slice(IDR);
+        let scale = TimeScale {
+            units_per_second: 24,
+        };
+        let input = VideoDecodeInput {
+            codec: VideoCodec::Hevc,
+            time_scale: scale,
+            decoder_config: Some(&decoder_config),
+            packets: vec![CompressedVideoPacket {
+                index: 0,
+                pts: TimePoint { units: 0, scale },
+                dts: TimePoint { units: 0, scale },
+                duration: TimeDelta { units: 1, scale },
+                keyframe: true,
+                bytes: &packet,
+            }],
+            end_of_stream: true,
+        };
+        let format = RawVideoFormat {
+            width: 16,
+            height: 16,
+            frame_rate_num: 24,
+            frame_rate_den: 1,
+            pixel_format: RawVideoPixelFormat::Bgra,
+        };
+
+        let decoded = decode_hevc_cpu_bgra_frames(&input, format).expect("decode HEVC fixture");
+
+        assert_eq!(decoded.stream.decoder, "chroma-cpu-hevc-decoder");
+        assert_eq!(decoded.frames.len(), 1);
+        assert_eq!(decoded.frames[0].pixels.len(), 16 * 16 * 4);
+        assert!(
+            decoded.frames[0]
+                .pixels
+                .chunks_exact(4)
+                .all(|pixel| pixel[3] == 255)
+        );
+    }
+
+    #[test]
+    fn cpu_hevc_converts_main10_planes_to_bgra() {
+        let format = RawVideoFormat {
+            width: 2,
+            height: 2,
+            frame_rate_num: 24,
+            frame_rate_den: 1,
+            pixel_format: RawVideoPixelFormat::Bgra,
+        };
+        let scale = TimeScale {
+            units_per_second: 24,
+        };
+        let frame = rust_h265::Frame {
+            y: rust_h265::PixelData::U16(vec![256; 4]),
+            u: rust_h265::PixelData::U16(vec![512]),
+            v: rust_h265::PixelData::U16(vec![512]),
+            width: 2,
+            height: 2,
+            pic_order_cnt: 0,
+            bit_depth: 10,
+        };
+        let converted = copy_hevc_bgra_frame(
+            frame,
+            format,
+            CpuDecodeTiming {
+                pts: TimePoint { units: 0, scale },
+                dts: TimePoint { units: 0, scale },
+                duration: TimeDelta { units: 1, scale },
+                keyframe: true,
+            },
+        )
+        .expect("convert Main10 frame");
+
+        assert_eq!(converted.pixels.len(), 16);
+        assert!(
+            converted
+                .pixels
+                .chunks_exact(4)
+                .all(|pixel| { pixel[0] == pixel[1] && pixel[1] == pixel[2] && pixel[3] == 255 })
+        );
+    }
+
+    fn hevc_test_config(arrays: &[(u8, &[u8])]) -> Vec<u8> {
+        let mut config = vec![
+            1,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            120,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            3,
+            arrays.len() as u8,
+        ];
+        for (nal_type, unit) in arrays {
+            config.push(0x80 | nal_type);
+            config.extend_from_slice(&1_u16.to_be_bytes());
+            config.extend_from_slice(&(unit.len() as u16).to_be_bytes());
+            config.extend_from_slice(unit);
+        }
+        config
     }
 
     #[cfg(target_os = "macos")]
