@@ -588,12 +588,9 @@ fn prepare_transcode(
         options.video_track_id.as_deref(),
     )
     .ok_or_else(|| anyhow::anyhow!("no matching Matroska video track found"))?;
-    let (audio_track_id, audio_track) = select_matroska_track(
-        &meta.tracks,
-        MatroskaTrackKind::Audio,
-        options.audio_track_id.as_deref(),
-    )
-    .ok_or_else(|| anyhow::anyhow!("no matching Matroska audio track found"))?;
+    let (audio_track_id, audio_track) =
+        select_matroska_audio_track(&meta.tracks, options.audio_track_id.as_deref())
+            .ok_or_else(|| anyhow::anyhow!("no matching Matroska audio track found"))?;
     let video_codec = video_codec_from_label(&video_track.codec)?;
     let decoder_config = video_track
         .codec_private
@@ -862,6 +859,39 @@ fn select_matroska_track<'a>(
     } else {
         fallback
     }
+}
+
+fn select_matroska_audio_track<'a>(
+    tracks: &'a [MatroskaTrack],
+    requested_track_id: Option<&str>,
+) -> Option<(String, &'a MatroskaTrack)> {
+    let audio_tracks = tracks
+        .iter()
+        .filter(|track| track.kind == MatroskaTrackKind::Audio)
+        .enumerate()
+        .map(|(index, track)| (format!("a{index}"), track))
+        .collect::<Vec<_>>();
+    if let Some(requested) = requested_track_id {
+        return audio_tracks
+            .into_iter()
+            .find(|(track_id, _)| track_id == requested);
+    }
+
+    audio_tracks
+        .iter()
+        .find(|(_, track)| track.default && matroska_audio_track_executable(track))
+        .or_else(|| {
+            audio_tracks
+                .iter()
+                .find(|(_, track)| matroska_audio_track_executable(track))
+        })
+        .or_else(|| audio_tracks.iter().find(|(_, track)| track.default))
+        .or_else(|| audio_tracks.first())
+        .map(|(track_id, track)| (track_id.clone(), *track))
+}
+
+fn matroska_audio_track_executable(track: &MatroskaTrack) -> bool {
+    matches!(track.codec.as_str(), "aac" | "ac3" | "eac3" | "truehd")
 }
 
 fn video_codec_from_label(codec: &str) -> Result<VideoCodec> {
@@ -1315,6 +1345,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn matroska_audio_selection_prefers_executable_alternate() {
+        let tracks = vec![
+            test_audio_track("dts", true),
+            test_audio_track("truehd", false),
+            test_audio_track("ac3", false),
+        ];
+
+        let (track_id, track) =
+            select_matroska_audio_track(&tracks, None).expect("selected audio track");
+
+        assert_eq!(track_id, "a1");
+        assert_eq!(track.codec, "truehd");
+        let (explicit_id, explicit) =
+            select_matroska_audio_track(&tracks, Some("a0")).expect("explicit audio track");
+        assert_eq!(explicit_id, "a0");
+        assert_eq!(explicit.codec, "dts");
+    }
+
+    #[test]
     fn transcodes_truehd_fixture_to_clocked_aac_fragment() {
         let payload = truehd::process::EXAMPLE_DATA.to_vec();
         let source_pts = TimePoint::millis(500);
@@ -1395,5 +1444,27 @@ mod tests {
         assert!(playlist.contains("#EXT-X-MEDIA-SEQUENCE:4"));
         assert!(playlist.contains("#EXTINF:4.125,\nseg-00004.m4s"));
         assert!(playlist.ends_with("#EXT-X-ENDLIST\n"));
+    }
+
+    fn test_audio_track(codec: &str, default: bool) -> MatroskaTrack {
+        MatroskaTrack {
+            index: 0,
+            number: 1,
+            kind: MatroskaTrackKind::Audio,
+            codec: codec.to_string(),
+            language: Some("eng".to_string()),
+            name: None,
+            default,
+            forced: false,
+            width: None,
+            height: None,
+            pixel_format: None,
+            channels: Some(6),
+            sample_rate: Some(48_000),
+            atmos: false,
+            object_audio_candidate: false,
+            default_duration_ns: None,
+            codec_private: None,
+        }
     }
 }

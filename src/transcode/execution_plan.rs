@@ -332,6 +332,18 @@ fn select_audio_track<'a>(
                 .copied()
                 .find(|track| audio_can_copy_for_hls(track, target))
         })
+        .or_else(|| {
+            tracks
+                .iter()
+                .copied()
+                .find(|track| track.flags.default && native_audio_decode_ready(track.codec.family))
+        })
+        .or_else(|| {
+            tracks
+                .iter()
+                .copied()
+                .find(|track| native_audio_decode_ready(track.codec.family))
+        })
         .or_else(|| tracks.iter().copied().find(|track| track.flags.default))
         .or_else(|| tracks.first().copied())
 }
@@ -685,6 +697,21 @@ mod tests {
         assert_eq!(plan.selected_audio_track_id.as_deref(), Some("a1"));
         assert!(plan.engine_executable);
         assert_eq!(plan.output.audio.as_ref().unwrap().codec, AudioCodec::Ac3);
+    }
+
+    #[test]
+    fn primary_audio_prefers_executable_truehd_over_unsupported_default() {
+        let probe = probe_with_tracks(vec![
+            video_track("v0", CodecFamily::H264, 1_920, 1_080, 8_000_000, None),
+            audio_track("a0", CodecFamily::Dts, true, 6, 48_000, Some(1_536_000)),
+            audio_track("a1", CodecFamily::TrueHd, false, 8, 48_000, Some(4_000_000)),
+        ]);
+
+        let plan = plan_hls_transcode(&probe, request(PlaybackTarget::Browser, false, None));
+
+        assert_eq!(plan.selected_audio_track_id.as_deref(), Some("a1"));
+        assert!(plan.engine_executable);
+        assert_eq!(plan.output.audio.as_ref().unwrap().codec, AudioCodec::Aac);
     }
 
     #[test]

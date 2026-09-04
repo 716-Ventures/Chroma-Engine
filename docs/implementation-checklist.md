@@ -141,6 +141,7 @@
 - [x] macOS VideoToolbox BGRA decode primitive. Chroma Engine can now accept H.264/HEVC compressed packet batches plus avcC/hvcC config and return owned decoded BGRA frames through a Rust-first API.
 - [x] Native compressed video decode backend for HEVC/H.264 Matroska sources that need target-native fMP4 HLS output. VideoToolbox feeds a bounded BGRA-to-H.264 pump owned by the retained transcode session.
 - [x] Native TrueHD decode bridge for MKV audio tracks that have no AAC/AC-3/E-AC-3 alternate. The portable decoder feeds AAC-LC access units into fMP4 while preserving the source sample-clock anchor.
+- [x] Keep audio routing executable across planning and segment generation. Copy-compatible tracks rank first, portable TrueHD-to-AAC ranks ahead of unsupported defaults, and explicit track selection remains authoritative. Verified without an audio override on the DTS-first Gremlins remux: native execution selected `a1` AC-3 and emitted a valid HEVC/AC-3 fMP4 segment in 0.97 seconds at about 11.4 MB maximum RSS.
 - [ ] Native DTS decode bridge for MKV audio tracks that have no copy-compatible alternate. Follow the FFmpeg send/receive/drain state-machine shape and AetherEngine's copy-first/bridge-only policy, but keep the API Chroma-native.
 
 ## Integration

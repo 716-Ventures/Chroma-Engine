@@ -369,6 +369,17 @@ fn primary_audio_track(probe: &MediaProbe, target: PlaybackTarget) -> Option<&Me
                 .find(|track| track_can_copy_for_target(track, target))
         })
         .or_else(|| {
+            audio_tracks.iter().copied().find(|track| {
+                track.flags.default && audio_can_transcode_for_target(track.codec.family, target)
+            })
+        })
+        .or_else(|| {
+            audio_tracks
+                .iter()
+                .copied()
+                .find(|track| audio_can_transcode_for_target(track.codec.family, target))
+        })
+        .or_else(|| {
             audio_tracks
                 .iter()
                 .copied()
@@ -468,6 +479,10 @@ fn audio_can_copy_for_target(family: CodecFamily, target: PlaybackTarget) -> boo
             CodecFamily::Aac | CodecFamily::Mp3 | CodecFamily::Opus
         ),
     }
+}
+
+fn audio_can_transcode_for_target(family: CodecFamily, target: PlaybackTarget) -> bool {
+    target != PlaybackTarget::NativeChroma && family == CodecFamily::TrueHd
 }
 
 fn subtitle_can_copy_for_target(family: CodecFamily, target: PlaybackTarget) -> bool {
@@ -604,6 +619,33 @@ mod tests {
             track("v0", TrackKind::Video, CodecFamily::H264),
             track("a0", TrackKind::Audio, CodecFamily::Dts),
             default_track("a1", TrackKind::Audio, CodecFamily::TrueHd),
+        ]);
+        let plan = plan_playback(
+            &probe,
+            PlaybackConstraints {
+                target: PlaybackTarget::Browser,
+                ..PlaybackConstraints::default()
+            },
+        );
+
+        assert_eq!(
+            plan.selected_tracks,
+            vec!["v0".to_string(), "a1".to_string()]
+        );
+        let decode = plan
+            .stages
+            .iter()
+            .find(|stage| stage.id == "decode0")
+            .expect("decode stage");
+        assert_eq!(decode.track_ids, vec!["a1".to_string()]);
+    }
+
+    #[test]
+    fn primary_audio_prefers_executable_bridge_over_unsupported_default() {
+        let probe = probe_with_tracks(vec![
+            track("v0", TrackKind::Video, CodecFamily::H264),
+            default_track("a0", TrackKind::Audio, CodecFamily::Dts),
+            track("a1", TrackKind::Audio, CodecFamily::TrueHd),
         ]);
         let plan = plan_playback(
             &probe,

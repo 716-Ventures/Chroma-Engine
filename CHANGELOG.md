@@ -15,6 +15,8 @@
   selection and source-anchored audio timing on macOS, Windows, Linux, and Linux-based NAS targets.
 - Replaced eager whole-file Matroska transcode indexes with cue-derived plans and bounded
   per-segment packet windows, and normalized packet-copy composition offsets before fMP4 muxing.
+- Unified audio selection across playback planning, transcode planning, and Matroska execution so
+  copyable tracks remain preferred and portable TrueHD bridges outrank unsupported DTS defaults.
 - Added native Ubuntu ARM64 and Windows ARM64 CI checks, portable-codec tests, and release builds.
 - Added retained VideoToolbox H.264/HEVC decoder and H.264 encoder sessions plus retained
   AudioToolbox AAC converter sessions, with explicit batch counters and discontinuity resets.
