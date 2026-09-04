@@ -182,6 +182,14 @@ jobs:
           $dav1d = Get-ChildItem "$env:VCPKG_INSTALLATION_ROOT/installed/$triplet/bin" -Filter "dav1d.dll" | Select-Object -First 1
           if (-not $dav1d) { throw "vcpkg dav1d runtime DLL was not found" }
           Copy-Item $dav1d.FullName $bundle
+      - name: Smoke bundled Unix runtime
+        if: runner.os != 'Windows'
+        shell: bash
+        run: dist/chroma-engine/chroma-engine decoder-probe
+      - name: Smoke bundled Windows runtime
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: dist/chroma-engine/chroma-engine.exe decoder-probe
       - name: Upload portable release bundle
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:

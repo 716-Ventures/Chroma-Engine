@@ -125,6 +125,7 @@
 - [x] Portable CPU H.264 encoder. A retained OpenH264 session accepts BGRA frames and emits AVCC access units plus avcC decoder configuration on macOS, Windows, Linux, and Linux-based NAS hosts.
 - [x] Portable CPU H.264 decoder. A retained OpenH264 session converts AVCC packets into timestamped BGRA frames and can feed the same bounded decode/scale/encode pipeline as VideoToolbox.
 - [x] Portable HEVC Main/Main10 video decoder. A retained safe-Rust session accepts hvcC/length-prefixed packets, decodes 8-bit and 10-bit YUV420, and emits BGRA through the same bounded pipeline on macOS, Windows, Linux, and Linux-based NAS hosts.
+- [x] Portable AV1 video decoder. A retained `dav1d-rs` session accepts low-overhead AV1 packets, converts 8/10/12-bit planar output to BGRA, and feeds the bounded H.264 transcode pipeline. Redistributable synthetic 8-bit and 10-bit fixtures gate one-shot and retained multi-batch decode/encode behavior.
 - [x] Portable TrueHD audio decoder. Safe Rust TrueHD decoding selects the format-defined six-channel-or-smaller presentation and feeds the portable AAC/fMP4 bridge on macOS, Windows, Linux, and Linux-based NAS hosts.
 - [ ] Portable DTS audio decoder. DTS remains a deterministic missing capability; the rejected oxideav implementation must not return without real-media latency evidence.
 - [ ] Linux executable VAAPI/NVENC/QSV path. Capability models exist, but no Linux decode/encode backend is executable or verified yet.

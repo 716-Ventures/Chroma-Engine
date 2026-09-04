@@ -209,8 +209,15 @@ impl CpuAv1BgraDecoderSession {
     /// Creates a portable AV1 decoder. AV1 packets carry their sequence headers in-band.
     pub fn new(output_format: RawVideoFormat) -> Result<Self, VideoDecodeError> {
         validate_decoded_video_format(output_format)?;
-        let decoder = dav1d::Decoder::new().map_err(|error| VideoDecodeError::BackendFailed {
-            reason: format!("dav1d decoder initialization failed: {error}"),
+        let mut settings = dav1d::Settings::default();
+        // Keep streaming latency and retained-session memory bounded. Throughput still
+        // benefits from dav1d's internal threading, but pictures cannot accumulate
+        // behind an unbounded frame-delay window between HLS packet batches.
+        settings.set_max_frame_delay(1);
+        let decoder = dav1d::Decoder::with_settings(&settings).map_err(|error| {
+            VideoDecodeError::BackendFailed {
+                reason: format!("dav1d decoder initialization failed: {error}"),
+            }
         })?;
         Ok(Self {
             output_format,
@@ -857,17 +864,17 @@ fn copy_dav1d_bgra_frame(
             reason: "AV1 decoded BGRA byte count overflowed".to_string(),
         })?;
     let layout = picture.pixel_layout();
-    let storage_bits = picture.bit_depth();
     let component_bits = picture
         .bits_per_component()
         .map(|bits| bits.0)
         .ok_or_else(|| VideoDecodeError::InvalidOutputFormat {
             reason: "dav1d returned an unknown component depth".to_string(),
         })?;
-    if !matches!(storage_bits, 8 | 16) || !(8..=12).contains(&component_bits) {
+    let reported_bits = picture.bit_depth();
+    if !(8..=12).contains(&component_bits) || reported_bits != component_bits {
         return Err(VideoDecodeError::InvalidOutputFormat {
             reason: format!(
-                "dav1d returned unsupported {component_bits}-bit components in {storage_bits}-bit storage"
+                "dav1d returned unsupported component depth {component_bits} (reported {reported_bits})"
             ),
         });
     }
@@ -876,7 +883,7 @@ fn copy_dav1d_bgra_frame(
     let v_plane = picture.plane(PlanarImageComponent::V);
     let y_stride = picture.stride(PlanarImageComponent::Y) as usize;
     let uv_stride = picture.stride(PlanarImageComponent::U) as usize;
-    let bytes_per_component = storage_bits / 8;
+    let bytes_per_component = if component_bits == 8 { 1 } else { 2 };
     let chroma_width = match layout {
         PixelLayout::I400 => 0,
         PixelLayout::I420 | PixelLayout::I422 => width.div_ceil(2),
@@ -917,14 +924,7 @@ fn copy_dav1d_bgra_frame(
     let mut pixels = vec![0_u8; byte_count];
     for row in 0..height {
         for column in 0..width {
-            let y = dav1d_sample_u8(
-                y_plane.as_ref(),
-                y_stride,
-                row,
-                column,
-                storage_bits,
-                component_bits,
-            )?;
+            let y = dav1d_sample_u8(y_plane.as_ref(), y_stride, row, column, component_bits)?;
             let (u, v) = if layout == PixelLayout::I400 {
                 (128, 128)
             } else {
@@ -944,7 +944,6 @@ fn copy_dav1d_bgra_frame(
                         uv_stride,
                         chroma_row,
                         chroma_column,
-                        storage_bits,
                         component_bits,
                     )?,
                     dav1d_sample_u8(
@@ -952,7 +951,6 @@ fn copy_dav1d_bgra_frame(
                         uv_stride,
                         chroma_row,
                         chroma_column,
-                        storage_bits,
                         component_bits,
                     )?,
                 )
@@ -1009,17 +1007,16 @@ fn dav1d_sample_u8(
     stride: usize,
     row: usize,
     column: usize,
-    storage_bits: usize,
     component_bits: usize,
 ) -> Result<u8, VideoDecodeError> {
-    let bytes_per_component = storage_bits / 8;
+    let bytes_per_component = if component_bits == 8 { 1 } else { 2 };
     let offset = row
         .checked_mul(stride)
         .and_then(|value| value.checked_add(column.checked_mul(bytes_per_component)?))
         .ok_or_else(|| VideoDecodeError::InvalidOutputFormat {
             reason: "dav1d plane offset overflowed".to_string(),
         })?;
-    let value = if storage_bits == 8 {
+    let value = if component_bits == 8 {
         u16::from(
             *plane
                 .get(offset)
@@ -2278,6 +2275,187 @@ mod tests {
                 .iter()
                 .all(|frame| { frame.format == format && frame.pixels.len() == frame_bytes })
         );
+    }
+
+    #[test]
+    fn dav1d_decodes_redistributable_8_bit_fixture() {
+        let fixture = parse_av1_fixture(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/av1/testsrc2-32x32-8bit.txt"
+        )));
+        let input = build_video_decode_input(
+            VideoCodec::Av1,
+            fixture.time_scale,
+            None,
+            &fixture.samples,
+            &fixture.payload,
+            true,
+        )
+        .unwrap();
+
+        let output = decode_av1_cpu_bgra_frames(&input, fixture.format).unwrap();
+
+        assert_eq!(output.stream.decoder, "chroma-dav1d-av1-decoder");
+        assert_eq!(output.frames.len(), 4);
+        assert_av1_fixture_frames(&output.frames, fixture.format, fixture.time_scale);
+    }
+
+    #[test]
+    fn dav1d_retains_state_across_10_bit_packet_batches() {
+        use crate::transcode::CpuH264EncoderSession;
+
+        let fixture = parse_av1_fixture(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/av1/testsrc2-32x32-10bit.txt"
+        )));
+        let mut decoder = CpuAv1BgraDecoderSession::new(fixture.format).unwrap();
+        let first = build_video_decode_input(
+            VideoCodec::Av1,
+            fixture.time_scale,
+            None,
+            &fixture.samples[..2],
+            &fixture.payload,
+            false,
+        )
+        .unwrap();
+        let second = build_video_decode_input(
+            VideoCodec::Av1,
+            fixture.time_scale,
+            None,
+            &fixture.samples[2..],
+            &fixture.payload,
+            true,
+        )
+        .unwrap();
+
+        let first_frames = decoder.decode(&first).unwrap().frames;
+        let second_frames = decoder.decode(&second).unwrap().frames;
+        assert_eq!(first_frames.len(), 2);
+        assert_eq!(second_frames.len(), 2);
+
+        let mut encoder = CpuH264EncoderSession::new(fixture.format, 250_000).unwrap();
+        let first_refs = raw_frame_refs(&first_frames);
+        let second_refs = raw_frame_refs(&second_frames);
+        let first_encoded = encoder.encode(&first_refs).unwrap();
+        let second_encoded = encoder.encode(&second_refs).unwrap();
+        assert_eq!(first_encoded.frames.len() + second_encoded.frames.len(), 4);
+        assert_eq!(encoder.encoded_batches(), 2);
+
+        let mut frames = first_frames;
+        frames.extend(second_frames);
+
+        assert_eq!(decoder.decoded_batches(), 2);
+        assert_eq!(frames.len(), 4);
+        frames.sort_by_key(|frame| frame.pts.units);
+        assert_av1_fixture_frames(&frames, fixture.format, fixture.time_scale);
+    }
+
+    struct Av1Fixture {
+        format: RawVideoFormat,
+        time_scale: TimeScale,
+        samples: Vec<ChunkSample>,
+        payload: Vec<u8>,
+    }
+
+    fn parse_av1_fixture(source: &str) -> Av1Fixture {
+        let mut lines = source
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'));
+        let header = lines.next().unwrap().split_whitespace().collect::<Vec<_>>();
+        let width = header[0].parse().unwrap();
+        let height = header[1].parse().unwrap();
+        let time_scale = TimeScale {
+            units_per_second: header[2].parse().unwrap(),
+        };
+        let mut samples = Vec::new();
+        let mut payload = Vec::new();
+        for line in lines {
+            let fields = line.split_whitespace().collect::<Vec<_>>();
+            let bytes = decode_hex(fields[4]);
+            let payload_offset = payload.len() as u64;
+            payload.extend_from_slice(&bytes);
+            let pts = TimePoint {
+                units: fields[1].parse().unwrap(),
+                scale: time_scale,
+            };
+            samples.push(ChunkSample {
+                index: fields[0].parse().unwrap(),
+                payload_offset,
+                byte_count: bytes.len() as u32,
+                pts,
+                dts: pts,
+                duration: TimeDelta {
+                    units: fields[2].parse().unwrap(),
+                    scale: time_scale,
+                },
+                keyframe: fields[3] == "1",
+            });
+        }
+        Av1Fixture {
+            format: RawVideoFormat {
+                width,
+                height,
+                frame_rate_num: 4,
+                frame_rate_den: 1,
+                pixel_format: RawVideoPixelFormat::Bgra,
+            },
+            time_scale,
+            samples,
+            payload,
+        }
+    }
+
+    fn decode_hex(hex: &str) -> Vec<u8> {
+        assert_eq!(hex.len() % 2, 0);
+        hex.as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                let pair = std::str::from_utf8(pair).unwrap();
+                u8::from_str_radix(pair, 16).unwrap()
+            })
+            .collect()
+    }
+
+    fn assert_av1_fixture_frames(
+        frames: &[DecodedVideoFrame],
+        format: RawVideoFormat,
+        time_scale: TimeScale,
+    ) {
+        let expected_pts = [0, 250_000_000, 500_000_000, 750_000_000];
+        for (frame, expected_pts) in frames.iter().zip(expected_pts) {
+            assert_eq!(frame.format, format);
+            assert_eq!(
+                frame.pts,
+                TimePoint {
+                    units: expected_pts,
+                    scale: time_scale
+                }
+            );
+            assert_eq!(
+                frame.duration,
+                TimeDelta {
+                    units: 250_000_000,
+                    scale: time_scale
+                }
+            );
+            assert_eq!(frame.pixels.len(), 32 * 32 * 4);
+            assert!(frame.pixels.chunks_exact(4).all(|pixel| pixel[3] == 255));
+            assert!(frame.pixels.windows(2).any(|pair| pair[0] != pair[1]));
+        }
+    }
+
+    fn raw_frame_refs(frames: &[DecodedVideoFrame]) -> Vec<crate::transcode::RawVideoFrameRef<'_>> {
+        frames
+            .iter()
+            .map(|frame| crate::transcode::RawVideoFrameRef {
+                pts: frame.pts,
+                dts: frame.pts,
+                duration: frame.duration,
+                bytes: &frame.pixels,
+                keyframe: frame.keyframe,
+            })
+            .collect()
     }
 
     #[test]
