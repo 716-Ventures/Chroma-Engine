@@ -120,14 +120,14 @@
 - [x] fMP4 adapter for encoded audio frames. Native audio backend output can be packed into fMP4 fragment tracks with contiguous sample-clock validation before player-visible muxing.
 - [x] macOS VideoToolbox H.264 encode. Native BGRA frames encode through VideoToolbox to length-prefixed AVC access units with avcC decoder config and stable frame timing.
 - [x] macOS VideoToolbox HEVC encode. Native BGRA frames encode through VideoToolbox to length-prefixed HEVC access units with hvcC decoder config and stable frame timing.
-- [x] AAC audio encode. macOS AudioToolbox backend encodes interleaved i16 PCM to AAC-LC, emits MPEG-4 AudioSpecificConfig, and returns sample-clocked `EncodedAudioFrame` payloads.
+- [x] AAC audio encode. macOS AudioToolbox remains preferred, with a safe scalar Rust fallback for Windows, Linux, macOS, and Linux-based NAS hosts. Both encode interleaved i16 PCM to raw AAC-LC access units with MPEG-4 AudioSpecificConfig and sample-clocked `EncodedAudioFrame` payloads.
 - [ ] AC-3/E-AC-3 bridge encode. The previous oxideav experiment was removed because it was not suitable for real playback latency; this remains a native backend gap.
 - [x] Portable CPU H.264 encoder. A retained OpenH264 session accepts BGRA frames and emits AVCC access units plus avcC decoder configuration on macOS, Windows, Linux, and Linux-based NAS hosts.
 - [x] Portable CPU H.264 decoder. A retained OpenH264 session converts AVCC packets into timestamped BGRA frames and can feed the same bounded decode/scale/encode pipeline as VideoToolbox.
-- [ ] Portable HEVC video decoder and AAC encoder. Non-macOS full transcode is currently limited to H.264 sources with copy-compatible audio.
+- [ ] Portable HEVC video decoder and compressed-audio decoder. Portable H.264 decode/encode and AAC encode are executable, but non-macOS full transcode still requires copy-compatible input audio until native audio decode lands.
 - [ ] Linux executable VAAPI/NVENC/QSV path. Capability models exist, but no Linux decode/encode backend is executable or verified yet.
 - [ ] Windows executable NVENC/QSV/AMF/D3D path. Capability models exist, but no Windows decode/encode backend is executable or verified yet.
-- [x] Warm encoder session initialization. AAC AudioToolbox, VideoToolbox H.264/HEVC, and portable OpenH264 backends run tiny real encodes before playback so startup failures surface before the first segment request.
+- [x] Warm encoder session initialization. AAC AudioToolbox, portable CPU AAC, VideoToolbox H.264/HEVC, and portable OpenH264 backends run tiny real encodes before playback so startup failures surface before the first segment request.
 - [x] Chroma-native HLS transcode execution planning. `transcode-plan` now emits selected tracks, output codecs, stage readiness, and missing native capabilities so hosts can ask the engine what it can run without inheriting FFmpeg command/API shape.
 - [x] Native video decode frame/pump contract. Chroma Engine now has zero-copy compressed packet input, decoded BGRA frame output, and a bounded send/receive/drain action sequence for future HEVC/H.264/AV1 decoder backends.
 - [x] Native video decoder backend matrix. `decoder-probe` now reports H.264/HEVC decode backends and BGRA output format separately from encoder capabilities, with macOS VideoToolbox availability backed by native hardware decode support checks.

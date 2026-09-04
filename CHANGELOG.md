@@ -5,6 +5,9 @@
 - Added retained, source-built OpenH264 CPU decode and encode sessions that exchange BGRA frames,
   AVCC samples, and avcC decoder configuration on macOS, Windows, Linux, and Linux-based NAS
   targets.
+- Added a safe scalar Rust AAC-LC encoder fallback with raw access-unit output, MPEG-4 decoder
+  configuration, retained sample clocks, runtime capability reporting, and startup warmup on macOS,
+  Windows, Linux, and Linux-based NAS targets.
 - Added native Ubuntu ARM64 and Windows ARM64 CI checks, portable-codec tests, and release builds.
 - Added retained VideoToolbox H.264/HEVC decoder and H.264 encoder sessions plus retained
   AudioToolbox AAC converter sessions, with explicit batch counters and discontinuity resets.

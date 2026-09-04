@@ -25,6 +25,99 @@ pub struct EncodedAudioOutput {
     pub frames: Vec<EncodedAudioFrame>,
 }
 
+/// Portable, retained AAC-LC encoder facade backed by safe scalar Rust code.
+pub struct CpuAacEncoderSession {
+    format: PcmAudioFormat,
+    bitrate: u32,
+    encoded_batches: u64,
+    clock: AudioSampleClock,
+}
+
+impl std::fmt::Debug for CpuAacEncoderSession {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CpuAacEncoderSession")
+            .field("format", &self.format)
+            .field("bitrate", &self.bitrate)
+            .field("encoded_batches", &self.encoded_batches)
+            .field("next_sample", &self.clock.next_sample())
+            .finish_non_exhaustive()
+    }
+}
+
+impl CpuAacEncoderSession {
+    /// Creates a portable AAC-LC encoder for one to six PCM channels.
+    pub fn new(format: PcmAudioFormat, bitrate: u32) -> Result<Self, AudioEncodeError> {
+        validate_cpu_aac_config(format, bitrate)?;
+        Ok(Self {
+            format,
+            bitrate,
+            encoded_batches: 0,
+            clock: AudioSampleClock::new(AudioClockConfig {
+                sample_rate: format.sample_rate,
+                discontinuity_threshold_ms: 100,
+            }),
+        })
+    }
+
+    /// Encodes one PCM batch and advances this session's continuous sample clock.
+    pub fn encode(&mut self, pcm: &[i16]) -> Result<EncodedAudioOutput, AudioEncodeError> {
+        validate_pcm(self.format, pcm, self.bitrate)?;
+        let output = encode_cpu_aac_batch(self, pcm)?;
+        self.encoded_batches = self.encoded_batches.saturating_add(1);
+        Ok(output)
+    }
+
+    /// Returns the number of batches encoded by this session.
+    pub fn encoded_batches(&self) -> u64 {
+        self.encoded_batches
+    }
+}
+
+/// Preferred AAC-LC encoder for the current host.
+#[derive(Debug)]
+pub enum AacEncoderSession {
+    /// macOS AudioToolbox implementation.
+    AudioToolbox(AudioToolboxAacEncoderSession),
+    /// Portable safe-Rust implementation.
+    Cpu(CpuAacEncoderSession),
+}
+
+impl AacEncoderSession {
+    /// Creates the preferred host encoder, falling back to the portable CPU implementation.
+    pub fn new(format: PcmAudioFormat, bitrate: u32) -> Result<Self, AudioEncodeError> {
+        #[cfg(target_os = "macos")]
+        if let Ok(session) = AudioToolboxAacEncoderSession::new(format, bitrate) {
+            return Ok(Self::AudioToolbox(session));
+        }
+        CpuAacEncoderSession::new(format, bitrate).map(Self::Cpu)
+    }
+
+    /// Encodes one interleaved signed 16-bit PCM batch.
+    pub fn encode(&mut self, pcm: &[i16]) -> Result<EncodedAudioOutput, AudioEncodeError> {
+        match self {
+            Self::AudioToolbox(session) => session.encode(pcm),
+            Self::Cpu(session) => session.encode(pcm),
+        }
+    }
+
+    /// Returns the number of batches encoded by this session.
+    pub fn encoded_batches(&self) -> u64 {
+        match self {
+            Self::AudioToolbox(session) => session.encoded_batches(),
+            Self::Cpu(session) => session.encoded_batches(),
+        }
+    }
+
+    /// Returns the stable capability name for the selected backend.
+    pub fn backend_name(&self) -> &'static str {
+        match self {
+            Self::AudioToolbox(_) => "chroma-audiotoolbox-aac",
+            Self::Cpu(_) => "chroma-cpu-aac",
+        }
+    }
+}
+
 /// Retained AudioToolbox AAC encoder with a continuous sample clock.
 pub struct AudioToolboxAacEncoderSession {
     format: PcmAudioFormat,
@@ -99,13 +192,95 @@ pub enum AudioEncodeError {
     },
 }
 
-/// Encodes interleaved signed 16-bit PCM to AAC-LC using the native host backend.
+/// Encodes interleaved signed 16-bit PCM with the preferred host AAC-LC backend.
 pub fn encode_aac_from_interleaved_i16(
     format: PcmAudioFormat,
     pcm: &[i16],
     bitrate: u32,
 ) -> Result<EncodedAudioOutput, AudioEncodeError> {
-    AudioToolboxAacEncoderSession::new(format, bitrate)?.encode(pcm)
+    AacEncoderSession::new(format, bitrate)?.encode(pcm)
+}
+
+/// Encodes interleaved signed 16-bit PCM with the portable CPU AAC-LC backend.
+pub fn encode_aac_cpu_from_interleaved_i16(
+    format: PcmAudioFormat,
+    pcm: &[i16],
+    bitrate: u32,
+) -> Result<EncodedAudioOutput, AudioEncodeError> {
+    CpuAacEncoderSession::new(format, bitrate)?.encode(pcm)
+}
+
+fn validate_cpu_aac_config(format: PcmAudioFormat, bitrate: u32) -> Result<(), AudioEncodeError> {
+    validate_pcm_config(format, bitrate)?;
+    aac_lc_audio_specific_config(format)?;
+    if format.channels > 6 {
+        return Err(AudioEncodeError::UnsupportedAacConfig {
+            reason: format!(
+                "portable AAC-LC encode supports one to six channels, got {}",
+                format.channels
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn encode_cpu_aac_batch(
+    retained: &mut CpuAacEncoderSession,
+    pcm: &[i16],
+) -> Result<EncodedAudioOutput, AudioEncodeError> {
+    use rusty_aac::{AacEncoder, AacEncoderConfig, Error as AacError};
+
+    let format = retained.format;
+    let channels =
+        u16::try_from(format.channels).map_err(|_| AudioEncodeError::UnsupportedAacConfig {
+            reason: format!("unsupported AAC-LC channel count {}", format.channels),
+        })?;
+    let samples = pcm
+        .iter()
+        .map(|sample| f32::from(*sample) / 32_768.0)
+        .collect::<Vec<_>>();
+    let mut encoder = AacEncoder::new(AacEncoderConfig {
+        bitrate_bps: aac_lc_encode_bitrate(format, retained.bitrate),
+        ..AacEncoderConfig::default()
+    });
+    encoder
+        .push_pcm(&samples, channels, format.sample_rate)
+        .map_err(cpu_aac_error)?;
+    encoder.finish();
+
+    let mut frames = Vec::new();
+    loop {
+        match encoder.next_packet() {
+            Ok(packet) => frames.push(frame_from_payload(
+                &mut retained.clock,
+                packet.data,
+                packet.duration,
+            )),
+            Err(AacError::Eof) => break,
+            Err(error) => return Err(cpu_aac_error(error)),
+        }
+    }
+    if frames.is_empty() {
+        return Err(AudioEncodeError::BackendFailed {
+            reason: "portable AAC encoder returned no access units".to_string(),
+        });
+    }
+
+    Ok(EncodedAudioOutput {
+        stream: EncodedAudioStream {
+            codec: AudioCodec::Aac,
+            sample_rate: format.sample_rate,
+            channels: format.channels,
+            decoder_config: Some(aac_lc_audio_specific_config(format)?),
+        },
+        frames,
+    })
+}
+
+fn cpu_aac_error(error: rusty_aac::Error) -> AudioEncodeError {
+    AudioEncodeError::BackendFailed {
+        reason: format!("portable AAC encoder: {error}"),
+    }
 }
 
 fn validate_pcm(format: PcmAudioFormat, pcm: &[i16], bitrate: u32) -> Result<(), AudioEncodeError> {
@@ -422,6 +597,93 @@ mod tests {
         assert!(err.to_string().contains("align"));
     }
 
+    #[test]
+    fn portable_aac_encodes_decodable_raw_access_units() {
+        let format = PcmAudioFormat {
+            sample_rate: 48_000,
+            channels: 2,
+        };
+        let pcm = sine_pcm(format, 2048);
+        let encoded = encode_aac_cpu_from_interleaved_i16(format, &pcm, 128_000)
+            .expect("portable AAC encode");
+
+        assert_eq!(encoded.stream.codec, AudioCodec::Aac);
+        assert_eq!(
+            encoded.stream.decoder_config.as_deref(),
+            Some(&[0x11, 0x90][..])
+        );
+        assert!(!encoded.frames.is_empty());
+
+        let mut decoder = rusty_aac::AacDecoder::with_config_bytes(
+            encoded
+                .stream
+                .decoder_config
+                .as_deref()
+                .expect("AAC config"),
+        )
+        .expect("construct AAC decoder");
+        for frame in &encoded.frames {
+            let decoded = decoder
+                .decode(&frame.payload, None)
+                .expect("decode portable AAC access unit");
+            assert_eq!(decoded.sample_rate, format.sample_rate);
+            assert_eq!(u32::from(decoded.channels), format.channels);
+            assert!(!decoded.samples.is_empty());
+        }
+    }
+
+    #[test]
+    fn portable_aac_session_retains_batch_clock() {
+        let format = PcmAudioFormat {
+            sample_rate: 48_000,
+            channels: 1,
+        };
+        let pcm = sine_pcm(format, 1024);
+        let mut session = CpuAacEncoderSession::new(format, 96_000).expect("CPU AAC session");
+
+        let first = session.encode(&pcm).expect("first batch");
+        let second = session.encode(&pcm).expect("second batch");
+        let first_end = first
+            .frames
+            .last()
+            .expect("first frame")
+            .timing
+            .start_sample
+            + u64::from(
+                first
+                    .frames
+                    .last()
+                    .expect("first frame")
+                    .timing
+                    .sample_count,
+            );
+
+        assert_eq!(session.encoded_batches(), 2);
+        assert_eq!(
+            second
+                .frames
+                .first()
+                .expect("second frame")
+                .timing
+                .start_sample,
+            first_end
+        );
+    }
+
+    #[test]
+    fn portable_aac_rejects_seven_channels() {
+        let error = CpuAacEncoderSession::new(
+            PcmAudioFormat {
+                sample_rate: 48_000,
+                channels: 7,
+            },
+            320_000,
+        )
+        .expect_err("reject unsupported channel layout");
+
+        assert!(error.to_string().contains("one to six channels"));
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_audiotoolbox_encodes_aac_packets() {
@@ -491,6 +753,16 @@ mod tests {
 
     fn silent_pcm(format: PcmAudioFormat, frames: usize) -> Vec<i16> {
         vec![0; frames * format.channels as usize]
+    }
+
+    fn sine_pcm(format: PcmAudioFormat, frames: usize) -> Vec<i16> {
+        (0..frames)
+            .flat_map(|frame| {
+                let phase =
+                    (frame as f32 * 440.0 * std::f32::consts::TAU) / format.sample_rate as f32;
+                std::iter::repeat_n((phase.sin() * 12_000.0) as i16, format.channels as usize)
+            })
+            .collect()
     }
 
     #[test]

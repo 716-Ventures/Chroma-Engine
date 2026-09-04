@@ -5,7 +5,7 @@ use crate::{
     error::EngineErrorCode,
     transcode::{
         AudioCodec, PcmAudioFormat, RawVideoFormat, RawVideoPixelFormat, VideoCodec,
-        encode_aac_from_interleaved_i16, encode_h264_cpu_bgra_frames,
+        encode_aac_cpu_from_interleaved_i16, encode_h264_cpu_bgra_frames,
         encode_h264_videotoolbox_bgra_frame, encode_hevc_videotoolbox_bgra_frame,
     },
 };
@@ -354,6 +354,7 @@ fn run_warmup_task(task: &EncoderWarmupTask) -> Result<(), EncoderWarmupError> {
         (EncoderWarmupKind::Video, "chroma-videotoolbox-hevc", "hevc") => warm_hevc_encoder(),
         (EncoderWarmupKind::Video, "chroma-cpu-h264", "h264") => warm_cpu_h264_encoder(),
         (EncoderWarmupKind::Audio, "chroma-audiotoolbox-aac", "aac") => warm_aac_encoder(),
+        (EncoderWarmupKind::Audio, "chroma-cpu-aac", "aac") => warm_cpu_aac_encoder(),
         _ => Ok(()),
     }
 }
@@ -430,17 +431,33 @@ fn warm_cpu_h264_encoder() -> Result<(), EncoderWarmupError> {
 fn warm_aac_encoder() -> Result<(), EncoderWarmupError> {
     #[cfg(target_os = "macos")]
     {
+        use crate::transcode::AudioToolboxAacEncoderSession;
+
         let format = PcmAudioFormat {
             sample_rate: 48_000,
             channels: 2,
         };
         let pcm = vec![0_i16; 2048 * format.channels as usize];
-        encode_aac_from_interleaved_i16(format, &pcm, 128_000).map_err(|error| {
-            EncoderWarmupError {
+        AudioToolboxAacEncoderSession::new(format, 128_000)
+            .and_then(|mut session| session.encode(&pcm))
+            .map_err(|error| EncoderWarmupError {
                 reason: format!("AAC warmup failed: {error}"),
-            }
-        })?;
+            })?;
     }
+    Ok(())
+}
+
+fn warm_cpu_aac_encoder() -> Result<(), EncoderWarmupError> {
+    let format = PcmAudioFormat {
+        sample_rate: 48_000,
+        channels: 2,
+    };
+    let pcm = vec![0_i16; 2048 * format.channels as usize];
+    encode_aac_cpu_from_interleaved_i16(format, &pcm, 128_000).map_err(|error| {
+        EncoderWarmupError {
+            reason: format!("CPU AAC warmup failed: {error}"),
+        }
+    })?;
     Ok(())
 }
 
@@ -940,31 +957,38 @@ fn video_backend_matrix() -> Vec<EncoderBackend> {
 }
 
 fn audio_backend_matrix() -> Vec<AudioEncoderBackend> {
-    [
-        (AudioCodec::Aac, "chroma-audiotoolbox-aac"),
-        (AudioCodec::Ac3, "chroma-ac3-copy"),
-        (AudioCodec::Eac3, "chroma-eac3-copy"),
-    ]
-    .into_iter()
-    .map(|(codec, encoder)| {
-        let available = audio_backend_available(codec);
-        AudioEncoderBackend {
-            codec,
-            encoder: encoder.to_string(),
-            available,
-            unavailable_reason: (!available).then(|| {
-                "native audio encode backend is planned but not executable in this build"
-                    .to_string()
-            }),
-        }
-    })
-    .collect()
+    let mut backends = Vec::new();
+    if cfg!(target_os = "macos") {
+        backends.push(executable_audio_backend(
+            AudioCodec::Aac,
+            "chroma-audiotoolbox-aac",
+        ));
+    }
+    backends.push(executable_audio_backend(AudioCodec::Aac, "chroma-cpu-aac"));
+    backends.extend([
+        planned_audio_backend(AudioCodec::Ac3, "chroma-ac3-copy"),
+        planned_audio_backend(AudioCodec::Eac3, "chroma-eac3-copy"),
+    ]);
+    backends
 }
 
-fn audio_backend_available(codec: AudioCodec) -> bool {
-    match codec {
-        AudioCodec::Aac => cfg!(target_os = "macos"),
-        AudioCodec::Ac3 | AudioCodec::Eac3 => false,
+fn executable_audio_backend(codec: AudioCodec, encoder: &str) -> AudioEncoderBackend {
+    AudioEncoderBackend {
+        codec,
+        encoder: encoder.to_string(),
+        available: true,
+        unavailable_reason: None,
+    }
+}
+
+fn planned_audio_backend(codec: AudioCodec, encoder: &str) -> AudioEncoderBackend {
+    AudioEncoderBackend {
+        codec,
+        encoder: encoder.to_string(),
+        available: false,
+        unavailable_reason: Some(
+            "native audio encode backend is planned but not executable in this build".to_string(),
+        ),
     }
 }
 
@@ -1087,18 +1111,19 @@ mod tests {
         let plan = encoder_backend_plan();
 
         assert_eq!(plan.cpu_fallback.kind, HardwareKind::Cpu);
-        let aac = plan
-            .audio_backends
-            .iter()
-            .find(|backend| backend.codec == AudioCodec::Aac)
-            .expect("AAC backend");
-        assert_eq!(aac.available, cfg!(target_os = "macos"));
-        assert!(
-            aac.available
-                || aac
-                    .unavailable_reason
-                    .as_deref()
-                    .is_some_and(|reason| reason.contains("planned"))
+        assert!(plan.audio_backends.iter().any(|backend| {
+            backend.codec == AudioCodec::Aac
+                && backend.encoder == "chroma-cpu-aac"
+                && backend.available
+                && backend.unavailable_reason.is_none()
+        }));
+        assert_eq!(
+            plan.audio_backends.iter().any(|backend| {
+                backend.codec == AudioCodec::Aac
+                    && backend.encoder == "chroma-audiotoolbox-aac"
+                    && backend.available
+            }),
+            cfg!(target_os = "macos")
         );
         assert!(plan.audio_backends.iter().any(|backend| {
             backend.codec == AudioCodec::Ac3
@@ -1304,9 +1329,20 @@ mod tests {
                 && task.encoder == "chroma-audiotoolbox-aac"
         });
 
+        let has_cpu_aac_warmup = plan.warmup_tasks.iter().any(|task| {
+            task.kind == EncoderWarmupKind::Audio
+                && task.codec == "aac"
+                && task.encoder == "chroma-cpu-aac"
+        });
+
         assert_eq!(has_aac_warmup, cfg!(target_os = "macos"));
+        assert!(has_cpu_aac_warmup);
         assert!(plan.warmup_tasks.iter().all(|task| {
-            task.kind != EncoderWarmupKind::Audio || task.encoder == "chroma-audiotoolbox-aac"
+            task.kind != EncoderWarmupKind::Audio
+                || matches!(
+                    task.encoder.as_str(),
+                    "chroma-audiotoolbox-aac" | "chroma-cpu-aac"
+                )
         }));
     }
 

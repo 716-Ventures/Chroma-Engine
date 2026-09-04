@@ -18,7 +18,8 @@ pub use audio_decode::{
     DtsAudioBridgeProbe, DtsAudioPacketProbe, build_audio_decode_input, probe_dts_audio_bridge,
 };
 pub use audio_encode::{
-    AudioEncodeError, AudioToolboxAacEncoderSession, EncodedAudioOutput, PcmAudioFormat,
+    AacEncoderSession, AudioEncodeError, AudioToolboxAacEncoderSession, CpuAacEncoderSession,
+    EncodedAudioOutput, PcmAudioFormat, encode_aac_cpu_from_interleaved_i16,
     encode_aac_from_interleaved_i16,
 };
 pub use execution_plan::{
