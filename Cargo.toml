@@ -63,14 +63,8 @@ strip = "none"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 audiotoolbox = "0.4.0"
-core-foundation = "0.10.1"
-core-foundation-sys = "0.8.7"
-core-media = "0.8.1"
-core-video = "0.6.1"
-video-toolbox = "0.3.1"
-
-[patch.crates-io]
-# rust-block 0.1.6 declares an extern static with an uninhabited type. The
-# local compatibility patch gives that opaque type a valid C representation
-# until the Apple backend migrates to the maintained objc2 framework crates.
-block = { path = "vendor/block" }
+block2 = "0.6.2"
+objc2-core-foundation = "0.3.2"
+objc2-core-media = "0.3.2"
+objc2-core-video = "0.3.2"
+objc2-video-toolbox = "0.3.2"

@@ -1,8 +1,8 @@
 # Apple Framework Binding Migration
 
-Chroma Engine currently uses the older `core-foundation`, `core-media`, `core-video`, and
-`video-toolbox` wrapper family. The locally patched `block` crate keeps that graph compatible with
-the pinned Rust compiler, but the long-term Apple boundary should use the maintained `objc2` family.
+Chroma Engine's video path uses the maintained `objc2` Apple framework bindings. Compression and
+decompression sessions, CoreMedia buffers and format descriptions, CoreVideo pixel buffers, and
+VideoToolbox callbacks now share one explicit `CFRetained` ownership model.
 
 ## Target graph
 
@@ -10,32 +10,30 @@ the pinned Rust compiler, but the long-term Apple boundary should use the mainta
 - `objc2-core-media`
 - `objc2-core-video`
 - `objc2-video-toolbox`
-- `objc2-audio-toolbox` when the current higher-level AudioToolbox wrapper no longer covers the
-  retained converter contract
+- `block2`
 
-All target crates are available at version `0.3.2` and support the repository MSRV. The migration
-must remove `video-toolbox`, `core-media`, `core-video`, `core-foundation`,
-`core-foundation-sys`, the `[patch.crates-io] block` entry, and `vendor/block` together. A partial
-dependency swap would leave two incompatible Core Foundation ownership systems in one callback
-path and is not acceptable.
+The legacy `video-toolbox`, `core-media`, `core-video`, `core-foundation`, and
+`core-foundation-sys` dependencies have been removed together with the local `block` patch. The
+existing higher-level `audiotoolbox` dependency remains isolated to the audio encoder and does not
+pull the legacy video or `block` graph back into the build.
 
-## Migration slices
+## Ownership rules
 
-1. Add a private Apple media adapter module whose Rust-facing inputs and outputs are the existing
-   Chroma packet, frame, and session types.
-2. Port CoreMedia time, format-description, block-buffer, and sample-buffer construction. Prove
-   create/get ownership rules with focused tests before changing VideoToolbox calls.
-3. Port retained H.264 compression, its asynchronous callback, encoder properties, pixel-buffer
-   creation, and avcC extraction.
-4. Port retained H.264/HEVC decompression, output attributes, asynchronous callbacks, and bounded
-   BGRA copying.
-5. Port capability probes and one-frame warmups, then remove the legacy graph and compatibility
-   patch in one commit.
+- Objects returned by Apple `Create` functions enter Rust exactly once through
+  `CFRetained::from_raw`.
+- Objects returned under get rules are borrowed for the callback duration or retained by the
+  generated binding when they must escape the immediate call.
+- VideoToolbox output blocks own only thread-safe Rust state and copy sample or pixel bytes before
+  returning.
+- Retained sessions are explicitly invalidated during teardown; their `CFRetained` owners then
+  balance the framework retain.
+- Unsafe casts are limited to documented Core Foundation subtype relationships such as
+  `CVPixelBuffer`/`CVImageBuffer` and `CMVideoFormatDescription`/`CMFormatDescription`.
 
 ## Exit gates
 
 - The full strict test, Clippy, rustdoc, dependency, and future-incompatibility gates pass.
 - Retained-session smoke stats still report one decoder, one encoder, and at least one reuse.
 - The 720p HEVC/AAC browser smoke reaches ready state 4 and advances playback without an error.
-- Maximum resident size does not regress beyond the current approximately 238 MB measurement.
+- Maximum resident size does not regress beyond the established approximately 238 MB measurement.
 - `cargo tree -i block` reports that `block` is absent.

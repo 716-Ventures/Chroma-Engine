@@ -104,9 +104,21 @@ pub struct VideoToolboxBgraDecoderSession {
     output_format: RawVideoFormat,
     decoded_batches: u64,
     #[cfg(target_os = "macos")]
-    video_description: core_media::format_description::CMVideoFormatDescription,
+    video_description:
+        objc2_core_foundation::CFRetained<objc2_core_media::CMVideoFormatDescription>,
     #[cfg(target_os = "macos")]
-    session: video_toolbox::decompression_session::VTDecompressionSession,
+    session: objc2_core_foundation::CFRetained<objc2_video_toolbox::VTDecompressionSession>,
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for VideoToolboxBgraDecoderSession {
+    fn drop(&mut self) {
+        #[allow(unsafe_code)]
+        // SAFETY: The retained session is valid until this owner is dropped.
+        unsafe {
+            self.session.invalidate();
+        }
+    }
 }
 
 impl std::fmt::Debug for VideoToolboxBgraDecoderSession {
@@ -351,15 +363,8 @@ fn platform_probe_videotoolbox_h264_decoder_session(
     format: RawVideoFormat,
     decoder_config: &[u8],
 ) -> Result<VideoDecodeSessionInfo, VideoDecodeError> {
-    use core_media::format_description::kCMVideoCodecType_H264;
-    use video_toolbox::decompression_session::VTDecompressionSession;
-
     let description = videotoolbox_h264_format_description(decoder_config)?;
-    VTDecompressionSession::new(description, None, None).map_err(|status| {
-        VideoDecodeError::BackendFailed {
-            reason: format!("VTDecompressionSessionCreate(H.264) returned {status}"),
-        }
-    })?;
+    new_decompression_session(&description, None, "H.264")?;
 
     Ok(VideoDecodeSessionInfo {
         codec: VideoCodec::H264,
@@ -367,9 +372,7 @@ fn platform_probe_videotoolbox_h264_decoder_session(
         width: format.width,
         height: format.height,
         output_format: format,
-        hardware_supported: VTDecompressionSession::is_hardware_decode_supported(
-            kCMVideoCodecType_H264,
-        ),
+        hardware_supported: hardware_decode_supported(objc2_core_media::kCMVideoCodecType_H264),
         session_created: true,
     })
 }
@@ -379,15 +382,8 @@ fn platform_probe_videotoolbox_hevc_decoder_session(
     format: RawVideoFormat,
     decoder_config: &[u8],
 ) -> Result<VideoDecodeSessionInfo, VideoDecodeError> {
-    use core_media::format_description::kCMVideoCodecType_HEVC;
-    use video_toolbox::decompression_session::VTDecompressionSession;
-
     let description = videotoolbox_hevc_format_description(decoder_config)?;
-    VTDecompressionSession::new(description, None, None).map_err(|status| {
-        VideoDecodeError::BackendFailed {
-            reason: format!("VTDecompressionSessionCreate(HEVC) returned {status}"),
-        }
-    })?;
+    new_decompression_session(&description, None, "HEVC")?;
 
     Ok(VideoDecodeSessionInfo {
         codec: VideoCodec::Hevc,
@@ -395,11 +391,56 @@ fn platform_probe_videotoolbox_hevc_decoder_session(
         width: format.width,
         height: format.height,
         output_format: format,
-        hardware_supported: VTDecompressionSession::is_hardware_decode_supported(
-            kCMVideoCodecType_HEVC,
-        ),
+        hardware_supported: hardware_decode_supported(objc2_core_media::kCMVideoCodecType_HEVC),
         session_created: true,
     })
+}
+
+#[cfg(target_os = "macos")]
+fn hardware_decode_supported(codec: objc2_core_media::CMVideoCodecType) -> bool {
+    #[allow(unsafe_code)]
+    // SAFETY: The codec is one of CoreMedia's declared video codec constants.
+    unsafe {
+        objc2_video_toolbox::VTIsHardwareDecodeSupported(codec)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn new_decompression_session(
+    description: &objc2_core_media::CMVideoFormatDescription,
+    attributes: Option<&objc2_core_foundation::CFDictionary>,
+    label: &str,
+) -> Result<
+    objc2_core_foundation::CFRetained<objc2_video_toolbox::VTDecompressionSession>,
+    VideoDecodeError,
+> {
+    use std::ptr::{NonNull, null, null_mut};
+
+    let mut raw = null_mut();
+    #[allow(unsafe_code)]
+    // SAFETY: `raw` is a valid out-parameter, the format and attributes stay
+    // alive for the call, and a null callback selects per-frame handlers.
+    let status = unsafe {
+        objc2_video_toolbox::VTDecompressionSession::create(
+            None,
+            description,
+            None,
+            attributes,
+            null(),
+            NonNull::from(&mut raw),
+        )
+    };
+    if status != 0 {
+        return Err(VideoDecodeError::BackendFailed {
+            reason: format!("VTDecompressionSessionCreate({label}) returned {status}"),
+        });
+    }
+    let raw = NonNull::new(raw).ok_or_else(|| VideoDecodeError::BackendFailed {
+        reason: format!("VTDecompressionSessionCreate({label}) returned no session"),
+    })?;
+    #[allow(unsafe_code)]
+    // SAFETY: VideoToolbox returned this pointer at +1 under the Create rule.
+    Ok(unsafe { objc2_core_foundation::CFRetained::from_raw(raw) })
 }
 
 #[cfg(target_os = "macos")]
@@ -408,34 +449,34 @@ fn platform_new_videotoolbox_bgra_decoder(
     output_format: RawVideoFormat,
     decoder_config: &[u8],
 ) -> Result<VideoToolboxBgraDecoderSession, VideoDecodeError> {
-    use core_foundation::{
-        base::TCFType, dictionary::CFDictionary, number::CFNumber, string::CFString,
-    };
-    use core_video::pixel_buffer::{CVPixelBufferKeys, kCVPixelFormatType_32BGRA};
-    use video_toolbox::decompression_session::VTDecompressionSession;
-
     let video_description = match codec {
         VideoCodec::H264 => videotoolbox_h264_format_description(decoder_config)?,
         VideoCodec::Hevc => videotoolbox_hevc_format_description(decoder_config)?,
     };
-    let attrs = CFDictionary::from_CFType_pairs(&[
-        (
-            CFString::from(CVPixelBufferKeys::PixelFormatType),
-            CFNumber::from(kCVPixelFormatType_32BGRA as i32).as_CFType(),
-        ),
-        (
-            CFString::from(CVPixelBufferKeys::Width),
-            CFNumber::from(output_format.width as i32).as_CFType(),
-        ),
-        (
-            CFString::from(CVPixelBufferKeys::Height),
-            CFNumber::from(output_format.height as i32).as_CFType(),
-        ),
-    ]);
-    let session = VTDecompressionSession::new(video_description.clone(), None, Some(&attrs))
-        .map_err(|status| VideoDecodeError::BackendFailed {
-            reason: format!("VTDecompressionSessionCreate returned {status}"),
-        })?;
+    let pixel_format = objc2_core_foundation::CFNumber::new_i32(
+        objc2_core_video::kCVPixelFormatType_32BGRA as i32,
+    );
+    let width = objc2_core_foundation::CFNumber::new_i32(output_format.width as i32);
+    let height = objc2_core_foundation::CFNumber::new_i32(output_format.height as i32);
+    #[allow(unsafe_code)]
+    // SAFETY: These framework keys are immutable process-lifetime CFStrings.
+    let attrs = unsafe {
+        objc2_core_foundation::CFDictionary::<
+            objc2_core_foundation::CFString,
+            objc2_core_foundation::CFType,
+        >::from_slices(
+            &[
+                objc2_core_video::kCVPixelBufferPixelFormatTypeKey,
+                objc2_core_video::kCVPixelBufferWidthKey,
+                objc2_core_video::kCVPixelBufferHeightKey,
+            ],
+            &[pixel_format.as_ref(), width.as_ref(), height.as_ref()],
+        )
+    };
+    #[allow(unsafe_code)]
+    // SAFETY: Erasing generic markers preserves the dictionary representation.
+    let untyped_attrs = unsafe { attrs.cast_unchecked() };
+    let session = new_decompression_session(&video_description, Some(untyped_attrs), "BGRA")?;
     Ok(VideoToolboxBgraDecoderSession {
         codec,
         output_format,
@@ -455,11 +496,19 @@ fn platform_decode_with_retained_session(
         sync::{Arc, Mutex},
     };
 
-    use core_media::sample_buffer::{CMSampleBuffer, CMSampleTimingInfo};
-    use video_toolbox::errors::VTDecodeFrameFlags;
+    use block2::RcBlock;
+    use objc2_core_media::{CMSampleTimingInfo, CMTime};
+    use objc2_core_video::CVImageBuffer;
+    use objc2_video_toolbox::VTDecodeFrameFlags;
 
     let output_format = retained.output_format;
-    let format_description = cm_format_description_from_video(&retained.video_description);
+    #[allow(unsafe_code)]
+    // SAFETY: CMVideoFormatDescription is the concrete video subtype of
+    // CMFormatDescription and this borrow is bounded by the retained owner.
+    let format_description = unsafe {
+        &*(std::ptr::from_ref(&*retained.video_description)
+            .cast::<objc2_core_media::CMFormatDescription>())
+    };
     let session = &retained.session;
 
     let timing_by_pts = Arc::new(
@@ -486,107 +535,130 @@ fn platform_decode_with_retained_session(
             decodeTimeStamp: cm_time_point(packet.dts)?,
         }];
         let sizes = [packet.bytes.len()];
-        let sample_buffer = CMSampleBuffer::new_ready(
-            &block_buffer,
-            Some(&format_description),
-            1,
-            Some(&timing),
-            Some(&sizes),
-        )
-        .map_err(|status| VideoDecodeError::BackendFailed {
-            reason: format!("CMSampleBufferCreateReady returned {status}"),
-        })?;
+        let sample_buffer =
+            sample_buffer_from_packet(&block_buffer, format_description, &timing, &sizes)?;
         let out_frames = Arc::clone(&frames);
         let out_error = Arc::clone(&callback_error);
         let timing_by_pts = Arc::clone(&timing_by_pts);
         let flags = VTDecodeFrameFlags::Frame_EnableAsynchronousDecompression
             | VTDecodeFrameFlags::Frame_EnableTemporalProcessing;
 
-        session
-            .decode_frame_with_closure(
-                sample_buffer,
-                flags,
-                move |status, info, image, pts, duration| {
-                    if status != 0 {
-                        set_callback_error(
-                            &out_error,
-                            VideoDecodeError::BackendFailed {
-                                reason: format!("VT decode callback returned {status} ({info:?})"),
-                            },
-                        );
+        let handler = RcBlock::new(
+            move |status: i32, info, image: *mut CVImageBuffer, pts: CMTime, duration: CMTime| {
+                if status != 0 {
+                    set_callback_error(
+                        &out_error,
+                        VideoDecodeError::BackendFailed {
+                            reason: format!("VT decode callback returned {status} ({info:?})"),
+                        },
+                    );
+                    return;
+                }
+                let Some(image) = std::ptr::NonNull::new(image) else {
+                    set_callback_error(
+                        &out_error,
+                        VideoDecodeError::BackendFailed {
+                            reason: "VideoToolbox callback did not return a pixel buffer"
+                                .to_string(),
+                        },
+                    );
+                    return;
+                };
+                #[allow(unsafe_code)]
+                // SAFETY: VideoToolbox guarantees the callback image remains
+                // valid for the duration of this handler invocation.
+                let Some(pixel_buffer) =
+                    (unsafe { pixel_buffer_from_image_buffer(image.as_ref()) })
+                else {
+                    set_callback_error(
+                        &out_error,
+                        VideoDecodeError::BackendFailed {
+                            reason: "VideoToolbox callback did not return a pixel buffer"
+                                .to_string(),
+                        },
+                    );
+                    return;
+                };
+                let pts_point = match time_point_from_cm_time(pts) {
+                    Ok(pts) => pts,
+                    Err(error) => {
+                        set_callback_error(&out_error, error);
                         return;
                     }
-                    let Some(pixel_buffer) = pixel_buffer_from_image_buffer(&image) else {
-                        set_callback_error(
+                };
+                let duration_delta = match time_delta_from_cm_time(duration) {
+                    Ok(duration) => duration,
+                    Err(error) => {
+                        set_callback_error(&out_error, error);
+                        return;
+                    }
+                };
+                let timing = timing_by_pts
+                    .get(&DecodeTimestampKey::from(pts_point))
+                    .copied()
+                    .unwrap_or((pts_point, duration_delta, false));
+                match copy_bgra_pixel_buffer(pixel_buffer, callback_format) {
+                    Ok(pixels) => match out_frames.lock() {
+                        Ok(mut frames) => frames.push(DecodedVideoFrame {
+                            pts: pts_point,
+                            dts: timing.0,
+                            duration: if duration_delta.units == 0 {
+                                timing.1
+                            } else {
+                                duration_delta
+                            },
+                            format: callback_format,
+                            pixels,
+                            keyframe: timing.2,
+                        }),
+                        Err(_) => set_callback_error(
                             &out_error,
                             VideoDecodeError::BackendFailed {
-                                reason: "VideoToolbox callback did not return a pixel buffer"
+                                reason: "VideoToolbox decoded frame output lock was poisoned"
                                     .to_string(),
                             },
-                        );
-                        return;
-                    };
-                    let pts_point = match time_point_from_cm_time(pts) {
-                        Ok(pts) => pts,
-                        Err(error) => {
-                            set_callback_error(&out_error, error);
-                            return;
-                        }
-                    };
-                    let duration_delta = match time_delta_from_cm_time(duration) {
-                        Ok(duration) => duration,
-                        Err(error) => {
-                            set_callback_error(&out_error, error);
-                            return;
-                        }
-                    };
-                    let timing = timing_by_pts
-                        .get(&DecodeTimestampKey::from(pts_point))
-                        .copied()
-                        .unwrap_or((pts_point, duration_delta, false));
-                    match copy_bgra_pixel_buffer(&pixel_buffer, callback_format) {
-                        Ok(pixels) => match out_frames.lock() {
-                            Ok(mut frames) => frames.push(DecodedVideoFrame {
-                                pts: pts_point,
-                                dts: timing.0,
-                                duration: if duration_delta.units == 0 {
-                                    timing.1
-                                } else {
-                                    duration_delta
-                                },
-                                format: callback_format,
-                                pixels,
-                                keyframe: timing.2,
-                            }),
-                            Err(_) => set_callback_error(
-                                &out_error,
-                                VideoDecodeError::BackendFailed {
-                                    reason: "VideoToolbox decoded frame output lock was poisoned"
-                                        .to_string(),
-                                },
-                            ),
-                        },
-                        Err(error) => set_callback_error(&out_error, error),
-                    }
-                },
+                        ),
+                    },
+                    Err(error) => set_callback_error(&out_error, error),
+                }
+            },
+        );
+        #[allow(unsafe_code)]
+        // SAFETY: The sample and handler remain live for submission, and
+        // VideoToolbox copies the escaping block for asynchronous delivery.
+        let status = unsafe {
+            session.decode_frame_with_output_handler(
+                &sample_buffer,
+                flags,
+                std::ptr::null_mut(),
+                std::ptr::from_ref(&*handler).cast_mut(),
             )
-            .map_err(|status| VideoDecodeError::BackendFailed {
+        };
+        if status != 0 {
+            return Err(VideoDecodeError::BackendFailed {
                 reason: format!("VTDecompressionSessionDecodeFrame returned {status}"),
-            })?;
+            });
+        }
     }
 
     if input.end_of_stream {
-        session
-            .finish_delayed_frames()
-            .map_err(|status| VideoDecodeError::BackendFailed {
+        #[allow(unsafe_code)]
+        // SAFETY: The retained decoder session is live.
+        let status = unsafe { session.finish_delayed_frames() };
+        if status != 0 {
+            return Err(VideoDecodeError::BackendFailed {
                 reason: format!("VTDecompressionSessionFinishDelayedFrames returned {status}"),
-            })?;
+            });
+        }
     }
-    session
-        .wait_for_asynchronous_frames()
-        .map_err(|status| VideoDecodeError::BackendFailed {
+    #[allow(unsafe_code)]
+    // SAFETY: The retained decoder session is live; this joins all callbacks.
+    let status = unsafe { session.wait_for_asynchronous_frames() };
+    if status != 0 {
+        return Err(VideoDecodeError::BackendFailed {
             reason: format!("VTDecompressionSessionWaitForAsynchronousFrames returned {status}"),
-        })?;
+        });
+    }
     if let Some(error) = take_decode_callback_error(&callback_error)? {
         return Err(error);
     }
@@ -658,9 +730,10 @@ fn take_decode_callback_error(
 #[cfg(target_os = "macos")]
 fn videotoolbox_h264_format_description(
     decoder_config: &[u8],
-) -> Result<core_media::format_description::CMVideoFormatDescription, VideoDecodeError> {
-    use core_media::format_description::CMVideoFormatDescription;
-
+) -> Result<
+    objc2_core_foundation::CFRetained<objc2_core_media::CMVideoFormatDescription>,
+    VideoDecodeError,
+> {
     let config = crate::codec::h264::parse_avc_decoder_config(decoder_config).map_err(|error| {
         VideoDecodeError::InvalidDecoderConfig {
             reason: error.to_string(),
@@ -678,21 +751,16 @@ fn videotoolbox_h264_format_description(
         });
     }
 
-    CMVideoFormatDescription::from_h264_parameter_sets(
-        &parameter_sets,
-        config.nalu_length_size.into(),
-    )
-    .map_err(|status| VideoDecodeError::BackendFailed {
-        reason: format!("CMVideoFormatDescriptionCreateFromH264ParameterSets returned {status}"),
-    })
+    create_video_format_description(&parameter_sets, config.nalu_length_size.into(), false)
 }
 
 #[cfg(target_os = "macos")]
 fn videotoolbox_hevc_format_description(
     decoder_config: &[u8],
-) -> Result<core_media::format_description::CMVideoFormatDescription, VideoDecodeError> {
-    use core_media::format_description::CMVideoFormatDescription;
-
+) -> Result<
+    objc2_core_foundation::CFRetained<objc2_core_media::CMVideoFormatDescription>,
+    VideoDecodeError,
+> {
     let config =
         crate::codec::hevc::parse_hevc_decoder_config(decoder_config).map_err(|error| {
             VideoDecodeError::InvalidDecoderConfig {
@@ -712,64 +780,181 @@ fn videotoolbox_hevc_format_description(
         });
     }
 
-    CMVideoFormatDescription::from_hevc_parameter_sets(
-        &parameter_sets,
-        config.nalu_length_size.into(),
-        None,
-    )
-    .map_err(|status| VideoDecodeError::BackendFailed {
-        reason: format!("CMVideoFormatDescriptionCreateFromHEVCParameterSets returned {status}"),
-    })
+    create_video_format_description(&parameter_sets, config.nalu_length_size.into(), true)
 }
 
 #[cfg(target_os = "macos")]
-fn cm_format_description_from_video(
-    description: &core_media::format_description::CMVideoFormatDescription,
-) -> core_media::format_description::CMFormatDescription {
-    use core_foundation::base::TCFType;
-    use core_media::format_description::{CMFormatDescription, CMFormatDescriptionRef};
+fn create_video_format_description(
+    parameter_sets: &[&[u8]],
+    nal_length_size: i32,
+    hevc: bool,
+) -> Result<
+    objc2_core_foundation::CFRetained<objc2_core_media::CMVideoFormatDescription>,
+    VideoDecodeError,
+> {
+    use std::ptr::{NonNull, null};
 
-    #[allow(unsafe_code)]
-    // SAFETY: CMVideoFormatDescriptionRef is a concrete CMFormatDescriptionRef subtype.
-    // `wrap_under_get_rule` retains the object for the short-lived CMSampleBuffer build.
-    unsafe {
-        CMFormatDescription::wrap_under_get_rule(
-            description.as_concrete_TypeRef() as CMFormatDescriptionRef
-        )
+    if parameter_sets.is_empty() || parameter_sets.iter().any(|set| set.is_empty()) {
+        return Err(VideoDecodeError::InvalidDecoderConfig {
+            reason: "video decoder parameter sets must not be empty".to_string(),
+        });
     }
+    let mut pointers = parameter_sets
+        .iter()
+        .filter_map(|set| NonNull::new(set.as_ptr().cast_mut()))
+        .collect::<Vec<_>>();
+    let mut sizes = parameter_sets
+        .iter()
+        .map(|set| set.len())
+        .collect::<Vec<_>>();
+    let mut raw: *const objc2_core_media::CMFormatDescription = null();
+    #[allow(unsafe_code)]
+    // SAFETY: The parameter-set pointers and sizes describe live slices for the
+    // duration of the Create call, and `raw` is a valid out-parameter.
+    let status = unsafe {
+        if hevc {
+            objc2_core_media::CMVideoFormatDescriptionCreateFromHEVCParameterSets(
+                None,
+                pointers.len(),
+                NonNull::from(&mut pointers[0]),
+                NonNull::from(&mut sizes[0]),
+                nal_length_size,
+                None,
+                NonNull::from(&mut raw),
+            )
+        } else {
+            objc2_core_media::CMVideoFormatDescriptionCreateFromH264ParameterSets(
+                None,
+                pointers.len(),
+                NonNull::from(&mut pointers[0]),
+                NonNull::from(&mut sizes[0]),
+                nal_length_size,
+                NonNull::from(&mut raw),
+            )
+        }
+    };
+    if status != 0 {
+        return Err(VideoDecodeError::BackendFailed {
+            reason: format!("CMVideoFormatDescriptionCreate returned {status}"),
+        });
+    }
+    let raw = NonNull::new(raw.cast_mut()).ok_or_else(|| VideoDecodeError::BackendFailed {
+        reason: "CMVideoFormatDescriptionCreate returned no description".to_string(),
+    })?;
+    #[allow(unsafe_code)]
+    // SAFETY: Both Create functions return a video-format-description object
+    // at +1, represented by the CMFormatDescription supertype in their ABI.
+    Ok(unsafe {
+        objc2_core_foundation::CFRetained::from_raw(
+            raw.cast::<objc2_core_media::CMVideoFormatDescription>(),
+        )
+    })
 }
 
 #[cfg(target_os = "macos")]
 fn block_buffer_from_packet(
     bytes: &[u8],
-) -> Result<core_media::block_buffer::CMBlockBuffer, VideoDecodeError> {
-    use core_media::block_buffer::CMBlockBuffer;
+) -> Result<objc2_core_foundation::CFRetained<objc2_core_media::CMBlockBuffer>, VideoDecodeError> {
+    use std::ptr::{NonNull, null, null_mut};
 
+    let mut raw = null_mut();
     #[allow(unsafe_code)]
-    // SAFETY: The block buffer references the immutable packet slice only while
-    // the caller synchronously builds and submits the CMSampleBuffer; the input
-    // packet bytes outlive the decode wait in `decode_videotoolbox_bgra_frames`.
-    unsafe {
-        CMBlockBuffer::new_with_memory_block_from_slice(bytes, 0, bytes.len(), 0).map_err(
-            |status| VideoDecodeError::BackendFailed {
-                reason: format!("CMBlockBufferCreateWithMemoryBlock returned {status}"),
-            },
+    // SAFETY: A null memory block asks CoreMedia to allocate `bytes.len()` bytes;
+    // `raw` is a valid out-parameter and the custom source is absent.
+    let status = unsafe {
+        objc2_core_media::CMBlockBuffer::create_with_memory_block(
+            None,
+            null_mut(),
+            bytes.len(),
+            None,
+            null(),
+            0,
+            bytes.len(),
+            0,
+            NonNull::from(&mut raw),
         )
+    };
+    if status != 0 {
+        return Err(VideoDecodeError::BackendFailed {
+            reason: format!("CMBlockBufferCreateWithMemoryBlock returned {status}"),
+        });
     }
+    let raw = NonNull::new(raw).ok_or_else(|| VideoDecodeError::BackendFailed {
+        reason: "CMBlockBufferCreateWithMemoryBlock returned no buffer".to_string(),
+    })?;
+    #[allow(unsafe_code)]
+    // SAFETY: CoreMedia returned this block buffer at +1 under the Create rule.
+    let buffer = unsafe { objc2_core_foundation::CFRetained::from_raw(raw) };
+    let source = NonNull::new(bytes.as_ptr().cast_mut().cast()).ok_or_else(|| {
+        VideoDecodeError::InvalidInput {
+            reason: "compressed packet is empty".to_string(),
+        }
+    })?;
+    #[allow(unsafe_code)]
+    // SAFETY: `source` spans `bytes.len()` readable bytes and the destination
+    // buffer was allocated with exactly that writable capacity.
+    let status = unsafe {
+        objc2_core_media::CMBlockBuffer::replace_data_bytes(source, &buffer, 0, bytes.len())
+    };
+    if status != 0 {
+        return Err(VideoDecodeError::BackendFailed {
+            reason: format!("CMBlockBufferReplaceDataBytes returned {status}"),
+        });
+    }
+    Ok(buffer)
 }
 
 #[cfg(target_os = "macos")]
-fn cm_time_point(point: TimePoint) -> Result<core_media::time::CMTime, VideoDecodeError> {
+fn sample_buffer_from_packet(
+    block_buffer: &objc2_core_media::CMBlockBuffer,
+    format_description: &objc2_core_media::CMFormatDescription,
+    timing: &[objc2_core_media::CMSampleTimingInfo; 1],
+    sizes: &[usize; 1],
+) -> Result<objc2_core_foundation::CFRetained<objc2_core_media::CMSampleBuffer>, VideoDecodeError> {
+    use std::ptr::{NonNull, null_mut};
+
+    let mut raw = null_mut();
+    #[allow(unsafe_code)]
+    // SAFETY: The block buffer, format description, timing entry, and size entry
+    // are valid for the call and `raw` is a valid out-parameter.
+    let status = unsafe {
+        objc2_core_media::CMSampleBuffer::create_ready(
+            None,
+            Some(block_buffer),
+            Some(format_description),
+            1,
+            1,
+            timing.as_ptr(),
+            1,
+            sizes.as_ptr(),
+            NonNull::from(&mut raw),
+        )
+    };
+    if status != 0 {
+        return Err(VideoDecodeError::BackendFailed {
+            reason: format!("CMSampleBufferCreateReady returned {status}"),
+        });
+    }
+    let raw = NonNull::new(raw).ok_or_else(|| VideoDecodeError::BackendFailed {
+        reason: "CMSampleBufferCreateReady returned no sample buffer".to_string(),
+    })?;
+    #[allow(unsafe_code)]
+    // SAFETY: CoreMedia returned this sample buffer at +1 under the Create rule.
+    Ok(unsafe { objc2_core_foundation::CFRetained::from_raw(raw) })
+}
+
+#[cfg(target_os = "macos")]
+fn cm_time_point(point: TimePoint) -> Result<objc2_core_media::CMTime, VideoDecodeError> {
     cm_time(point.units, point.scale)
 }
 
 #[cfg(target_os = "macos")]
-fn cm_time_delta(delta: TimeDelta) -> Result<core_media::time::CMTime, VideoDecodeError> {
+fn cm_time_delta(delta: TimeDelta) -> Result<objc2_core_media::CMTime, VideoDecodeError> {
     cm_time(delta.units, delta.scale)
 }
 
 #[cfg(target_os = "macos")]
-fn cm_time(units: u64, scale: TimeScale) -> Result<core_media::time::CMTime, VideoDecodeError> {
+fn cm_time(units: u64, scale: TimeScale) -> Result<objc2_core_media::CMTime, VideoDecodeError> {
     let value = i64::try_from(units).map_err(|_| VideoDecodeError::InvalidInput {
         reason: "decode timestamp does not fit CoreMedia CMTime value".to_string(),
     })?;
@@ -782,11 +967,13 @@ fn cm_time(units: u64, scale: TimeScale) -> Result<core_media::time::CMTime, Vid
             reason: "decode timestamp scale must be positive".to_string(),
         });
     }
-    Ok(core_media::time::CMTime::make(value, timescale))
+    #[allow(unsafe_code)]
+    // SAFETY: `timescale` was validated as positive.
+    Ok(unsafe { objc2_core_media::CMTime::new(value, timescale) })
 }
 
 #[cfg(target_os = "macos")]
-fn time_point_from_cm_time(time: core_media::time::CMTime) -> Result<TimePoint, VideoDecodeError> {
+fn time_point_from_cm_time(time: objc2_core_media::CMTime) -> Result<TimePoint, VideoDecodeError> {
     if time.timescale <= 0 || time.value < 0 {
         return Err(VideoDecodeError::BackendFailed {
             reason: "VideoToolbox returned invalid presentation timestamp".to_string(),
@@ -801,7 +988,7 @@ fn time_point_from_cm_time(time: core_media::time::CMTime) -> Result<TimePoint, 
 }
 
 #[cfg(target_os = "macos")]
-fn time_delta_from_cm_time(time: core_media::time::CMTime) -> Result<TimeDelta, VideoDecodeError> {
+fn time_delta_from_cm_time(time: objc2_core_media::CMTime) -> Result<TimeDelta, VideoDecodeError> {
     if time.timescale <= 0 || time.value < 0 {
         return Err(VideoDecodeError::BackendFailed {
             reason: "VideoToolbox returned invalid frame duration".to_string(),
@@ -817,73 +1004,64 @@ fn time_delta_from_cm_time(time: core_media::time::CMTime) -> Result<TimeDelta, 
 
 #[cfg(target_os = "macos")]
 fn pixel_buffer_from_image_buffer(
-    image_buffer: &core_video::image_buffer::CVImageBuffer,
-) -> Option<core_video::pixel_buffer::CVPixelBuffer> {
-    use core_foundation::base::TCFType;
-    use core_video::pixel_buffer::{CVPixelBuffer, CVPixelBufferRef};
-
+    image_buffer: &objc2_core_video::CVImageBuffer,
+) -> Option<&objc2_core_video::CVPixelBuffer> {
     #[allow(unsafe_code)]
-    // SAFETY: VideoToolbox's decompression callback supplies a CVImageBuffer
-    // that is a CVPixelBuffer for video decode output. The type check below
-    // verifies the wrapped CF object before pixel-buffer access.
-    unsafe {
-        let pixel_buffer = CVPixelBuffer::wrap_under_get_rule(
-            image_buffer.as_concrete_TypeRef() as CVPixelBufferRef
-        );
-        (pixel_buffer.get_width() > 0 && pixel_buffer.get_height() > 0).then_some(pixel_buffer)
-    }
+    // SAFETY: VideoToolbox decode output image buffers are CVPixelBuffers. The
+    // dimension checks reject an invalid or incompatible callback object.
+    let pixel_buffer =
+        unsafe { &*(std::ptr::from_ref(image_buffer).cast::<objc2_core_video::CVPixelBuffer>()) };
+    (objc2_core_video::CVPixelBufferGetWidth(pixel_buffer) > 0
+        && objc2_core_video::CVPixelBufferGetHeight(pixel_buffer) > 0)
+        .then_some(pixel_buffer)
 }
 
 #[cfg(target_os = "macos")]
 fn copy_bgra_pixel_buffer(
-    pixel_buffer: &core_video::pixel_buffer::CVPixelBuffer,
+    pixel_buffer: &objc2_core_video::CVPixelBuffer,
     format: RawVideoFormat,
 ) -> Result<Vec<u8>, VideoDecodeError> {
-    use core_video::{
-        pixel_buffer::{kCVPixelBufferLock_ReadOnly, kCVPixelFormatType_32BGRA},
-        r#return::kCVReturnSuccess,
-    };
-
-    if pixel_buffer.get_pixel_format() != kCVPixelFormatType_32BGRA {
+    let pixel_format = objc2_core_video::CVPixelBufferGetPixelFormatType(pixel_buffer);
+    if pixel_format != objc2_core_video::kCVPixelFormatType_32BGRA {
         return Err(VideoDecodeError::BackendFailed {
             reason: format!(
                 "VideoToolbox returned pixel format {}, expected BGRA",
-                pixel_buffer.get_pixel_format()
+                pixel_format
             ),
         });
     }
-    if pixel_buffer.get_width() != format.width as usize
-        || pixel_buffer.get_height() != format.height as usize
-    {
+    let width = objc2_core_video::CVPixelBufferGetWidth(pixel_buffer);
+    let height = objc2_core_video::CVPixelBufferGetHeight(pixel_buffer);
+    if width != format.width as usize || height != format.height as usize {
         return Err(VideoDecodeError::BackendFailed {
             reason: format!(
                 "VideoToolbox returned {}x{}, expected {}x{}",
-                pixel_buffer.get_width(),
-                pixel_buffer.get_height(),
-                format.width,
-                format.height
+                width, height, format.width, format.height
             ),
         });
     }
 
-    let status = pixel_buffer.lock_base_address(kCVPixelBufferLock_ReadOnly);
-    if status != kCVReturnSuccess {
+    let flags = objc2_core_video::CVPixelBufferLockFlags::ReadOnly;
+    #[allow(unsafe_code)]
+    // SAFETY: The callback pixel buffer is live and is locked only for reading.
+    let status = unsafe { objc2_core_video::CVPixelBufferLockBaseAddress(pixel_buffer, flags) };
+    if status != objc2_core_video::kCVReturnSuccess {
         return Err(VideoDecodeError::BackendFailed {
             reason: format!("CVPixelBufferLockBaseAddress returned {status}"),
         });
     }
 
     let row_bytes = format.width as usize * 4;
-    let bytes_per_row = pixel_buffer.get_bytes_per_row();
+    let bytes_per_row = objc2_core_video::CVPixelBufferGetBytesPerRow(pixel_buffer);
     let mut pixels = vec![0_u8; row_bytes * format.height as usize];
     #[allow(unsafe_code)]
     // SAFETY: The pixel buffer is locked for read access, the base pointer is
     // valid for at least `bytes_per_row * height`, and the destination vector
     // is sized for tightly packed BGRA rows.
     unsafe {
-        let base = pixel_buffer.get_base_address() as *const u8;
+        let base = objc2_core_video::CVPixelBufferGetBaseAddress(pixel_buffer).cast::<u8>();
         if base.is_null() || bytes_per_row < row_bytes {
-            let _ = pixel_buffer.unlock_base_address(kCVPixelBufferLock_ReadOnly);
+            let _ = objc2_core_video::CVPixelBufferUnlockBaseAddress(pixel_buffer, flags);
             return Err(VideoDecodeError::BackendFailed {
                 reason: "CVPixelBuffer returned invalid BGRA storage".to_string(),
             });
@@ -895,8 +1073,10 @@ fn copy_bgra_pixel_buffer(
         }
     }
 
-    let status = pixel_buffer.unlock_base_address(kCVPixelBufferLock_ReadOnly);
-    if status != kCVReturnSuccess {
+    #[allow(unsafe_code)]
+    // SAFETY: This balances the successful read lock above.
+    let status = unsafe { objc2_core_video::CVPixelBufferUnlockBaseAddress(pixel_buffer, flags) };
+    if status != objc2_core_video::kCVReturnSuccess {
         return Err(VideoDecodeError::BackendFailed {
             reason: format!("CVPixelBufferUnlockBaseAddress returned {status}"),
         });

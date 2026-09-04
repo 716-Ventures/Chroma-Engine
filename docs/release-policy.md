@@ -43,14 +43,10 @@ Release artifacts must be built from a clean commit and published with checksums
 
 The CI `release-build` job uses `cargo auditable build --locked --release --bin chroma-engine` on macOS, Linux, and Windows so release binaries carry dependency metadata before packaging is formalized.
 
-The current Apple bindings still transitively use `block 0.1.6`. Chroma Engine carries a minimal
-source-compatible patch that gives its opaque Objective-C class declaration a valid C layout and
-uses explicit C ABIs. `cargo check --future-incompat-report` must remain at zero until the Apple
-backend is migrated to the maintained `objc2` framework crates.
-
-The all-at-once ownership-boundary migration plan is documented in
-[`apple-objc2-migration.md`](apple-objc2-migration.md). Do not mix old and new Core Foundation
-wrapper families inside a single asynchronous codec callback.
+The Apple video boundary uses the maintained `objc2` framework crates and `block2`; the legacy
+`block 0.1.6` graph and its local compatibility patch are absent. Keep
+`cargo check --future-incompat-report` at zero, and preserve the unified ownership rules documented
+in [`apple-objc2-migration.md`](apple-objc2-migration.md) when extending native codec callbacks.
 
 ## Client Migration Notes
 

@@ -741,14 +741,15 @@ fn video_decode_backend_state(os: &str, kind: HardwareKind, codec: VideoCodec) -
 
 #[cfg(target_os = "macos")]
 fn video_toolbox_decode_supported(codec: VideoCodec) -> bool {
-    use core_media::format_description::{kCMVideoCodecType_H264, kCMVideoCodecType_HEVC};
-    use video_toolbox::decompression_session::VTDecompressionSession;
-
     let codec_type = match codec {
-        VideoCodec::H264 => kCMVideoCodecType_H264,
-        VideoCodec::Hevc => kCMVideoCodecType_HEVC,
+        VideoCodec::H264 => objc2_core_media::kCMVideoCodecType_H264,
+        VideoCodec::Hevc => objc2_core_media::kCMVideoCodecType_HEVC,
     };
-    VTDecompressionSession::is_hardware_decode_supported(codec_type)
+    #[allow(unsafe_code)]
+    // SAFETY: `codec_type` is one of CoreMedia's declared video codec constants.
+    unsafe {
+        objc2_video_toolbox::VTIsHardwareDecodeSupported(codec_type)
+    }
 }
 
 #[cfg(not(target_os = "macos"))]

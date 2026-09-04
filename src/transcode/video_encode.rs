@@ -52,7 +52,7 @@ pub struct VideoToolboxH264EncoderSession {
     bitrate: u32,
     encoded_batches: u64,
     #[cfg(target_os = "macos")]
-    session: video_toolbox::compression_session::VTCompressionSession,
+    session: objc2_core_foundation::CFRetained<objc2_video_toolbox::VTCompressionSession>,
 }
 
 impl std::fmt::Debug for VideoToolboxH264EncoderSession {
@@ -98,7 +98,11 @@ impl VideoToolboxH264EncoderSession {
 #[cfg(target_os = "macos")]
 impl Drop for VideoToolboxH264EncoderSession {
     fn drop(&mut self) {
-        self.session.invalidate();
+        #[allow(unsafe_code)]
+        // SAFETY: The retained session is valid until this owner is dropped.
+        unsafe {
+            self.session.invalidate();
+        }
     }
 }
 
@@ -321,26 +325,14 @@ fn validate_raw_video_frames(
 fn platform_probe_videotoolbox_h264_session(
     format: RawVideoFormat,
 ) -> Result<VideoEncodeSessionInfo, VideoEncodeError> {
-    use core_media::format_description::kCMVideoCodecType_H264;
-    use video_toolbox::compression_session::VTCompressionSession;
-
-    let session = VTCompressionSession::new(
-        format.width as i32,
-        format.height as i32,
-        kCMVideoCodecType_H264,
-        None,
-        None,
-        default_allocator(),
-    )
-    .map_err(|status| VideoEncodeError::BackendFailed {
-        reason: format!("VTCompressionSessionCreate(H.264) returned {status}"),
-    })?;
-    session
-        .prepare_to_encode_frames()
-        .map_err(|status| VideoEncodeError::BackendFailed {
-            reason: format!("VTCompressionSessionPrepareToEncodeFrames(H.264) returned {status}"),
-        })?;
-    session.invalidate();
+    let session =
+        new_compression_session(format, objc2_core_media::kCMVideoCodecType_H264, "H.264")?;
+    prepare_compression_session(&session, "H.264")?;
+    #[allow(unsafe_code)]
+    // SAFETY: The session remains retained for the duration of this call.
+    unsafe {
+        session.invalidate();
+    }
 
     Ok(VideoEncodeSessionInfo {
         codec: VideoCodec::H264,
@@ -356,26 +348,14 @@ fn platform_probe_videotoolbox_h264_session(
 fn platform_probe_videotoolbox_hevc_session(
     format: RawVideoFormat,
 ) -> Result<VideoEncodeSessionInfo, VideoEncodeError> {
-    use core_media::format_description::kCMVideoCodecType_HEVC;
-    use video_toolbox::compression_session::VTCompressionSession;
-
-    let session = VTCompressionSession::new(
-        format.width as i32,
-        format.height as i32,
-        kCMVideoCodecType_HEVC,
-        None,
-        None,
-        default_allocator(),
-    )
-    .map_err(|status| VideoEncodeError::BackendFailed {
-        reason: format!("VTCompressionSessionCreate(HEVC) returned {status}"),
-    })?;
-    session
-        .prepare_to_encode_frames()
-        .map_err(|status| VideoEncodeError::BackendFailed {
-            reason: format!("VTCompressionSessionPrepareToEncodeFrames(HEVC) returned {status}"),
-        })?;
-    session.invalidate();
+    let session =
+        new_compression_session(format, objc2_core_media::kCMVideoCodecType_HEVC, "HEVC")?;
+    prepare_compression_session(&session, "HEVC")?;
+    #[allow(unsafe_code)]
+    // SAFETY: The session remains retained for the duration of this call.
+    unsafe {
+        session.invalidate();
+    }
 
     Ok(VideoEncodeSessionInfo {
         codec: VideoCodec::Hevc,
@@ -388,167 +368,88 @@ fn platform_probe_videotoolbox_hevc_session(
 }
 
 #[cfg(target_os = "macos")]
-fn default_allocator() -> core_foundation::base::CFAllocator {
-    use core_foundation::base::TCFType;
-    use core_foundation_sys::base::CFAllocatorGetDefault;
+fn new_compression_session(
+    format: RawVideoFormat,
+    codec: objc2_core_media::CMVideoCodecType,
+    label: &str,
+) -> Result<
+    objc2_core_foundation::CFRetained<objc2_video_toolbox::VTCompressionSession>,
+    VideoEncodeError,
+> {
+    use std::ptr::{NonNull, null_mut};
 
+    let mut raw = null_mut();
     #[allow(unsafe_code)]
-    // SAFETY: CFAllocatorGetDefault returns the current process default allocator
-    // under CoreFoundation's get rule. The wrapper retains it before use.
-    unsafe {
-        core_foundation::base::CFAllocator::wrap_under_get_rule(CFAllocatorGetDefault())
+    // SAFETY: All optional configuration pointers are null and `raw` is a valid
+    // out-parameter. A successful Create call returns a +1 retained session.
+    let status = unsafe {
+        objc2_video_toolbox::VTCompressionSession::create(
+            None,
+            format.width as i32,
+            format.height as i32,
+            codec,
+            None,
+            None,
+            None,
+            None,
+            null_mut(),
+            NonNull::from(&mut raw),
+        )
+    };
+    if status != 0 {
+        return Err(VideoEncodeError::BackendFailed {
+            reason: format!("VTCompressionSessionCreate({label}) returned {status}"),
+        });
     }
+    let raw = NonNull::new(raw).ok_or_else(|| VideoEncodeError::BackendFailed {
+        reason: format!("VTCompressionSessionCreate({label}) returned no session"),
+    })?;
+    #[allow(unsafe_code)]
+    // SAFETY: VideoToolbox returned this pointer at +1 under the Create rule.
+    Ok(unsafe { objc2_core_foundation::CFRetained::from_raw(raw) })
+}
+
+#[cfg(target_os = "macos")]
+fn prepare_compression_session(
+    session: &objc2_video_toolbox::VTCompressionSession,
+    label: &str,
+) -> Result<(), VideoEncodeError> {
+    #[allow(unsafe_code)]
+    // SAFETY: `session` is a live VideoToolbox compression session.
+    let status = unsafe { session.prepare_to_encode_frames() };
+    (status == 0)
+        .then_some(())
+        .ok_or_else(|| VideoEncodeError::BackendFailed {
+            reason: format!("VTCompressionSessionPrepareToEncodeFrames({label}) returned {status}"),
+        })
 }
 
 #[cfg(target_os = "macos")]
 fn platform_encode_h264_videotoolbox_bgra_frame(
     format: RawVideoFormat,
     bgra: &[u8],
-    _bitrate: u32,
+    bitrate: u32,
 ) -> Result<EncodedVideoOutput, VideoEncodeError> {
-    use std::sync::{Arc, Mutex};
-
-    use core_media::{format_description::kCMVideoCodecType_H264, time::CMTime};
-    use video_toolbox::compression_session::VTCompressionSession;
-
-    let session = VTCompressionSession::new(
-        format.width as i32,
-        format.height as i32,
-        kCMVideoCodecType_H264,
-        None,
-        None,
-        default_allocator(),
-    )
-    .map_err(|status| VideoEncodeError::BackendFailed {
-        reason: format!("VTCompressionSessionCreate(H.264) returned {status}"),
-    })?;
-    session
-        .prepare_to_encode_frames()
-        .map_err(|status| VideoEncodeError::BackendFailed {
-            reason: format!("VTCompressionSessionPrepareToEncodeFrames(H.264) returned {status}"),
-        })?;
-
-    let pixel_buffer = bgra_pixel_buffer(format, bgra)?;
-    let image_buffer = image_buffer_from_pixel_buffer(&pixel_buffer);
-    let frames = Arc::new(Mutex::new(Vec::<EncodedVideoFrame>::new()));
-    let decoder_config = Arc::new(Mutex::new(None::<Vec<u8>>));
-    let callback_error = Arc::new(Mutex::new(None::<VideoEncodeError>));
-    let frames_out = Arc::clone(&frames);
-    let config_out = Arc::clone(&decoder_config);
-    let error_out = Arc::clone(&callback_error);
+    let mut session = VideoToolboxH264EncoderSession::new(format, bitrate)?;
     let time_scale = TimeScale {
         units_per_second: format.frame_rate_num,
     };
-    let duration_units = format.frame_rate_den;
-    let duration = TimeDelta {
-        units: u64::from(duration_units),
-        scale: time_scale,
-    };
-
-    session
-        .encode_frame_with_closure(
-            image_buffer,
-            CMTime::make(0, format.frame_rate_num as i32),
-            CMTime::make(format.frame_rate_den as i64, format.frame_rate_num as i32),
-            None,
-            move |status, _flags, sample_buffer_ref| {
-                if status != 0 {
-                    set_encode_callback_error(
-                        &error_out,
-                        VideoEncodeError::BackendFailed {
-                            reason: format!("VideoToolbox H.264 encode callback returned {status}"),
-                        },
-                    );
-                    return;
-                }
-                if sample_buffer_ref.is_null() {
-                    set_encode_callback_error(
-                        &error_out,
-                        VideoEncodeError::BackendFailed {
-                            reason: "VideoToolbox H.264 encode callback returned no sample buffer"
-                                .to_string(),
-                        },
-                    );
-                    return;
-                }
-                let Some((payload, config)) = copy_h264_sample(sample_buffer_ref) else {
-                    set_encode_callback_error(
-                        &error_out,
-                        VideoEncodeError::BackendFailed {
-                            reason: "VideoToolbox H.264 sample buffer copy failed".to_string(),
-                        },
-                    );
-                    return;
-                };
-                if let Ok(mut guard) = config_out.lock()
-                    && guard.is_none()
-                {
-                    *guard = config;
-                }
-                match frames_out.lock() {
-                    Ok(mut guard) => guard.push(EncodedVideoFrame {
-                        pts: TimePoint {
-                            units: 0,
-                            scale: time_scale,
-                        },
-                        dts: TimePoint {
-                            units: 0,
-                            scale: time_scale,
-                        },
-                        duration,
-                        payload,
-                        keyframe: true,
-                    }),
-                    Err(_) => set_encode_callback_error(
-                        &error_out,
-                        VideoEncodeError::BackendFailed {
-                            reason: "VideoToolbox H.264 frame output lock was poisoned".to_string(),
-                        },
-                    ),
-                }
-            },
-        )
-        .map_err(|status| VideoEncodeError::BackendFailed {
-            reason: format!("VTCompressionSessionEncodeFrame(H.264) returned {status}"),
-        })?;
-    session
-        .complete_frames(CMTime::make(i64::MAX, format.frame_rate_num as i32))
-        .map_err(|status| VideoEncodeError::BackendFailed {
-            reason: format!("VTCompressionSessionCompleteFrames(H.264) returned {status}"),
-        })?;
-    session.invalidate();
-    if let Some(error) = take_encode_callback_error(&callback_error)? {
-        return Err(error);
-    }
-
-    let frames = frames
-        .lock()
-        .map_err(|_| VideoEncodeError::BackendFailed {
-            reason: "VideoToolbox frame output lock was poisoned".to_string(),
-        })?
-        .clone();
-    if frames.is_empty() {
-        return Err(VideoEncodeError::BackendFailed {
-            reason: "VideoToolbox emitted no H.264 sample buffers".to_string(),
-        });
-    }
-    let decoder_config = decoder_config
-        .lock()
-        .map_err(|_| VideoEncodeError::BackendFailed {
-            reason: "VideoToolbox decoder config lock was poisoned".to_string(),
-        })?
-        .clone();
-
-    Ok(EncodedVideoOutput {
-        stream: EncodedVideoStream {
-            codec: VideoCodec::H264,
-            width: format.width,
-            height: format.height,
-            time_scale,
-            decoder_config,
+    session.encode(&[RawVideoFrameRef {
+        pts: TimePoint {
+            units: 0,
+            scale: time_scale,
         },
-        frames,
-    })
+        dts: TimePoint {
+            units: 0,
+            scale: time_scale,
+        },
+        duration: TimeDelta {
+            units: u64::from(format.frame_rate_den),
+            scale: time_scale,
+        },
+        bytes: bgra,
+        keyframe: true,
+    }])
 }
 
 #[cfg(target_os = "macos")]
@@ -556,48 +457,41 @@ fn platform_new_h264_encoder_session(
     format: RawVideoFormat,
     bitrate: u32,
 ) -> Result<VideoToolboxH264EncoderSession, VideoEncodeError> {
-    use core_media::format_description::kCMVideoCodecType_H264;
-    use video_toolbox::{
-        compression_properties::CompressionPropertyKey, compression_session::VTCompressionSession,
-        session::TVTSession,
-    };
-
-    let session = VTCompressionSession::new(
-        format.width as i32,
-        format.height as i32,
-        kCMVideoCodecType_H264,
-        None,
-        None,
-        default_allocator(),
-    )
-    .map_err(|status| VideoEncodeError::BackendFailed {
-        reason: format!("VTCompressionSessionCreate(H.264 batch) returned {status}"),
-    })?;
-    let vt_session = session.as_session();
-    set_vt_property_bool(&vt_session, CompressionPropertyKey::RealTime, true)?;
-    set_vt_property_bool(
-        &vt_session,
-        CompressionPropertyKey::AllowFrameReordering,
-        false,
+    let session = new_compression_session(
+        format,
+        objc2_core_media::kCMVideoCodecType_H264,
+        "H.264 batch",
     )?;
-    set_vt_property_i32(
-        &vt_session,
-        CompressionPropertyKey::AverageBitRate,
-        i32::try_from(bitrate).unwrap_or(i32::MAX),
-    )?;
-    set_vt_property_i32(&vt_session, CompressionPropertyKey::MaxFrameDelayCount, 0)?;
-    set_vt_property_i32(
-        &vt_session,
-        CompressionPropertyKey::ExpectedFrameRate,
-        i32::try_from(format.frame_rate_num / format.frame_rate_den.max(1)).unwrap_or(i32::MAX),
-    )?;
-    session
-        .prepare_to_encode_frames()
-        .map_err(|status| VideoEncodeError::BackendFailed {
-            reason: format!(
-                "VTCompressionSessionPrepareToEncodeFrames(H.264 batch) returned {status}"
-            ),
-        })?;
+    #[allow(unsafe_code)]
+    // SAFETY: These framework constants are immutable process-lifetime CFStrings.
+    unsafe {
+        set_vt_property_bool(
+            &session,
+            objc2_video_toolbox::kVTCompressionPropertyKey_RealTime,
+            true,
+        )?;
+        set_vt_property_bool(
+            &session,
+            objc2_video_toolbox::kVTCompressionPropertyKey_AllowFrameReordering,
+            false,
+        )?;
+        set_vt_property_i32(
+            &session,
+            objc2_video_toolbox::kVTCompressionPropertyKey_AverageBitRate,
+            i32::try_from(bitrate).unwrap_or(i32::MAX),
+        )?;
+        set_vt_property_i32(
+            &session,
+            objc2_video_toolbox::kVTCompressionPropertyKey_MaxFrameDelayCount,
+            0,
+        )?;
+        set_vt_property_i32(
+            &session,
+            objc2_video_toolbox::kVTCompressionPropertyKey_ExpectedFrameRate,
+            i32::try_from(format.frame_rate_num / format.frame_rate_den.max(1)).unwrap_or(i32::MAX),
+        )?;
+    }
+    prepare_compression_session(&session, "H.264 batch")?;
     Ok(VideoToolboxH264EncoderSession {
         format,
         bitrate,
@@ -613,7 +507,8 @@ fn platform_encode_h264_with_retained_session(
 ) -> Result<EncodedVideoOutput, VideoEncodeError> {
     use std::sync::{Arc, Mutex};
 
-    use core_media::time::CMTime;
+    use block2::RcBlock;
+    use objc2_core_media::{CMSampleBuffer, CMTime};
 
     let format = retained.format;
     let session = &retained.session;
@@ -632,88 +527,114 @@ fn platform_encode_h264_with_retained_session(
         let duration = input.duration;
         let keyframe = input.keyframe;
         let frame_properties = keyframe.then(force_keyframe_dictionary);
+        #[allow(unsafe_code)]
+        // SAFETY: Erasing the dictionary's generic key/value markers does not
+        // alter its Core Foundation representation.
+        let frame_properties = frame_properties
+            .as_deref()
+            .map(|dictionary| unsafe { dictionary.cast_unchecked() });
 
-        session
-            .encode_frame_with_closure(
+        let handler = RcBlock::new(
+            move |status: i32, _flags, sample_buffer_ref: *mut CMSampleBuffer| {
+                if status != 0 {
+                    set_encode_callback_error(
+                        &error_out,
+                        VideoEncodeError::BackendFailed {
+                            reason: format!(
+                                "VideoToolbox H.264 batch encode callback returned {status}"
+                            ),
+                        },
+                    );
+                    return;
+                }
+                let Some(sample_buffer) =
+                    std::ptr::NonNull::new(sample_buffer_ref).map(|value| value.as_ptr())
+                else {
+                    set_encode_callback_error(
+                        &error_out,
+                        VideoEncodeError::BackendFailed {
+                            reason:
+                                "VideoToolbox H.264 batch encode callback returned no sample buffer"
+                                    .to_string(),
+                        },
+                    );
+                    return;
+                };
+                #[allow(unsafe_code)]
+                // SAFETY: VideoToolbox owns the sample for the callback duration;
+                // `copy_h264_sample_objc2` copies all referenced bytes immediately.
+                let copied = unsafe { copy_h264_sample_objc2(&*sample_buffer) };
+                let Some((payload, config)) = copied else {
+                    set_encode_callback_error(
+                        &error_out,
+                        VideoEncodeError::BackendFailed {
+                            reason: "VideoToolbox H.264 batch sample buffer copy failed"
+                                .to_string(),
+                        },
+                    );
+                    return;
+                };
+                if let Ok(mut guard) = config_out.lock()
+                    && guard.is_none()
+                {
+                    *guard = config;
+                }
+                match frames_out.lock() {
+                    Ok(mut guard) => guard.push(EncodedVideoFrame {
+                        pts,
+                        dts,
+                        duration,
+                        payload,
+                        keyframe,
+                    }),
+                    Err(_) => set_encode_callback_error(
+                        &error_out,
+                        VideoEncodeError::BackendFailed {
+                            reason: "VideoToolbox H.264 batch frame output lock was poisoned"
+                                .to_string(),
+                        },
+                    ),
+                }
+            },
+        );
+        #[allow(unsafe_code)]
+        // SAFETY: The image buffer and optional properties remain alive for the
+        // submission, and VideoToolbox copies the escaping block as required.
+        let status = unsafe {
+            session.encode_frame_with_output_handler(
                 image_buffer,
-                CMTime::make(
+                CMTime::new(
                     i64::try_from(pts.units).unwrap_or(i64::MAX),
                     pts.scale.units_per_second as i32,
                 ),
-                CMTime::make(
+                CMTime::new(
                     i64::try_from(duration.units).unwrap_or(i64::MAX),
                     duration.scale.units_per_second as i32,
                 ),
-                frame_properties.as_ref(),
-                move |status, _flags, sample_buffer_ref| {
-                    if status != 0 {
-                        set_encode_callback_error(
-                            &error_out,
-                            VideoEncodeError::BackendFailed {
-                                reason: format!(
-                                    "VideoToolbox H.264 batch encode callback returned {status}"
-                                ),
-                            },
-                        );
-                        return;
-                    }
-                    if sample_buffer_ref.is_null() {
-                        set_encode_callback_error(
-                            &error_out,
-                            VideoEncodeError::BackendFailed {
-                                reason:
-                                    "VideoToolbox H.264 batch encode callback returned no sample buffer"
-                                        .to_string(),
-                            },
-                        );
-                        return;
-                    }
-                    let Some((payload, config)) = copy_h264_sample(sample_buffer_ref) else {
-                        set_encode_callback_error(
-                            &error_out,
-                            VideoEncodeError::BackendFailed {
-                                reason: "VideoToolbox H.264 batch sample buffer copy failed"
-                                    .to_string(),
-                            },
-                        );
-                        return;
-                    };
-                    if let Ok(mut guard) = config_out.lock()
-                        && guard.is_none()
-                    {
-                        *guard = config;
-                    }
-                    match frames_out.lock() {
-                        Ok(mut guard) => guard.push(EncodedVideoFrame {
-                                pts,
-                                dts,
-                                duration,
-                                payload,
-                                keyframe,
-                            }),
-                        Err(_) => set_encode_callback_error(
-                            &error_out,
-                            VideoEncodeError::BackendFailed {
-                                reason:
-                                    "VideoToolbox H.264 batch frame output lock was poisoned"
-                                        .to_string(),
-                            },
-                        ),
-                    }
-                },
+                frame_properties,
+                std::ptr::null_mut(),
+                std::ptr::from_ref(&*handler).cast_mut(),
             )
-            .map_err(|status| VideoEncodeError::BackendFailed {
+        };
+        if status != 0 {
+            return Err(VideoEncodeError::BackendFailed {
                 reason: format!("VTCompressionSessionEncodeFrame(H.264 batch) returned {status}"),
-            })?;
+            });
+        }
     }
-    session
-        .complete_frames(CMTime::make(
+    #[allow(unsafe_code)]
+    // SAFETY: The session is live and the timestamp uses a positive timescale.
+    let status = unsafe {
+        session.complete_frames(CMTime::new(
             i64::MAX,
             input_frames[0].pts.scale.units_per_second as i32,
         ))
-        .map_err(|status| VideoEncodeError::BackendFailed {
+    };
+    if status != 0 {
+        return Err(VideoEncodeError::BackendFailed {
             reason: format!("VTCompressionSessionCompleteFrames(H.264 batch) returned {status}"),
-        })?;
+        });
+    }
     if let Some(error) = take_encode_callback_error(&callback_error)? {
         return Err(error);
     }
@@ -771,39 +692,43 @@ fn platform_encode_h264_with_retained_session(
 
 #[cfg(target_os = "macos")]
 fn set_vt_property_bool(
-    session: &video_toolbox::session::VTSession,
-    key: video_toolbox::compression_properties::CompressionPropertyKey,
+    session: &objc2_video_toolbox::VTCompressionSession,
+    key: &objc2_core_foundation::CFString,
     value: bool,
 ) -> Result<(), VideoEncodeError> {
-    use core_foundation::{base::TCFType, boolean::CFBoolean};
-    session
-        .set_property(key.into(), CFBoolean::from(value).as_CFType())
-        .map_err(|status| VideoEncodeError::BackendFailed {
-            reason: format!("VTSessionSetProperty({key:?}) returned {status}"),
-        })
-        .or_else(ignore_unsupported_vt_property)
+    let value = objc2_core_foundation::CFBoolean::new(value);
+    set_vt_property(session, key, value.as_ref())
 }
 
 #[cfg(target_os = "macos")]
 fn set_vt_property_i32(
-    session: &video_toolbox::session::VTSession,
-    key: video_toolbox::compression_properties::CompressionPropertyKey,
+    session: &objc2_video_toolbox::VTCompressionSession,
+    key: &objc2_core_foundation::CFString,
     value: i32,
 ) -> Result<(), VideoEncodeError> {
-    use core_foundation::{base::TCFType, number::CFNumber};
-    session
-        .set_property(key.into(), CFNumber::from(value).as_CFType())
-        .map_err(|status| VideoEncodeError::BackendFailed {
-            reason: format!("VTSessionSetProperty({key:?}) returned {status}"),
-        })
-        .or_else(ignore_unsupported_vt_property)
+    let value = objc2_core_foundation::CFNumber::new_i32(value);
+    set_vt_property(session, key, value.as_ref())
 }
 
 #[cfg(target_os = "macos")]
-fn ignore_unsupported_vt_property(error: VideoEncodeError) -> Result<(), VideoEncodeError> {
-    match &error {
-        VideoEncodeError::BackendFailed { reason } if reason.contains("returned -12900") => Ok(()),
-        _ => Err(error),
+fn set_vt_property(
+    session: &objc2_video_toolbox::VTCompressionSession,
+    key: &objc2_core_foundation::CFString,
+    value: &objc2_core_foundation::CFType,
+) -> Result<(), VideoEncodeError> {
+    #[allow(unsafe_code)]
+    // SAFETY: VTCompressionSession is one of the documented concrete VTSession
+    // kinds, and the key/value pairs use the types required by VideoToolbox.
+    let status = unsafe {
+        let vt_session = &*(std::ptr::from_ref(session).cast::<objc2_video_toolbox::VTSession>());
+        objc2_video_toolbox::VTSessionSetProperty(vt_session, key, Some(value))
+    };
+    if status == 0 || status == -12900 {
+        Ok(())
+    } else {
+        Err(VideoEncodeError::BackendFailed {
+            reason: format!("VTSessionSetProperty returned {status}"),
+        })
     }
 }
 
@@ -832,18 +757,17 @@ fn take_encode_callback_error(
 }
 
 #[cfg(target_os = "macos")]
-fn force_keyframe_dictionary() -> core_foundation::dictionary::CFDictionary<
-    core_foundation::string::CFString,
-    core_foundation::base::CFType,
+fn force_keyframe_dictionary() -> objc2_core_foundation::CFRetained<
+    objc2_core_foundation::CFDictionary<
+        objc2_core_foundation::CFString,
+        objc2_core_foundation::CFType,
+    >,
 > {
-    use core_foundation::{
-        base::TCFType, boolean::CFBoolean, dictionary::CFDictionary, string::CFString,
-    };
-    use video_toolbox::compression_properties::EncodeFrameOptionKey;
-
-    let key = CFString::from(EncodeFrameOptionKey::ForceKeyFrame);
-    let value = CFBoolean::true_value().as_CFType();
-    CFDictionary::from_CFType_pairs(&[(key, value)])
+    #[allow(unsafe_code)]
+    // SAFETY: The framework key is an immutable process-lifetime CFString.
+    let key = unsafe { objc2_video_toolbox::kVTEncodeFrameOptionKey_ForceKeyFrame };
+    let value = objc2_core_foundation::CFBoolean::new(true);
+    objc2_core_foundation::CFDictionary::from_slices(&[key], &[value.as_ref()])
 }
 
 #[cfg(target_os = "macos")]
@@ -852,250 +776,164 @@ fn platform_encode_hevc_videotoolbox_bgra_frame(
     bgra: &[u8],
     _bitrate: u32,
 ) -> Result<EncodedVideoOutput, VideoEncodeError> {
+    encode_single_frame_objc2(format, bgra, VideoCodec::Hevc)
+}
+
+#[cfg(target_os = "macos")]
+fn encode_single_frame_objc2(
+    format: RawVideoFormat,
+    bgra: &[u8],
+    codec: VideoCodec,
+) -> Result<EncodedVideoOutput, VideoEncodeError> {
     use std::sync::{Arc, Mutex};
 
-    use core_media::{format_description::kCMVideoCodecType_HEVC, time::CMTime};
-    use video_toolbox::compression_session::VTCompressionSession;
+    use block2::RcBlock;
+    use objc2_core_media::{CMSampleBuffer, CMTime};
 
-    let session = VTCompressionSession::new(
-        format.width as i32,
-        format.height as i32,
-        kCMVideoCodecType_HEVC,
-        None,
-        None,
-        default_allocator(),
-    )
-    .map_err(|status| VideoEncodeError::BackendFailed {
-        reason: format!("VTCompressionSessionCreate(HEVC) returned {status}"),
-    })?;
-    session
-        .prepare_to_encode_frames()
-        .map_err(|status| VideoEncodeError::BackendFailed {
-            reason: format!("VTCompressionSessionPrepareToEncodeFrames(HEVC) returned {status}"),
-        })?;
-
+    let (codec_type, label) = match codec {
+        VideoCodec::H264 => (objc2_core_media::kCMVideoCodecType_H264, "H.264"),
+        VideoCodec::Hevc => (objc2_core_media::kCMVideoCodecType_HEVC, "HEVC"),
+    };
+    let session = new_compression_session(format, codec_type, label)?;
+    prepare_compression_session(&session, label)?;
     let pixel_buffer = bgra_pixel_buffer(format, bgra)?;
     let image_buffer = image_buffer_from_pixel_buffer(&pixel_buffer);
-    let frames = Arc::new(Mutex::new(Vec::<EncodedVideoFrame>::new()));
-    let decoder_config = Arc::new(Mutex::new(None::<Vec<u8>>));
-    let callback_error = Arc::new(Mutex::new(None::<VideoEncodeError>));
-    let frames_out = Arc::clone(&frames);
-    let config_out = Arc::clone(&decoder_config);
+    let result = Arc::new(Mutex::new(None));
+    let callback_error = Arc::new(Mutex::new(None));
+    let result_out = Arc::clone(&result);
     let error_out = Arc::clone(&callback_error);
-    let time_scale = TimeScale {
-        units_per_second: format.frame_rate_num,
-    };
-    let duration = TimeDelta {
-        units: u64::from(format.frame_rate_den),
-        scale: time_scale,
-    };
-
-    session
-        .encode_frame_with_closure(
+    let handler = RcBlock::new(
+        move |status: i32, _flags, sample_buffer_ref: *mut CMSampleBuffer| {
+            if status != 0 {
+                set_encode_callback_error(
+                    &error_out,
+                    VideoEncodeError::BackendFailed {
+                        reason: format!("VideoToolbox {label} encode callback returned {status}"),
+                    },
+                );
+                return;
+            }
+            let Some(sample_buffer) = std::ptr::NonNull::new(sample_buffer_ref) else {
+                set_encode_callback_error(
+                    &error_out,
+                    VideoEncodeError::BackendFailed {
+                        reason: format!(
+                            "VideoToolbox {label} encode callback returned no sample buffer"
+                        ),
+                    },
+                );
+                return;
+            };
+            #[allow(unsafe_code)]
+            // SAFETY: The callback owns a valid borrowed sample buffer for its
+            // duration and the helper copies every referenced byte.
+            let copied = unsafe {
+                match codec {
+                    VideoCodec::H264 => copy_h264_sample_objc2(sample_buffer.as_ref()),
+                    VideoCodec::Hevc => copy_hevc_sample_objc2(sample_buffer.as_ref()),
+                }
+            };
+            match copied {
+                Some(value) => {
+                    if let Ok(mut slot) = result_out.lock() {
+                        *slot = Some(value);
+                    }
+                }
+                None => set_encode_callback_error(
+                    &error_out,
+                    VideoEncodeError::BackendFailed {
+                        reason: format!("VideoToolbox {label} sample buffer copy failed"),
+                    },
+                ),
+            }
+        },
+    );
+    #[allow(unsafe_code)]
+    // SAFETY: Inputs remain live through submission and VideoToolbox copies the
+    // escaping handler. The timestamp timescale is validated as non-zero.
+    let status = unsafe {
+        session.encode_frame_with_output_handler(
             image_buffer,
-            CMTime::make(0, format.frame_rate_num as i32),
-            CMTime::make(format.frame_rate_den as i64, format.frame_rate_num as i32),
+            CMTime::new(0, format.frame_rate_num as i32),
+            CMTime::new(
+                i64::from(format.frame_rate_den),
+                format.frame_rate_num as i32,
+            ),
             None,
-            move |status, _flags, sample_buffer_ref| {
-                if status != 0 {
-                    set_encode_callback_error(
-                        &error_out,
-                        VideoEncodeError::BackendFailed {
-                            reason: format!("VideoToolbox HEVC encode callback returned {status}"),
-                        },
-                    );
-                    return;
-                }
-                if sample_buffer_ref.is_null() {
-                    set_encode_callback_error(
-                        &error_out,
-                        VideoEncodeError::BackendFailed {
-                            reason: "VideoToolbox HEVC encode callback returned no sample buffer"
-                                .to_string(),
-                        },
-                    );
-                    return;
-                }
-                let Some((payload, config)) = copy_hevc_sample(sample_buffer_ref) else {
-                    set_encode_callback_error(
-                        &error_out,
-                        VideoEncodeError::BackendFailed {
-                            reason: "VideoToolbox HEVC sample buffer copy failed".to_string(),
-                        },
-                    );
-                    return;
-                };
-                if let Ok(mut guard) = config_out.lock()
-                    && guard.is_none()
-                {
-                    *guard = config;
-                }
-                match frames_out.lock() {
-                    Ok(mut guard) => guard.push(EncodedVideoFrame {
-                        pts: TimePoint {
-                            units: 0,
-                            scale: time_scale,
-                        },
-                        dts: TimePoint {
-                            units: 0,
-                            scale: time_scale,
-                        },
-                        duration,
-                        payload,
-                        keyframe: true,
-                    }),
-                    Err(_) => set_encode_callback_error(
-                        &error_out,
-                        VideoEncodeError::BackendFailed {
-                            reason: "VideoToolbox HEVC frame output lock was poisoned".to_string(),
-                        },
-                    ),
-                }
-            },
+            std::ptr::null_mut(),
+            std::ptr::from_ref(&*handler).cast_mut(),
         )
-        .map_err(|status| VideoEncodeError::BackendFailed {
-            reason: format!("VTCompressionSessionEncodeFrame(HEVC) returned {status}"),
-        })?;
-    session
-        .complete_frames(CMTime::make(i64::MAX, format.frame_rate_num as i32))
-        .map_err(|status| VideoEncodeError::BackendFailed {
-            reason: format!("VTCompressionSessionCompleteFrames(HEVC) returned {status}"),
-        })?;
-    session.invalidate();
+    };
+    if status != 0 {
+        return Err(VideoEncodeError::BackendFailed {
+            reason: format!("VTCompressionSessionEncodeFrame({label}) returned {status}"),
+        });
+    }
+    #[allow(unsafe_code)]
+    // SAFETY: The session is live and the timestamp has a positive timescale.
+    let status =
+        unsafe { session.complete_frames(CMTime::new(i64::MAX, format.frame_rate_num as i32)) };
+    #[allow(unsafe_code)]
+    // SAFETY: This deterministically tears down the live session.
+    unsafe {
+        session.invalidate();
+    }
+    if status != 0 {
+        return Err(VideoEncodeError::BackendFailed {
+            reason: format!("VTCompressionSessionCompleteFrames({label}) returned {status}"),
+        });
+    }
     if let Some(error) = take_encode_callback_error(&callback_error)? {
         return Err(error);
     }
-
-    let frames = frames
+    let (payload, decoder_config) = result
         .lock()
         .map_err(|_| VideoEncodeError::BackendFailed {
             reason: "VideoToolbox frame output lock was poisoned".to_string(),
         })?
-        .clone();
-    if frames.is_empty() {
-        return Err(VideoEncodeError::BackendFailed {
-            reason: "VideoToolbox emitted no HEVC sample buffers".to_string(),
-        });
-    }
-    let decoder_config = decoder_config
-        .lock()
-        .map_err(|_| VideoEncodeError::BackendFailed {
-            reason: "VideoToolbox decoder config lock was poisoned".to_string(),
-        })?
-        .clone();
-
+        .clone()
+        .ok_or_else(|| VideoEncodeError::BackendFailed {
+            reason: format!("VideoToolbox emitted no {label} sample buffers"),
+        })?;
+    let time_scale = TimeScale {
+        units_per_second: format.frame_rate_num,
+    };
     Ok(EncodedVideoOutput {
         stream: EncodedVideoStream {
-            codec: VideoCodec::Hevc,
+            codec,
             width: format.width,
             height: format.height,
             time_scale,
             decoder_config,
         },
-        frames,
+        frames: vec![EncodedVideoFrame {
+            pts: TimePoint {
+                units: 0,
+                scale: time_scale,
+            },
+            dts: TimePoint {
+                units: 0,
+                scale: time_scale,
+            },
+            duration: TimeDelta {
+                units: u64::from(format.frame_rate_den),
+                scale: time_scale,
+            },
+            payload,
+            keyframe: true,
+        }],
     })
 }
 
 #[cfg(target_os = "macos")]
-fn copy_h264_sample(
-    sample_buffer_ref: core_media::sample_buffer::CMSampleBufferRef,
-) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
-    use core_foundation::base::TCFType;
-    use core_media::{block_buffer::CMBlockBuffer, sample_buffer::CMSampleBuffer};
-
-    #[allow(unsafe_code)]
-    // SAFETY: VideoToolbox owns the callback sample buffer for the duration of
-    // this closure. Chroma copies all data and parameter sets before returning.
-    let sample_buffer = unsafe { CMSampleBuffer::wrap_under_get_rule(sample_buffer_ref) };
-    let data_buffer: CMBlockBuffer = sample_buffer.get_data_buffer()?;
-    let mut payload = vec![0; data_buffer.get_data_length()];
-    data_buffer.copy_data_bytes(0, &mut payload).ok()?;
-    let config = sample_buffer
-        .get_format_description()
-        .and_then(|description| avc_decoder_config_from_format_description(&description));
-    Some((payload, config))
-}
-
-#[cfg(target_os = "macos")]
-fn copy_hevc_sample(
-    sample_buffer_ref: core_media::sample_buffer::CMSampleBufferRef,
-) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
-    use core_foundation::base::TCFType;
-    use core_media::{block_buffer::CMBlockBuffer, sample_buffer::CMSampleBuffer};
-
-    #[allow(unsafe_code)]
-    // SAFETY: VideoToolbox owns the callback sample buffer for the duration of
-    // this closure. Chroma copies all data and parameter sets before returning.
-    let sample_buffer = unsafe { CMSampleBuffer::wrap_under_get_rule(sample_buffer_ref) };
-    let data_buffer: CMBlockBuffer = sample_buffer.get_data_buffer()?;
-    let mut payload = vec![0; data_buffer.get_data_length()];
-    data_buffer.copy_data_bytes(0, &mut payload).ok()?;
-    let config = sample_buffer
-        .get_format_description()
-        .and_then(|description| hevc_decoder_config_from_format_description(&description));
-    Some((payload, config))
-}
-
-#[cfg(target_os = "macos")]
-fn avc_decoder_config_from_format_description(
-    description: &core_media::format_description::CMFormatDescription,
-) -> Option<Vec<u8>> {
-    use core_foundation::base::TCFType;
-    use core_media::format_description::CMVideoFormatDescription;
-
-    #[allow(unsafe_code)]
-    // SAFETY: The sample buffer's format description is a video format description
-    // for H.264 output. Parameter sets are copied before the description is dropped.
-    let video_description =
-        unsafe { CMVideoFormatDescription::wrap_under_get_rule(description.as_concrete_TypeRef()) };
-    let mut parameter_sets = Vec::new();
-    let (_, parameter_set_count, nal_length_size) =
-        video_description.get_h264_parameter_set_at_index(0).ok()?;
-    for index in 0..parameter_set_count {
-        let (bytes, _, _) = video_description
-            .get_h264_parameter_set_at_index(index)
-            .ok()?;
-        parameter_sets.push(bytes.to_vec());
-    }
-    build_avc_decoder_config(&parameter_sets, nal_length_size)
-}
-
-#[cfg(target_os = "macos")]
-fn hevc_decoder_config_from_format_description(
-    description: &core_media::format_description::CMFormatDescription,
-) -> Option<Vec<u8>> {
-    use core_foundation::base::TCFType;
-    use core_media::format_description::CMVideoFormatDescription;
-
-    #[allow(unsafe_code)]
-    // SAFETY: The sample buffer's format description is a video format description
-    // for HEVC output. Parameter sets are copied before the description is dropped.
-    let video_description =
-        unsafe { CMVideoFormatDescription::wrap_under_get_rule(description.as_concrete_TypeRef()) };
-    let mut parameter_sets = Vec::new();
-    let (_, parameter_set_count, nal_length_size) =
-        video_description.get_hevc_parameter_set_at_index(0).ok()?;
-    for index in 0..parameter_set_count {
-        let (bytes, _, _) = video_description
-            .get_hevc_parameter_set_at_index(index)
-            .ok()?;
-        parameter_sets.push(bytes.to_vec());
-    }
-    build_hevc_decoder_config(&parameter_sets, nal_length_size)
-}
-
-#[cfg(target_os = "macos")]
 fn image_buffer_from_pixel_buffer(
-    pixel_buffer: &core_video::pixel_buffer::CVPixelBuffer,
-) -> core_video::image_buffer::CVImageBuffer {
-    use core_foundation::base::TCFType;
-    use core_video::image_buffer::CVImageBuffer;
-
+    pixel_buffer: &objc2_core_video::CVPixelBuffer,
+) -> &objc2_core_video::CVImageBuffer {
     #[allow(unsafe_code)]
-    // SAFETY: CVPixelBuffer is a CVImageBuffer subtype. The wrapper retains the
-    // CoreVideo object while it is handed to VideoToolbox.
+    // SAFETY: CVPixelBuffer is a concrete CVImageBuffer subtype and the returned
+    // borrow cannot outlive the source pixel buffer.
     unsafe {
-        CVImageBuffer::wrap_under_get_rule(pixel_buffer.as_concrete_TypeRef())
+        &*(std::ptr::from_ref(pixel_buffer).cast::<objc2_core_video::CVImageBuffer>())
     }
 }
 
@@ -1103,35 +941,53 @@ fn image_buffer_from_pixel_buffer(
 fn bgra_pixel_buffer(
     format: RawVideoFormat,
     bgra: &[u8],
-) -> Result<core_video::pixel_buffer::CVPixelBuffer, VideoEncodeError> {
-    use core_video::pixel_buffer::{CVPixelBuffer, kCVPixelFormatType_32BGRA};
-    use core_video::r#return::kCVReturnSuccess;
+) -> Result<objc2_core_foundation::CFRetained<objc2_core_video::CVPixelBuffer>, VideoEncodeError> {
+    use std::ptr::{NonNull, null_mut};
 
-    let pixel_buffer = CVPixelBuffer::new(
-        kCVPixelFormatType_32BGRA,
-        format.width as usize,
-        format.height as usize,
-        None,
-    )
-    .map_err(|status| VideoEncodeError::BackendFailed {
-        reason: format!("CVPixelBufferCreate(BGRA) returned {status}"),
+    let mut raw = null_mut();
+    #[allow(unsafe_code)]
+    // SAFETY: `raw` is a valid out-parameter and the dimensions and pixel
+    // format were validated before this helper is called.
+    let status = unsafe {
+        objc2_core_video::CVPixelBufferCreate(
+            None,
+            format.width as usize,
+            format.height as usize,
+            objc2_core_video::kCVPixelFormatType_32BGRA,
+            None,
+            NonNull::from(&mut raw),
+        )
+    };
+    if status != objc2_core_video::kCVReturnSuccess {
+        return Err(VideoEncodeError::BackendFailed {
+            reason: format!("CVPixelBufferCreate(BGRA) returned {status}"),
+        });
+    }
+    let raw = NonNull::new(raw).ok_or_else(|| VideoEncodeError::BackendFailed {
+        reason: "CVPixelBufferCreate(BGRA) returned no pixel buffer".to_string(),
     })?;
-    let status = pixel_buffer.lock_base_address(0);
-    if status != kCVReturnSuccess {
+    #[allow(unsafe_code)]
+    // SAFETY: CoreVideo returned this object at +1 under the Create rule.
+    let pixel_buffer = unsafe { objc2_core_foundation::CFRetained::from_raw(raw) };
+    let flags = objc2_core_video::CVPixelBufferLockFlags::empty();
+    #[allow(unsafe_code)]
+    // SAFETY: The retained pixel buffer is valid and not otherwise CPU-locked.
+    let status = unsafe { objc2_core_video::CVPixelBufferLockBaseAddress(&pixel_buffer, flags) };
+    if status != objc2_core_video::kCVReturnSuccess {
         return Err(VideoEncodeError::BackendFailed {
             reason: format!("CVPixelBufferLockBaseAddress returned {status}"),
         });
     }
-    let bytes_per_row = pixel_buffer.get_bytes_per_row();
+    let bytes_per_row = objc2_core_video::CVPixelBufferGetBytesPerRow(&pixel_buffer);
     let row_bytes = format.width as usize * 4;
     #[allow(unsafe_code)]
     // SAFETY: The pixel buffer is locked for CPU writes, `base` points to at
     // least `bytes_per_row * height` bytes owned by CoreVideo, and each source
     // row is exactly `row_bytes` bytes from the validated BGRA frame slice.
     unsafe {
-        let base = pixel_buffer.get_base_address() as *mut u8;
+        let base = objc2_core_video::CVPixelBufferGetBaseAddress(&pixel_buffer).cast::<u8>();
         if base.is_null() || bytes_per_row < row_bytes {
-            let _ = pixel_buffer.unlock_base_address(0);
+            let _ = objc2_core_video::CVPixelBufferUnlockBaseAddress(&pixel_buffer, flags);
             return Err(VideoEncodeError::BackendFailed {
                 reason: "CVPixelBuffer returned invalid BGRA storage".to_string(),
             });
@@ -1142,13 +998,139 @@ fn bgra_pixel_buffer(
             std::ptr::copy_nonoverlapping(src, dst, row_bytes);
         }
     }
-    let status = pixel_buffer.unlock_base_address(0);
-    if status != kCVReturnSuccess {
+    #[allow(unsafe_code)]
+    // SAFETY: This balances the successful lock above.
+    let status = unsafe { objc2_core_video::CVPixelBufferUnlockBaseAddress(&pixel_buffer, flags) };
+    if status != objc2_core_video::kCVReturnSuccess {
         return Err(VideoEncodeError::BackendFailed {
             reason: format!("CVPixelBufferUnlockBaseAddress returned {status}"),
         });
     }
     Ok(pixel_buffer)
+}
+
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+unsafe fn copy_h264_sample_objc2(
+    sample_buffer: &objc2_core_media::CMSampleBuffer,
+) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
+    let data_buffer = unsafe { sample_buffer.data_buffer() }?;
+    let length = unsafe { data_buffer.data_length() };
+    let mut payload = vec![0; length];
+    let destination = std::ptr::NonNull::new(payload.as_mut_ptr().cast())?;
+    if unsafe { data_buffer.copy_data_bytes(0, length, destination) } != 0 {
+        return None;
+    }
+    let config = unsafe { sample_buffer.format_description() }
+        .and_then(|description| unsafe { avc_decoder_config_from_objc2_format(&description) });
+    Some((payload, config))
+}
+
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+unsafe fn avc_decoder_config_from_objc2_format(
+    description: &objc2_core_media::CMFormatDescription,
+) -> Option<Vec<u8>> {
+    let mut first_pointer = std::ptr::null();
+    let mut first_size = 0;
+    let mut count = 0;
+    let mut nal_length = 0;
+    if unsafe {
+        objc2_core_media::CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+            description,
+            0,
+            &mut first_pointer,
+            &mut first_size,
+            &mut count,
+            &mut nal_length,
+        )
+    } != 0
+    {
+        return None;
+    }
+    let mut parameter_sets = Vec::with_capacity(count);
+    for index in 0..count {
+        let mut pointer = std::ptr::null();
+        let mut size = 0;
+        if unsafe {
+            objc2_core_media::CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+                description,
+                index,
+                &mut pointer,
+                &mut size,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        } != 0
+            || pointer.is_null()
+        {
+            return None;
+        }
+        parameter_sets.push(unsafe { std::slice::from_raw_parts(pointer, size) }.to_vec());
+    }
+    build_avc_decoder_config(&parameter_sets, nal_length)
+}
+
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+unsafe fn copy_hevc_sample_objc2(
+    sample_buffer: &objc2_core_media::CMSampleBuffer,
+) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
+    let data_buffer = unsafe { sample_buffer.data_buffer() }?;
+    let length = unsafe { data_buffer.data_length() };
+    let mut payload = vec![0; length];
+    let destination = std::ptr::NonNull::new(payload.as_mut_ptr().cast())?;
+    if unsafe { data_buffer.copy_data_bytes(0, length, destination) } != 0 {
+        return None;
+    }
+    let config = unsafe { sample_buffer.format_description() }
+        .and_then(|description| unsafe { hevc_decoder_config_from_objc2_format(&description) });
+    Some((payload, config))
+}
+
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+unsafe fn hevc_decoder_config_from_objc2_format(
+    description: &objc2_core_media::CMFormatDescription,
+) -> Option<Vec<u8>> {
+    let mut first_pointer = std::ptr::null();
+    let mut first_size = 0;
+    let mut count = 0;
+    let mut nal_length = 0;
+    if unsafe {
+        objc2_core_media::CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
+            description,
+            0,
+            &mut first_pointer,
+            &mut first_size,
+            &mut count,
+            &mut nal_length,
+        )
+    } != 0
+    {
+        return None;
+    }
+    let mut parameter_sets = Vec::with_capacity(count);
+    for index in 0..count {
+        let mut pointer = std::ptr::null();
+        let mut size = 0;
+        if unsafe {
+            objc2_core_media::CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
+                description,
+                index,
+                &mut pointer,
+                &mut size,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        } != 0
+            || pointer.is_null()
+        {
+            return None;
+        }
+        parameter_sets.push(unsafe { std::slice::from_raw_parts(pointer, size) }.to_vec());
+    }
+    build_hevc_decoder_config(&parameter_sets, nal_length)
 }
 
 #[cfg(target_os = "macos")]
