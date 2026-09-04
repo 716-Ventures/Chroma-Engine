@@ -145,6 +145,49 @@ jobs:
         env:
           RUSTFLAGS: -A linker-messages
         run: cargo auditable build --locked --release --bin chroma-engine
+      - name: Prepare release bundle
+        shell: bash
+        run: |
+          mkdir -p dist/chroma-engine
+          cp README.md THIRD_PARTY_NOTICES.md dist/chroma-engine/
+      - name: Bundle macOS runtime
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          mkdir -p dist/chroma-engine
+          cp target/release/chroma-engine dist/chroma-engine/
+          dav1d_lib="$(brew --prefix dav1d)/lib/libdav1d.7.dylib"
+          cp "$dav1d_lib" dist/chroma-engine/
+          install_name_tool -change "$dav1d_lib" '@loader_path/libdav1d.7.dylib' dist/chroma-engine/chroma-engine
+          install_name_tool -id '@loader_path/libdav1d.7.dylib' dist/chroma-engine/libdav1d.7.dylib
+          codesign --force --sign - dist/chroma-engine/libdav1d.7.dylib
+          codesign --force --sign - dist/chroma-engine/chroma-engine
+      - name: Bundle Linux runtime
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          mkdir -p dist/chroma-engine
+          cp target/release/chroma-engine dist/chroma-engine/
+          dav1d_lib="$(ldconfig -p | awk '/libdav1d\.so\.7/{print $NF; exit}')"
+          test -n "$dav1d_lib"
+          cp "$dav1d_lib" dist/chroma-engine/libdav1d.so.7
+          patchelf --set-rpath '$ORIGIN' dist/chroma-engine/chroma-engine
+      - name: Bundle Windows runtime
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $triplet = if ($env:RUNNER_ARCH -eq "ARM64") { "arm64-windows" } else { "x64-windows" }
+          $bundle = New-Item -ItemType Directory -Force dist/chroma-engine
+          Copy-Item target/release/chroma-engine.exe $bundle
+          $dav1d = Get-ChildItem "$env:VCPKG_INSTALLATION_ROOT/installed/$triplet/bin" -Filter "dav1d.dll" | Select-Object -First 1
+          if (-not $dav1d) { throw "vcpkg dav1d runtime DLL was not found" }
+          Copy-Item $dav1d.FullName $bundle
+      - name: Upload portable release bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: chroma-engine-${{ runner.os }}-${{ runner.arch }}
+          path: dist/chroma-engine
+          if-no-files-found: error
 
   portable-arm64:
     name: Portable ARM64 / ${{ matrix.os }}

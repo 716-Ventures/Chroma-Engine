@@ -16,7 +16,7 @@ runs:
       shell: bash
       run: |
         sudo apt-get update
-        sudo apt-get install --yes libdav1d-dev
+        sudo apt-get install --yes libdav1d-dev patchelf
 
     - name: Install dav1d on Windows
       if: runner.os == 'Windows'
