@@ -493,6 +493,7 @@ fn video_decoder_backend_matrix_for_os(os: &str) -> Vec<VideoDecoderBackend> {
             ),
             cpu_h264_decoder_backend("macos"),
             cpu_hevc_decoder_backend("macos"),
+            cpu_av1_decoder_backend("macos"),
         ],
         "linux" => vec![
             video_decoder_backend(
@@ -560,6 +561,7 @@ fn video_decoder_backend_matrix_for_os(os: &str) -> Vec<VideoDecoderBackend> {
             ),
             cpu_h264_decoder_backend("linux"),
             cpu_hevc_decoder_backend("linux"),
+            cpu_av1_decoder_backend("linux"),
         ],
         "windows" => vec![
             video_decoder_backend(
@@ -690,8 +692,13 @@ fn video_decoder_backend_matrix_for_os(os: &str) -> Vec<VideoDecoderBackend> {
             ),
             cpu_h264_decoder_backend("windows"),
             cpu_hevc_decoder_backend("windows"),
+            cpu_av1_decoder_backend("windows"),
         ],
-        _ => vec![cpu_h264_decoder_backend(os), cpu_hevc_decoder_backend(os)],
+        _ => vec![
+            cpu_h264_decoder_backend(os),
+            cpu_hevc_decoder_backend(os),
+            cpu_av1_decoder_backend(os),
+        ],
     }
 }
 
@@ -711,6 +718,16 @@ fn cpu_hevc_decoder_backend(os: &str) -> VideoDecoderBackend {
         HardwareKind::Cpu,
         VideoCodec::Hevc,
         "chroma-cpu-hevc-decoder",
+        &[VideoDecodeSurfaceFormat::Bgra],
+    )
+}
+
+fn cpu_av1_decoder_backend(os: &str) -> VideoDecoderBackend {
+    video_decoder_backend(
+        os,
+        HardwareKind::Cpu,
+        VideoCodec::Av1,
+        "chroma-dav1d-av1-decoder",
         &[VideoDecodeSurfaceFormat::Bgra],
     )
 }
@@ -813,6 +830,7 @@ fn video_toolbox_decode_supported(codec: VideoCodec) -> bool {
     let codec_type = match codec {
         VideoCodec::H264 => objc2_core_media::kCMVideoCodecType_H264,
         VideoCodec::Hevc => objc2_core_media::kCMVideoCodecType_HEVC,
+        VideoCodec::Av1 => return false,
     };
     #[allow(unsafe_code)]
     // SAFETY: `codec_type` is one of CoreMedia's declared video codec constants.
@@ -1243,6 +1261,14 @@ mod tests {
             backend.kind == HardwareKind::Cpu
                 && backend.codec == VideoCodec::Hevc
                 && backend.decoder == "chroma-cpu-hevc-decoder"
+                && backend.state == CapabilityState::Executable
+                && backend.available
+                && backend.hwaccel.is_none()
+        }));
+        assert!(plan.video_backends.iter().any(|backend| {
+            backend.kind == HardwareKind::Cpu
+                && backend.codec == VideoCodec::Av1
+                && backend.decoder == "chroma-dav1d-av1-decoder"
                 && backend.state == CapabilityState::Executable
                 && backend.available
                 && backend.hwaccel.is_none()

@@ -1065,6 +1065,11 @@ fn encode_single_frame_objc2(
     let (codec_type, label) = match codec {
         VideoCodec::H264 => (objc2_core_media::kCMVideoCodecType_H264, "H.264"),
         VideoCodec::Hevc => (objc2_core_media::kCMVideoCodecType_HEVC, "HEVC"),
+        VideoCodec::Av1 => {
+            return Err(VideoEncodeError::InvalidInput {
+                reason: "AV1 is a decode-only codec in this encoder".to_string(),
+            });
+        }
     };
     let session = new_compression_session(format, codec_type, label)?;
     prepare_compression_session(&session, label)?;
@@ -1103,6 +1108,7 @@ fn encode_single_frame_objc2(
                 match codec {
                     VideoCodec::H264 => copy_h264_sample_objc2(sample_buffer.as_ref()),
                     VideoCodec::Hevc => copy_hevc_sample_objc2(sample_buffer.as_ref()),
+                    VideoCodec::Av1 => None,
                 }
             };
             match copied {

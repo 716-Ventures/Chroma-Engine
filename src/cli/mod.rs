@@ -24,8 +24,8 @@ use crate::source::MappedMediaFile;
 use crate::transcode::{
     AudioDecodeCodec, HlsTranscodeRequest, NativeFmp4TranscodeOptions, NativeFmp4TranscodeSession,
     NativeFmp4VideoMode, RawVideoFormat, RawVideoPixelFormat, VideoCodec, build_audio_decode_input,
-    build_video_decode_input, decode_videotoolbox_bgra_frames, plan_hls_transcode,
-    probe_dts_audio_bridge, write_native_fmp4_transcode_init, write_native_fmp4_transcode_segment,
+    build_video_decode_input, plan_hls_transcode, probe_dts_audio_bridge,
+    write_native_fmp4_transcode_init, write_native_fmp4_transcode_segment,
     write_native_fmp4_transcode_start,
 };
 use anyhow::{Result, bail};
@@ -1336,6 +1336,7 @@ fn decode_matroska_chunk(
     let decoder_config = track
         .codec_private
         .clone()
+        .or_else(|| (codec == VideoCodec::Av1).then(Vec::new))
         .ok_or_else(|| anyhow::anyhow!("missing Matroska video decoder config"))?;
     let (manifest, payload) =
         crate::container::matroska::extract_chunk(bytes, Some(&track_id), target_ms, chunk_index)?;
@@ -1378,7 +1379,9 @@ fn decode_extracted_chunk(
         payload,
         true,
     )?;
-    let decoded = decode_videotoolbox_bgra_frames(&decode_input, output_format)?;
+    let mut decoder =
+        crate::transcode::BgraDecoderSession::new(codec, output_format, &decoder_config)?;
+    let decoded = decoder.decode(&decode_input)?;
     Ok(DecodeChunkOutput {
         track_id,
         chunk_index: manifest.chunk.index,
@@ -1405,6 +1408,7 @@ fn video_codec_from_label(codec: &str) -> Result<VideoCodec> {
     match codec {
         "h264" => Ok(VideoCodec::H264),
         "hevc" => Ok(VideoCodec::Hevc),
+        "av1" => Ok(VideoCodec::Av1),
         _ => bail!("selected video track codec {codec} is not supported by native decode"),
     }
 }

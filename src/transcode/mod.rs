@@ -36,13 +36,14 @@ pub use segment::{
     write_native_fmp4_transcode_segment, write_native_fmp4_transcode_start,
 };
 pub use video_decode::{
-    BgraDecoderSession, CompressedVideoPacket, CpuH264BgraDecoderSession,
+    BgraDecoderSession, CompressedVideoPacket, CpuAv1BgraDecoderSession, CpuH264BgraDecoderSession,
     CpuHevcBgraDecoderSession, DecodedVideoFrame, DecodedVideoOutput, DecodedVideoStream,
     VideoDecodeError, VideoDecodeInput, VideoDecodeSessionInfo, VideoDecoderAction,
     VideoDecoderDrainState, VideoToolboxBgraDecoderSession, build_video_decode_input,
-    decode_h264_cpu_bgra_frames, decode_hevc_cpu_bgra_frames, decode_videotoolbox_bgra_frames,
-    decoder_actions_for_input, probe_videotoolbox_h264_decoder_session,
-    probe_videotoolbox_hevc_decoder_session, validate_decoded_video_format,
+    decode_av1_cpu_bgra_frames, decode_h264_cpu_bgra_frames, decode_hevc_cpu_bgra_frames,
+    decode_videotoolbox_bgra_frames, decoder_actions_for_input,
+    probe_videotoolbox_h264_decoder_session, probe_videotoolbox_hevc_decoder_session,
+    validate_decoded_video_format,
 };
 pub use video_encode::{
     CpuH264EncoderSession, EncodedVideoFrame, EncodedVideoOutput, EncodedVideoStream,
@@ -109,6 +110,8 @@ pub enum VideoCodec {
     H264,
     /// H.265/HEVC output.
     Hevc,
+    /// AV1 source video.
+    Av1,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

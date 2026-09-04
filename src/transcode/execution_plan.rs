@@ -358,14 +358,22 @@ fn video_can_copy_for_hls(track: &MediaTrack, target: PlaybackTarget) -> bool {
 }
 
 fn native_video_decode_ready(family: CodecFamily) -> bool {
-    matches!(family, CodecFamily::H264 | CodecFamily::Hevc)
+    matches!(
+        family,
+        CodecFamily::H264 | CodecFamily::Hevc | CodecFamily::Av1
+    )
 }
 
 fn native_video_decode_reason(family: CodecFamily) -> &'static str {
-    if family == CodecFamily::H264 {
-        "preferred native H.264 decode with portable OpenH264 fallback emits BGRA frames"
-    } else {
-        "preferred native HEVC decode with portable safe-Rust fallback emits BGRA frames"
+    match family {
+        CodecFamily::H264 => {
+            "preferred native H.264 decode with portable OpenH264 fallback emits BGRA frames"
+        }
+        CodecFamily::Hevc => {
+            "preferred native HEVC decode with portable safe-Rust fallback emits BGRA frames"
+        }
+        CodecFamily::Av1 => "portable dav1d AV1 decode emits BGRA frames",
+        _ => "native video decode emits BGRA frames",
     }
 }
 
@@ -393,6 +401,7 @@ fn video_codec_for_family(family: CodecFamily) -> Option<VideoCodec> {
     match family {
         CodecFamily::H264 => Some(VideoCodec::H264),
         CodecFamily::Hevc => Some(VideoCodec::Hevc),
+        CodecFamily::Av1 => Some(VideoCodec::Av1),
         _ => None,
     }
 }
@@ -635,6 +644,25 @@ mod tests {
         assert!(plan.stages.iter().any(|stage| {
             stage.kind == TranscodeStageKind::VideoDecode
                 && stage.status == TranscodeStageStatus::NativeReady
+        }));
+    }
+
+    #[test]
+    fn av1_transcode_uses_native_dav1d_decode() {
+        let probe = probe_with_tracks(vec![
+            video_track("v0", CodecFamily::Av1, 3_840, 2_160, 18_000_000, None),
+            audio_track("a0", CodecFamily::Aac, true, 2, 48_000, Some(192_000)),
+        ]);
+
+        let plan = plan_hls_transcode(&probe, request(PlaybackTarget::AppleNative, false, None));
+
+        assert!(plan.engine_executable);
+        assert_eq!(plan.output.video.as_ref().unwrap().codec, VideoCodec::H264);
+        assert!(!plan.output.video.as_ref().unwrap().packet_copy);
+        assert!(plan.stages.iter().any(|stage| {
+            stage.kind == TranscodeStageKind::VideoDecode
+                && stage.status == TranscodeStageStatus::NativeReady
+                && stage.reason.contains("dav1d")
         }));
     }
 

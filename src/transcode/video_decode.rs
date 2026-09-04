@@ -186,6 +186,151 @@ pub struct CpuHevcBgraDecoderSession {
     decoder: rust_h265::Decoder,
 }
 
+/// Retained cross-platform dav1d AV1 decoder that emits tightly packed BGRA frames.
+pub struct CpuAv1BgraDecoderSession {
+    output_format: RawVideoFormat,
+    decoded_batches: u64,
+    pending_timing: Vec<CpuDecodeTiming>,
+    decoder: dav1d::Decoder,
+}
+
+impl std::fmt::Debug for CpuAv1BgraDecoderSession {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CpuAv1BgraDecoderSession")
+            .field("output_format", &self.output_format)
+            .field("decoded_batches", &self.decoded_batches)
+            .field("pending_frames", &self.pending_timing.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl CpuAv1BgraDecoderSession {
+    /// Creates a portable AV1 decoder. AV1 packets carry their sequence headers in-band.
+    pub fn new(output_format: RawVideoFormat) -> Result<Self, VideoDecodeError> {
+        validate_decoded_video_format(output_format)?;
+        let decoder = dav1d::Decoder::new().map_err(|error| VideoDecodeError::BackendFailed {
+            reason: format!("dav1d decoder initialization failed: {error}"),
+        })?;
+        Ok(Self {
+            output_format,
+            decoded_batches: 0,
+            pending_timing: Vec::new(),
+            decoder,
+        })
+    }
+
+    /// Decodes one ordered AV1 packet batch without recreating the software decoder.
+    pub fn decode(
+        &mut self,
+        input: &VideoDecodeInput<'_>,
+    ) -> Result<DecodedVideoOutput, VideoDecodeError> {
+        if input.codec != VideoCodec::Av1 {
+            return Err(VideoDecodeError::UnsupportedCodec);
+        }
+        if input.time_scale.units_per_second == 0 {
+            return Err(VideoDecodeError::InvalidInput {
+                reason: "packet time scale must be greater than zero".to_string(),
+            });
+        }
+        let mut frames = Vec::new();
+        for packet in &input.packets {
+            validate_packet_time_scale(packet, input.time_scale)?;
+            insert_cpu_decode_timing(
+                &mut self.pending_timing,
+                CpuDecodeTiming {
+                    pts: packet.pts,
+                    dts: packet.dts,
+                    duration: packet.duration,
+                    keyframe: packet.keyframe,
+                },
+            );
+            let timestamp =
+                i64::try_from(packet.pts.units).map_err(|_| VideoDecodeError::InvalidInput {
+                    reason: "AV1 packet timestamp exceeds dav1d's signed timestamp range"
+                        .to_string(),
+                })?;
+            let duration = i64::try_from(packet.duration.units).map_err(|_| {
+                VideoDecodeError::InvalidInput {
+                    reason: "AV1 packet duration exceeds dav1d's signed duration range".to_string(),
+                }
+            })?;
+            let offset = i64::from(packet.index);
+            let mut sent = self.decoder.send_data(
+                packet.bytes.to_vec(),
+                Some(offset),
+                Some(timestamp),
+                Some(duration),
+            );
+            loop {
+                match sent {
+                    Ok(()) => break,
+                    Err(dav1d::Error::Again) => {
+                        self.receive_available(&mut frames)?;
+                        sent = self.decoder.send_pending_data();
+                    }
+                    Err(error) => return Err(dav1d_decode_error("packet submission", error)),
+                }
+            }
+            self.receive_one(&mut frames)?;
+        }
+        if input.end_of_stream {
+            self.receive_available(&mut frames)?;
+            if !self.pending_timing.is_empty() {
+                return Err(VideoDecodeError::BackendFailed {
+                    reason: format!(
+                        "dav1d drained with {} packet timing record(s) unmatched",
+                        self.pending_timing.len()
+                    ),
+                });
+            }
+        }
+        frames.sort_by_key(|frame| (frame.pts.units, frame.pts.scale.units_per_second));
+        self.decoded_batches = self.decoded_batches.saturating_add(1);
+        Ok(DecodedVideoOutput {
+            stream: DecodedVideoStream {
+                format: self.output_format,
+                source_codec: VideoCodec::Av1,
+                decoder: "chroma-dav1d-av1-decoder".to_string(),
+            },
+            frames,
+        })
+    }
+
+    fn receive_one(&mut self, frames: &mut Vec<DecodedVideoFrame>) -> Result<(), VideoDecodeError> {
+        match self.decoder.get_picture() {
+            Ok(picture) => {
+                let timing = take_dav1d_timing(&mut self.pending_timing, &picture)?;
+                frames.push(copy_dav1d_bgra_frame(&picture, self.output_format, timing)?);
+                Ok(())
+            }
+            Err(dav1d::Error::Again) => Ok(()),
+            Err(error) => Err(dav1d_decode_error("frame receive", error)),
+        }
+    }
+
+    fn receive_available(
+        &mut self,
+        frames: &mut Vec<DecodedVideoFrame>,
+    ) -> Result<(), VideoDecodeError> {
+        loop {
+            match self.decoder.get_picture() {
+                Ok(picture) => {
+                    let timing = take_dav1d_timing(&mut self.pending_timing, &picture)?;
+                    frames.push(copy_dav1d_bgra_frame(&picture, self.output_format, timing)?);
+                }
+                Err(dav1d::Error::Again) => return Ok(()),
+                Err(error) => return Err(dav1d_decode_error("decoder drain", error)),
+            }
+        }
+    }
+
+    /// Returns the number of batches decoded by this software session.
+    pub fn decoded_batches(&self) -> u64 {
+        self.decoded_batches
+    }
+}
+
 impl std::fmt::Debug for CpuHevcBgraDecoderSession {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -462,6 +607,8 @@ pub enum BgraDecoderSession {
     CpuH264(Box<CpuH264BgraDecoderSession>),
     /// Portable safe-Rust HEVC software decoder.
     CpuHevc(Box<CpuHevcBgraDecoderSession>),
+    /// Portable dav1d AV1 software decoder.
+    CpuAv1(Box<CpuAv1BgraDecoderSession>),
 }
 
 impl BgraDecoderSession {
@@ -482,6 +629,8 @@ impl BgraDecoderSession {
                 .map(|session| Self::CpuH264(Box::new(session))),
             VideoCodec::Hevc => CpuHevcBgraDecoderSession::new(output_format, decoder_config)
                 .map(|session| Self::CpuHevc(Box::new(session))),
+            VideoCodec::Av1 => CpuAv1BgraDecoderSession::new(output_format)
+                .map(|session| Self::CpuAv1(Box::new(session))),
         }
     }
 
@@ -494,6 +643,7 @@ impl BgraDecoderSession {
             Self::VideoToolbox(session) => session.decode(input),
             Self::CpuH264(session) => session.decode(input),
             Self::CpuHevc(session) => session.decode(input),
+            Self::CpuAv1(session) => session.decode(input),
         }
     }
 
@@ -503,6 +653,7 @@ impl BgraDecoderSession {
             Self::VideoToolbox(session) => session.decoded_batches(),
             Self::CpuH264(session) => session.decoded_batches(),
             Self::CpuHevc(session) => session.decoded_batches(),
+            Self::CpuAv1(session) => session.decoded_batches(),
         }
     }
 
@@ -512,9 +663,11 @@ impl BgraDecoderSession {
             Self::VideoToolbox(session) => match session.codec {
                 VideoCodec::H264 => "chroma-videotoolbox-h264-decoder",
                 VideoCodec::Hevc => "chroma-videotoolbox-hevc-decoder",
+                VideoCodec::Av1 => "chroma-videotoolbox-av1-decoder",
             },
             Self::CpuH264(_) => "chroma-cpu-h264-decoder",
             Self::CpuHevc(_) => "chroma-cpu-hevc-decoder",
+            Self::CpuAv1(_) => "chroma-dav1d-av1-decoder",
         }
     }
 }
@@ -545,6 +698,27 @@ fn take_cpu_decode_timing(
         });
     }
     Ok(pending.remove(0))
+}
+
+fn take_dav1d_timing(
+    pending: &mut Vec<CpuDecodeTiming>,
+    picture: &dav1d::Picture,
+) -> Result<CpuDecodeTiming, VideoDecodeError> {
+    if let Some(timestamp) = picture.timestamp()
+        && let Ok(timestamp) = u64::try_from(timestamp)
+        && let Some(index) = pending
+            .iter()
+            .position(|timing| timing.pts.units == timestamp)
+    {
+        return Ok(pending.remove(index));
+    }
+    take_cpu_decode_timing(pending, "dav1d")
+}
+
+fn dav1d_decode_error(operation: &str, error: dav1d::Error) -> VideoDecodeError {
+    VideoDecodeError::BackendFailed {
+        reason: format!("dav1d {operation} failed: {error}"),
+    }
 }
 
 fn validate_packet_time_scale(
@@ -654,6 +828,215 @@ fn copy_hevc_bgra_frame(
         pixels,
         keyframe: timing.keyframe,
     })
+}
+
+fn copy_dav1d_bgra_frame(
+    picture: &dav1d::Picture,
+    format: RawVideoFormat,
+    timing: CpuDecodeTiming,
+) -> Result<DecodedVideoFrame, VideoDecodeError> {
+    use dav1d::{PixelLayout, PlanarImageComponent};
+
+    if (picture.width(), picture.height()) != (format.width, format.height) {
+        return Err(VideoDecodeError::InvalidOutputFormat {
+            reason: format!(
+                "dav1d decoded {}x{}, expected {}x{}",
+                picture.width(),
+                picture.height(),
+                format.width,
+                format.height
+            ),
+        });
+    }
+    let width = format.width as usize;
+    let height = format.height as usize;
+    let byte_count = width
+        .checked_mul(height)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| VideoDecodeError::InvalidOutputFormat {
+            reason: "AV1 decoded BGRA byte count overflowed".to_string(),
+        })?;
+    let layout = picture.pixel_layout();
+    let storage_bits = picture.bit_depth();
+    let component_bits = picture
+        .bits_per_component()
+        .map(|bits| bits.0)
+        .ok_or_else(|| VideoDecodeError::InvalidOutputFormat {
+            reason: "dav1d returned an unknown component depth".to_string(),
+        })?;
+    if !matches!(storage_bits, 8 | 16) || !(8..=12).contains(&component_bits) {
+        return Err(VideoDecodeError::InvalidOutputFormat {
+            reason: format!(
+                "dav1d returned unsupported {component_bits}-bit components in {storage_bits}-bit storage"
+            ),
+        });
+    }
+    let y_plane = picture.plane(PlanarImageComponent::Y);
+    let u_plane = picture.plane(PlanarImageComponent::U);
+    let v_plane = picture.plane(PlanarImageComponent::V);
+    let y_stride = picture.stride(PlanarImageComponent::Y) as usize;
+    let uv_stride = picture.stride(PlanarImageComponent::U) as usize;
+    let bytes_per_component = storage_bits / 8;
+    let chroma_width = match layout {
+        PixelLayout::I400 => 0,
+        PixelLayout::I420 | PixelLayout::I422 => width.div_ceil(2),
+        PixelLayout::I444 => width,
+    };
+    let chroma_height = match layout {
+        PixelLayout::I420 => height.div_ceil(2),
+        PixelLayout::I400 => 0,
+        PixelLayout::I422 | PixelLayout::I444 => height,
+    };
+    validate_dav1d_plane(
+        y_plane.as_ref(),
+        y_stride,
+        width,
+        height,
+        bytes_per_component,
+        "Y",
+    )?;
+    if layout != PixelLayout::I400 {
+        validate_dav1d_plane(
+            u_plane.as_ref(),
+            uv_stride,
+            chroma_width,
+            chroma_height,
+            bytes_per_component,
+            "U",
+        )?;
+        validate_dav1d_plane(
+            v_plane.as_ref(),
+            uv_stride,
+            chroma_width,
+            chroma_height,
+            bytes_per_component,
+            "V",
+        )?;
+    }
+
+    let mut pixels = vec![0_u8; byte_count];
+    for row in 0..height {
+        for column in 0..width {
+            let y = dav1d_sample_u8(
+                y_plane.as_ref(),
+                y_stride,
+                row,
+                column,
+                storage_bits,
+                component_bits,
+            )?;
+            let (u, v) = if layout == PixelLayout::I400 {
+                (128, 128)
+            } else {
+                let chroma_row = if layout == PixelLayout::I420 {
+                    row / 2
+                } else {
+                    row
+                };
+                let chroma_column = if matches!(layout, PixelLayout::I420 | PixelLayout::I422) {
+                    column / 2
+                } else {
+                    column
+                };
+                (
+                    dav1d_sample_u8(
+                        u_plane.as_ref(),
+                        uv_stride,
+                        chroma_row,
+                        chroma_column,
+                        storage_bits,
+                        component_bits,
+                    )?,
+                    dav1d_sample_u8(
+                        v_plane.as_ref(),
+                        uv_stride,
+                        chroma_row,
+                        chroma_column,
+                        storage_bits,
+                        component_bits,
+                    )?,
+                )
+            };
+            let c = i32::from(y).saturating_sub(16);
+            let d = i32::from(u) - 128;
+            let e = i32::from(v) - 128;
+            let red = ((298 * c + 459 * e + 128) >> 8).clamp(0, 255) as u8;
+            let green = ((298 * c - 55 * d - 136 * e + 128) >> 8).clamp(0, 255) as u8;
+            let blue = ((298 * c + 541 * d + 128) >> 8).clamp(0, 255) as u8;
+            let offset = (row * width + column) * 4;
+            pixels[offset..offset + 4].copy_from_slice(&[blue, green, red, 255]);
+        }
+    }
+    Ok(DecodedVideoFrame {
+        pts: timing.pts,
+        dts: timing.dts,
+        duration: timing.duration,
+        format,
+        pixels,
+        keyframe: timing.keyframe,
+    })
+}
+
+fn validate_dav1d_plane(
+    plane: &[u8],
+    stride: usize,
+    width: usize,
+    height: usize,
+    bytes_per_component: usize,
+    name: &str,
+) -> Result<(), VideoDecodeError> {
+    let row_bytes = width.checked_mul(bytes_per_component).ok_or_else(|| {
+        VideoDecodeError::InvalidOutputFormat {
+            reason: format!("dav1d {name} plane width overflowed"),
+        }
+    })?;
+    let required =
+        stride
+            .checked_mul(height)
+            .ok_or_else(|| VideoDecodeError::InvalidOutputFormat {
+                reason: format!("dav1d {name} plane height overflowed"),
+            })?;
+    if stride < row_bytes || plane.len() < required {
+        return Err(VideoDecodeError::InvalidOutputFormat {
+            reason: format!("dav1d returned a truncated {name} plane"),
+        });
+    }
+    Ok(())
+}
+
+fn dav1d_sample_u8(
+    plane: &[u8],
+    stride: usize,
+    row: usize,
+    column: usize,
+    storage_bits: usize,
+    component_bits: usize,
+) -> Result<u8, VideoDecodeError> {
+    let bytes_per_component = storage_bits / 8;
+    let offset = row
+        .checked_mul(stride)
+        .and_then(|value| value.checked_add(column.checked_mul(bytes_per_component)?))
+        .ok_or_else(|| VideoDecodeError::InvalidOutputFormat {
+            reason: "dav1d plane offset overflowed".to_string(),
+        })?;
+    let value = if storage_bits == 8 {
+        u16::from(
+            *plane
+                .get(offset)
+                .ok_or_else(|| VideoDecodeError::InvalidOutputFormat {
+                    reason: "dav1d returned a truncated pixel plane".to_string(),
+                })?,
+        )
+    } else {
+        let bytes =
+            plane
+                .get(offset..offset + 2)
+                .ok_or_else(|| VideoDecodeError::InvalidOutputFormat {
+                    reason: "dav1d returned a truncated pixel plane".to_string(),
+                })?;
+        u16::from_ne_bytes([bytes[0], bytes[1]])
+    };
+    Ok((value >> component_bits.saturating_sub(8)).min(255) as u8)
 }
 
 fn hevc_pixel_to_u8(
@@ -856,6 +1239,17 @@ pub fn decode_hevc_cpu_bgra_frames(
     CpuHevcBgraDecoderSession::new(output_format, decoder_config)?.decode(input)
 }
 
+/// Decodes AV1 low-overhead bitstream packets to tightly packed BGRA using dav1d.
+pub fn decode_av1_cpu_bgra_frames(
+    input: &VideoDecodeInput<'_>,
+    output_format: RawVideoFormat,
+) -> Result<DecodedVideoOutput, VideoDecodeError> {
+    if input.codec != VideoCodec::Av1 {
+        return Err(VideoDecodeError::UnsupportedCodec);
+    }
+    CpuAv1BgraDecoderSession::new(output_format)?.decode(input)
+}
+
 /// Builds zero-copy compressed video packets from extracted chunk metadata.
 pub fn build_video_decode_input<'a>(
     codec: VideoCodec,
@@ -1029,6 +1423,7 @@ fn platform_new_videotoolbox_bgra_decoder(
     let video_description = match codec {
         VideoCodec::H264 => videotoolbox_h264_format_description(decoder_config)?,
         VideoCodec::Hevc => videotoolbox_hevc_format_description(decoder_config)?,
+        VideoCodec::Av1 => return Err(VideoDecodeError::UnsupportedCodec),
     };
     let pixel_format = objc2_core_foundation::CFNumber::new_i32(
         objc2_core_video::kCVPixelFormatType_32BGRA as i32,
@@ -1257,6 +1652,7 @@ fn platform_decode_with_retained_session(
             decoder: match input.codec {
                 VideoCodec::H264 => "chroma-videotoolbox-h264-decoder".to_string(),
                 VideoCodec::Hevc => "chroma-videotoolbox-hevc-decoder".to_string(),
+                VideoCodec::Av1 => return Err(VideoDecodeError::UnsupportedCodec),
             },
         },
         frames,

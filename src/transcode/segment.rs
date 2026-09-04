@@ -595,6 +595,7 @@ fn prepare_transcode(
     let decoder_config = video_track
         .codec_private
         .clone()
+        .or_else(|| (video_codec == VideoCodec::Av1).then(Vec::new))
         .ok_or_else(|| anyhow::anyhow!("missing Matroska video decoder config"))?;
     let video_chunks = parse_chunk_plan(bytes, Some(&video_track_id), options.segment_ms.max(1))
         .ok_or_else(|| anyhow::anyhow!("could not plan selected Matroska video track"))?;
@@ -898,6 +899,7 @@ fn video_codec_from_label(codec: &str) -> Result<VideoCodec> {
     match codec {
         "h264" => Ok(VideoCodec::H264),
         "hevc" => Ok(VideoCodec::Hevc),
+        "av1" => Ok(VideoCodec::Av1),
         _ => bail!("selected video track codec {codec} is not supported by native decode"),
     }
 }

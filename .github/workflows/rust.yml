@@ -28,6 +28,8 @@ jobs:
         with:
           toolchain: ${{ matrix.toolchain }}
           components: clippy,rustfmt
+      - name: Native AV1 decoder
+        uses: ./.github/actions/setup-dav1d
       - name: Cache cargo
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
@@ -59,6 +61,8 @@ jobs:
         uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
         with:
           toolchain: "1.97.1"
+      - name: Native AV1 decoder
+        uses: ./.github/actions/setup-dav1d
       - name: Cache cargo
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
@@ -88,6 +92,8 @@ jobs:
         uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
         with:
           toolchain: nightly
+      - name: Native AV1 decoder
+        uses: ./.github/actions/setup-dav1d
       - name: Cache cargo
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
@@ -123,6 +129,8 @@ jobs:
         uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
         with:
           toolchain: "1.97.1"
+      - name: Native AV1 decoder
+        uses: ./.github/actions/setup-dav1d
       - name: Cache cargo
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
@@ -152,6 +160,8 @@ jobs:
         uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
         with:
           toolchain: "1.90.0"
+      - name: Native AV1 decoder
+        uses: ./.github/actions/setup-dav1d
       - name: Cache cargo
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:

@@ -24,7 +24,7 @@ This crate is intentionally not a general FFmpeg clone. It implements the contai
 
 ## Current Status
 
-The native probe path parses MP4/MOV and Matroska/WebM structure, emits typed tracks, and has integration tests against generated fixtures. macOS VideoToolbox encode/decode probes are executable today. Retained OpenH264 software sessions provide H.264 decode and encode on macOS, Windows, Linux, and Linux-based NAS hosts on both x86-64 and ARM64. Linux and Windows hardware backend contracts are modeled with explicit capability states, but those hardware backends are not executable yet.
+The native probe path parses MP4/MOV and Matroska/WebM structure, emits typed tracks, and has integration tests against generated fixtures. macOS VideoToolbox encode/decode probes are executable today. Retained OpenH264 sessions provide H.264 decode and encode, safe Rust provides HEVC Main/Main10 decode, and retained dav1d sessions provide AV1 decode on macOS, Windows, Linux, and Linux-based NAS hosts on both x86-64 and ARM64. Linux and Windows hardware backend contracts are modeled with explicit capability states, but those hardware backends are not executable yet. Source builds need libdav1d 1.3+ discoverable through `pkg-config`; release bundles must include the corresponding native library.
 
 Media inputs are held through file-backed views rather than file-sized heap buffers. Clone-capable
 macOS filesystems get a private copy-on-write snapshot; the portable fallback retains the open read

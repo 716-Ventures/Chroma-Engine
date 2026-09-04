@@ -1181,10 +1181,16 @@ fn infer_last_packet_duration(packets: &[PacketRef]) -> Option<TimeDelta> {
     let [.., prev, last] = packets else {
         return None;
     };
-    Some(TimeDelta {
-        units: last.pts.units.saturating_sub(prev.pts.units),
-        scale: TimeScale::MILLIS,
-    })
+    if last.pts.scale == prev.pts.scale {
+        Some(TimeDelta {
+            units: last.pts.units.saturating_sub(prev.pts.units),
+            scale: last.pts.scale,
+        })
+    } else {
+        Some(TimeDelta::millis(
+            last.pts.as_millis().saturating_sub(prev.pts.as_millis()),
+        ))
+    }
 }
 
 fn push_block_packets(
@@ -1821,6 +1827,29 @@ mod tests {
                 units: 83_416_666,
                 scale
             }
+        );
+    }
+
+    #[test]
+    fn inferred_last_duration_preserves_packet_time_scale() {
+        let scale = TimeScale {
+            units_per_second: 1_000_000_000,
+        };
+        let packet = |units| PacketRef {
+            source_offset: 0,
+            size: 1,
+            pts: TimePoint { units, scale },
+            dts: TimePoint { units, scale },
+            duration: TimeDelta { units: 0, scale },
+            keyframe: false,
+        };
+
+        assert_eq!(
+            infer_last_packet_duration(&[packet(0), packet(200_000_000)]),
+            Some(TimeDelta {
+                units: 200_000_000,
+                scale,
+            })
         );
     }
 
