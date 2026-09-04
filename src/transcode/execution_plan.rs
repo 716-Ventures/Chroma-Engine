@@ -188,7 +188,7 @@ pub fn plan_hls_transcode(
                     "video-decode0",
                     TranscodeStageKind::VideoDecode,
                     vec![track.id.clone()],
-                    "native VideoToolbox decode can convert compressed packets into BGRA frames",
+                    native_video_decode_reason(track.codec.family),
                 ));
             } else {
                 let missing = format!("videoDecode:{}", capability_label(track.codec.family));
@@ -204,7 +204,7 @@ pub fn plan_hls_transcode(
                 "video-encode0",
                 TranscodeStageKind::VideoEncode,
                 vec![track.id.clone()],
-                "VideoToolbox H.264 encode backend is part of the native contract",
+                "preferred native H.264 encode with portable OpenH264 fallback",
             ));
             reasons.push(format!(
                 "video {} is planned for native H.264 encode",
@@ -346,7 +346,15 @@ fn video_can_copy_for_hls(track: &MediaTrack, target: PlaybackTarget) -> bool {
 }
 
 fn native_video_decode_ready(family: CodecFamily) -> bool {
-    cfg!(target_os = "macos") && matches!(family, CodecFamily::H264 | CodecFamily::Hevc)
+    family == CodecFamily::H264 || (cfg!(target_os = "macos") && family == CodecFamily::Hevc)
+}
+
+fn native_video_decode_reason(family: CodecFamily) -> &'static str {
+    if family == CodecFamily::H264 {
+        "preferred native H.264 decode with portable OpenH264 fallback emits BGRA frames"
+    } else {
+        "native VideoToolbox decode can convert compressed packets into BGRA frames"
+    }
 }
 
 fn native_audio_decode_ready(_family: CodecFamily) -> bool {
@@ -564,6 +572,29 @@ mod tests {
         assert!(plan.missing_capabilities.is_empty());
         assert!(plan.output.video.as_ref().unwrap().packet_copy);
         assert!(plan.output.audio.as_ref().unwrap().packet_copy);
+    }
+
+    #[test]
+    fn forced_h264_transcode_is_portable_with_copyable_audio() {
+        let probe = probe_with_tracks(vec![
+            video_track("v0", CodecFamily::H264, 1_920, 1_080, 8_000_000, None),
+            audio_track("a0", CodecFamily::Aac, true, 2, 48_000, Some(192_000)),
+        ]);
+
+        let plan = plan_hls_transcode(&probe, request(PlaybackTarget::Browser, true, None));
+
+        assert!(plan.engine_executable);
+        assert!(!plan.output.video.as_ref().unwrap().packet_copy);
+        assert!(plan.stages.iter().any(|stage| {
+            stage.kind == TranscodeStageKind::VideoDecode
+                && stage.status == TranscodeStageStatus::NativeReady
+                && stage.reason.contains("OpenH264")
+        }));
+        assert!(plan.stages.iter().any(|stage| {
+            stage.kind == TranscodeStageKind::VideoEncode
+                && stage.status == TranscodeStageStatus::NativeReady
+                && stage.reason.contains("OpenH264")
+        }));
     }
 
     #[test]

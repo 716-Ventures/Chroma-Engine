@@ -9,7 +9,7 @@ Chroma Engine uses the same status terms in documentation and runtime DTOs:
 - `available`: Chroma Engine can open or initialize the backend, but the codec/profile has not completed a warmup smoke probe.
 - `verified`: Chroma Engine completed a real warmup or smoke probe for the codec/profile on the current host.
 
-Planning may only select `available` or `verified` backends. Linux and Windows hardware paths are currently designed/modeled, not executable. The OpenH264 CPU H.264 backend is executable on all supported operating systems and is reported separately from hardware capability.
+Planning may only select `available` or `verified` backends. Linux and Windows hardware paths are currently designed/modeled, not executable. The OpenH264 CPU H.264 decode and encode backends are executable on all supported operating systems and are reported separately from hardware capability.
 
 ## Schema Compatibility
 

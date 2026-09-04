@@ -22,8 +22,8 @@ use crate::{
     },
     source::MappedMediaFile,
     transcode::{
-        RawVideoFormat, RawVideoFrameRef, RawVideoPixelFormat, VideoCodec,
-        VideoToolboxBgraDecoderSession, VideoToolboxH264EncoderSession, build_video_decode_input,
+        BgraDecoderSession, H264EncoderSession, RawVideoFormat, RawVideoFrameRef,
+        RawVideoPixelFormat, VideoCodec, build_video_decode_input,
     },
 };
 
@@ -507,8 +507,8 @@ struct NativeVideoCodecStats {
 
 #[derive(Debug)]
 struct NativeVideoCodecPipeline {
-    decoder: VideoToolboxBgraDecoderSession,
-    encoder: VideoToolboxH264EncoderSession,
+    decoder: BgraDecoderSession,
+    encoder: H264EncoderSession,
     last_completed_index: Option<u32>,
     stats: NativeVideoCodecStats,
 }
@@ -517,12 +517,12 @@ impl NativeVideoCodecPipeline {
     fn new(prepared: &PreparedTranscode, options: &NativeFmp4TranscodeOptions) -> Result<Self> {
         let (decode_format, encode_format) = video_formats(&prepared.video_track);
         Ok(Self {
-            decoder: VideoToolboxBgraDecoderSession::new(
+            decoder: BgraDecoderSession::new(
                 prepared.video_codec,
                 decode_format,
                 &prepared.decoder_config,
             )?,
-            encoder: VideoToolboxH264EncoderSession::new(encode_format, options.video_bitrate)?,
+            encoder: H264EncoderSession::new(encode_format, options.video_bitrate)?,
             last_completed_index: None,
             stats: NativeVideoCodecStats {
                 decoder_sessions_created: 1,

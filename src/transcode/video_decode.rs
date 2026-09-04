@@ -167,6 +167,294 @@ impl VideoToolboxBgraDecoderSession {
     }
 }
 
+/// Retained cross-platform OpenH264 decoder that emits tightly packed BGRA frames.
+pub struct CpuH264BgraDecoderSession {
+    output_format: RawVideoFormat,
+    decoded_batches: u64,
+    nalu_length_size: u8,
+    parameter_sets: Option<Vec<u8>>,
+    pending_timing: Vec<CpuDecodeTiming>,
+    decoder: openh264::decoder::Decoder,
+}
+
+impl std::fmt::Debug for CpuH264BgraDecoderSession {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CpuH264BgraDecoderSession")
+            .field("output_format", &self.output_format)
+            .field("decoded_batches", &self.decoded_batches)
+            .field("pending_frames", &self.pending_timing.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl CpuH264BgraDecoderSession {
+    /// Creates one portable H.264 decoder that can serve multiple ordered packet batches.
+    pub fn new(
+        output_format: RawVideoFormat,
+        decoder_config: &[u8],
+    ) -> Result<Self, VideoDecodeError> {
+        validate_decoded_video_format(output_format)?;
+        if decoder_config.is_empty() {
+            return Err(VideoDecodeError::MissingDecoderConfig);
+        }
+        let config =
+            crate::codec::h264::parse_avc_decoder_config(decoder_config).map_err(|error| {
+                VideoDecodeError::InvalidDecoderConfig {
+                    reason: error.to_string(),
+                }
+            })?;
+        if config.sps.is_empty() || config.pps.is_empty() {
+            return Err(VideoDecodeError::InvalidDecoderConfig {
+                reason: "AVC decoder configuration does not contain SPS and PPS".to_string(),
+            });
+        }
+        let mut parameter_sets = Vec::new();
+        for parameter_set in config.sps.iter().chain(config.pps.iter()) {
+            parameter_sets.extend_from_slice(&[0, 0, 0, 1]);
+            parameter_sets.extend_from_slice(parameter_set);
+        }
+        let decoder_config = openh264::decoder::DecoderConfig::new()
+            .flush_after_decode(openh264::decoder::Flush::NoFlush);
+        let decoder = openh264::decoder::Decoder::with_api_config(
+            openh264::OpenH264API::from_source(),
+            decoder_config,
+        )
+        .map_err(|error| VideoDecodeError::BackendFailed {
+            reason: format!("OpenH264 decoder initialization failed: {error}"),
+        })?;
+        Ok(Self {
+            output_format,
+            decoded_batches: 0,
+            nalu_length_size: config.nalu_length_size,
+            parameter_sets: Some(parameter_sets),
+            pending_timing: Vec::new(),
+            decoder,
+        })
+    }
+
+    /// Decodes one ordered H.264 packet batch without recreating the software decoder.
+    pub fn decode(
+        &mut self,
+        input: &VideoDecodeInput<'_>,
+    ) -> Result<DecodedVideoOutput, VideoDecodeError> {
+        if input.codec != VideoCodec::H264 {
+            return Err(VideoDecodeError::UnsupportedCodec);
+        }
+        if input.time_scale.units_per_second == 0 {
+            return Err(VideoDecodeError::InvalidInput {
+                reason: "packet time scale must be greater than zero".to_string(),
+            });
+        }
+        let mut output_frames = Vec::new();
+        for packet in &input.packets {
+            if packet.pts.scale != input.time_scale
+                || packet.dts.scale != input.time_scale
+                || packet.duration.scale != input.time_scale
+            {
+                return Err(VideoDecodeError::InvalidInput {
+                    reason: "packet timestamps must match the decode input time scale".to_string(),
+                });
+            }
+            let sample_annex_b =
+                crate::codec::h264::avc_sample_to_annex_b(packet.bytes, self.nalu_length_size)
+                    .map_err(|error| VideoDecodeError::InvalidInput {
+                        reason: format!("invalid AVCC packet: {error}"),
+                    })?;
+            let mut annex_b = self.parameter_sets.take().unwrap_or_default();
+            annex_b.extend_from_slice(&sample_annex_b);
+            insert_cpu_decode_timing(
+                &mut self.pending_timing,
+                CpuDecodeTiming {
+                    pts: packet.pts,
+                    dts: packet.dts,
+                    duration: packet.duration,
+                    keyframe: packet.keyframe,
+                },
+            );
+            let decoded =
+                self.decoder
+                    .decode(&annex_b)
+                    .map_err(|error| VideoDecodeError::BackendFailed {
+                        reason: format!("OpenH264 packet decode failed: {error}"),
+                    })?;
+            if let Some(decoded) = decoded {
+                let timing = take_cpu_decode_timing(&mut self.pending_timing)?;
+                output_frames.push(copy_openh264_bgra_frame(
+                    &decoded,
+                    self.output_format,
+                    timing,
+                )?);
+            }
+        }
+        if input.end_of_stream {
+            let remaining = self.decoder.flush_remaining().map_err(|error| {
+                VideoDecodeError::BackendFailed {
+                    reason: format!("OpenH264 decoder drain failed: {error}"),
+                }
+            })?;
+            for decoded in remaining {
+                let timing = take_cpu_decode_timing(&mut self.pending_timing)?;
+                output_frames.push(copy_openh264_bgra_frame(
+                    &decoded,
+                    self.output_format,
+                    timing,
+                )?);
+            }
+            if !self.pending_timing.is_empty() {
+                return Err(VideoDecodeError::BackendFailed {
+                    reason: format!(
+                        "OpenH264 drained with {} packet timing record(s) unmatched",
+                        self.pending_timing.len()
+                    ),
+                });
+            }
+        }
+        output_frames.sort_by_key(|frame| (frame.pts.units, frame.pts.scale.units_per_second));
+        self.decoded_batches = self.decoded_batches.saturating_add(1);
+        Ok(DecodedVideoOutput {
+            stream: DecodedVideoStream {
+                format: self.output_format,
+                source_codec: VideoCodec::H264,
+                decoder: "chroma-cpu-h264-decoder".to_string(),
+            },
+            frames: output_frames,
+        })
+    }
+
+    /// Returns the number of batches decoded by this software session.
+    pub fn decoded_batches(&self) -> u64 {
+        self.decoded_batches
+    }
+}
+
+/// Preferred retained BGRA decoder, with platform hardware first and CPU fallback for H.264.
+#[derive(Debug)]
+pub enum BgraDecoderSession {
+    /// Apple VideoToolbox decoder selected on macOS.
+    VideoToolbox(VideoToolboxBgraDecoderSession),
+    /// Portable OpenH264 software decoder.
+    CpuH264(Box<CpuH264BgraDecoderSession>),
+}
+
+impl BgraDecoderSession {
+    /// Creates the preferred executable decoder for the current host and codec.
+    pub fn new(
+        codec: VideoCodec,
+        output_format: RawVideoFormat,
+        decoder_config: &[u8],
+    ) -> Result<Self, VideoDecodeError> {
+        #[cfg(target_os = "macos")]
+        match VideoToolboxBgraDecoderSession::new(codec, output_format, decoder_config) {
+            Ok(session) => return Ok(Self::VideoToolbox(session)),
+            Err(error) if codec == VideoCodec::Hevc => return Err(error),
+            Err(_) => {}
+        }
+        match codec {
+            VideoCodec::H264 => CpuH264BgraDecoderSession::new(output_format, decoder_config)
+                .map(|session| Self::CpuH264(Box::new(session))),
+            VideoCodec::Hevc => Err(VideoDecodeError::BackendUnavailable {
+                reason: "no executable HEVC decoder is available on this host".to_string(),
+            }),
+        }
+    }
+
+    /// Decodes one packet batch using the selected retained backend.
+    pub fn decode(
+        &mut self,
+        input: &VideoDecodeInput<'_>,
+    ) -> Result<DecodedVideoOutput, VideoDecodeError> {
+        match self {
+            Self::VideoToolbox(session) => session.decode(input),
+            Self::CpuH264(session) => session.decode(input),
+        }
+    }
+
+    /// Returns the number of batches decoded by the selected backend.
+    pub fn decoded_batches(&self) -> u64 {
+        match self {
+            Self::VideoToolbox(session) => session.decoded_batches(),
+            Self::CpuH264(session) => session.decoded_batches(),
+        }
+    }
+
+    /// Returns the stable backend identifier selected for this session.
+    pub fn backend_name(&self) -> &'static str {
+        match self {
+            Self::VideoToolbox(session) => match session.codec {
+                VideoCodec::H264 => "chroma-videotoolbox-h264-decoder",
+                VideoCodec::Hevc => "chroma-videotoolbox-hevc-decoder",
+            },
+            Self::CpuH264(_) => "chroma-cpu-h264-decoder",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CpuDecodeTiming {
+    pts: TimePoint,
+    dts: TimePoint,
+    duration: TimeDelta,
+    keyframe: bool,
+}
+
+fn insert_cpu_decode_timing(pending: &mut Vec<CpuDecodeTiming>, timing: CpuDecodeTiming) {
+    let index = pending.partition_point(|candidate| {
+        (candidate.pts.units, candidate.pts.scale.units_per_second)
+            <= (timing.pts.units, timing.pts.scale.units_per_second)
+    });
+    pending.insert(index, timing);
+}
+
+fn take_cpu_decode_timing(
+    pending: &mut Vec<CpuDecodeTiming>,
+) -> Result<CpuDecodeTiming, VideoDecodeError> {
+    if pending.is_empty() {
+        return Err(VideoDecodeError::BackendFailed {
+            reason: "OpenH264 emitted a frame without matching packet timing".to_string(),
+        });
+    }
+    Ok(pending.remove(0))
+}
+
+fn copy_openh264_bgra_frame(
+    decoded: &openh264::decoder::DecodedYUV<'_>,
+    format: RawVideoFormat,
+    timing: CpuDecodeTiming,
+) -> Result<DecodedVideoFrame, VideoDecodeError> {
+    use openh264::formats::YUVSource as _;
+
+    let dimensions = decoded.dimensions();
+    if dimensions != (format.width as usize, format.height as usize) {
+        return Err(VideoDecodeError::InvalidOutputFormat {
+            reason: format!(
+                "OpenH264 decoded {}x{}, expected {}x{}",
+                dimensions.0, dimensions.1, format.width, format.height
+            ),
+        });
+    }
+    let byte_count = dimensions
+        .0
+        .checked_mul(dimensions.1)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| VideoDecodeError::InvalidOutputFormat {
+            reason: "decoded BGRA frame byte count overflowed".to_string(),
+        })?;
+    let mut pixels = vec![0; byte_count];
+    decoded.write_rgba8(&mut pixels);
+    for pixel in pixels.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
+    Ok(DecodedVideoFrame {
+        pts: timing.pts,
+        dts: timing.dts,
+        duration: timing.duration,
+        format,
+        pixels,
+        keyframe: timing.keyframe,
+    })
+}
+
 /// Decoder pump action used by native video decoder implementations.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", tag = "kind")]
@@ -277,6 +565,20 @@ pub fn decode_videotoolbox_bgra_frames(
         return Err(VideoDecodeError::MissingDecoderConfig);
     }
     VideoToolboxBgraDecoderSession::new(input.codec, output_format, decoder_config)?.decode(input)
+}
+
+/// Decodes H.264 AVCC packets to tightly packed BGRA frames using portable CPU software.
+pub fn decode_h264_cpu_bgra_frames(
+    input: &VideoDecodeInput<'_>,
+    output_format: RawVideoFormat,
+) -> Result<DecodedVideoOutput, VideoDecodeError> {
+    if input.codec != VideoCodec::H264 {
+        return Err(VideoDecodeError::UnsupportedCodec);
+    }
+    let decoder_config = input
+        .decoder_config
+        .ok_or(VideoDecodeError::MissingDecoderConfig)?;
+    CpuH264BgraDecoderSession::new(output_format, decoder_config)?.decode(input)
 }
 
 /// Builds zero-copy compressed video packets from extracted chunk metadata.
@@ -1238,6 +1540,73 @@ mod tests {
         let err = decode_videotoolbox_bgra_frames(&input, valid_format()).unwrap_err();
 
         assert_eq!(err, VideoDecodeError::MissingDecoderConfig);
+    }
+
+    #[test]
+    fn cpu_h264_round_trip_emits_bgra_with_source_timing() {
+        use crate::transcode::{CpuH264EncoderSession, RawVideoFrameRef};
+
+        let format = valid_format();
+        let frame_bytes = format.width as usize * format.height as usize * 4;
+        let black = vec![0; frame_bytes];
+        let white = vec![255; frame_bytes];
+        let scale = TimeScale {
+            units_per_second: 24,
+        };
+        let source_frames = [
+            RawVideoFrameRef {
+                pts: TimePoint { units: 0, scale },
+                dts: TimePoint { units: 0, scale },
+                duration: TimeDelta { units: 1, scale },
+                bytes: &black,
+                keyframe: true,
+            },
+            RawVideoFrameRef {
+                pts: TimePoint { units: 1, scale },
+                dts: TimePoint { units: 1, scale },
+                duration: TimeDelta { units: 1, scale },
+                bytes: &white,
+                keyframe: false,
+            },
+        ];
+        let encoded = CpuH264EncoderSession::new(format, 500_000)
+            .expect("CPU encoder")
+            .encode(&source_frames)
+            .expect("encode test frames");
+        let packets = encoded
+            .frames
+            .iter()
+            .enumerate()
+            .map(|(index, frame)| CompressedVideoPacket {
+                index: index as u32,
+                pts: frame.pts,
+                dts: frame.dts,
+                duration: frame.duration,
+                keyframe: frame.keyframe,
+                bytes: &frame.payload,
+            })
+            .collect();
+        let decoder_config = encoded.stream.decoder_config.as_deref().expect("avcC");
+        let input = VideoDecodeInput {
+            codec: VideoCodec::H264,
+            time_scale: scale,
+            decoder_config: Some(decoder_config),
+            packets,
+            end_of_stream: true,
+        };
+
+        let decoded = decode_h264_cpu_bgra_frames(&input, format).expect("decode test frames");
+
+        assert_eq!(decoded.stream.decoder, "chroma-cpu-h264-decoder");
+        assert_eq!(decoded.frames.len(), 2);
+        assert_eq!(decoded.frames[0].pts.units, 0);
+        assert_eq!(decoded.frames[1].pts.units, 1);
+        assert!(
+            decoded
+                .frames
+                .iter()
+                .all(|frame| { frame.format == format && frame.pixels.len() == frame_bytes })
+        );
     }
 
     #[cfg(target_os = "macos")]

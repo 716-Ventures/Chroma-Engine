@@ -474,6 +474,7 @@ fn video_decoder_backend_matrix_for_os(os: &str) -> Vec<VideoDecoderBackend> {
                     VideoDecodeSurfaceFormat::P010,
                 ],
             ),
+            cpu_h264_decoder_backend("macos"),
         ],
         "linux" => vec![
             video_decoder_backend(
@@ -539,6 +540,7 @@ fn video_decoder_backend_matrix_for_os(os: &str) -> Vec<VideoDecoderBackend> {
                     VideoDecodeSurfaceFormat::P010,
                 ],
             ),
+            cpu_h264_decoder_backend("linux"),
         ],
         "windows" => vec![
             video_decoder_backend(
@@ -667,9 +669,20 @@ fn video_decoder_backend_matrix_for_os(os: &str) -> Vec<VideoDecoderBackend> {
                     VideoDecodeSurfaceFormat::P010,
                 ],
             ),
+            cpu_h264_decoder_backend("windows"),
         ],
-        _ => Vec::new(),
+        _ => vec![cpu_h264_decoder_backend(os)],
     }
+}
+
+fn cpu_h264_decoder_backend(os: &str) -> VideoDecoderBackend {
+    video_decoder_backend(
+        os,
+        HardwareKind::Cpu,
+        VideoCodec::H264,
+        "chroma-cpu-h264-decoder",
+        &[VideoDecodeSurfaceFormat::Bgra],
+    )
 }
 
 fn video_decoder_backend(
@@ -685,7 +698,7 @@ fn video_decoder_backend(
         kind,
         codec,
         decoder: decoder.to_string(),
-        hwaccel: Some(format!("{kind:?}").to_lowercase()),
+        hwaccel: (kind != HardwareKind::Cpu).then(|| format!("{kind:?}").to_lowercase()),
         output_pixel_format: RawVideoPixelFormat::Bgra,
         native_surface_formats: native_surface_formats.to_vec(),
         zero_copy_capable: native_surface_formats
@@ -737,6 +750,7 @@ fn video_decode_backend_state(os: &str, kind: HardwareKind, codec: VideoCodec) -
         return CapabilityState::Modeled;
     }
     match (os, kind) {
+        (_, HardwareKind::Cpu) if codec == VideoCodec::H264 => CapabilityState::Executable,
         ("macos", HardwareKind::VideoToolbox) if video_toolbox_decode_supported(codec) => {
             CapabilityState::Executable
         }
@@ -1177,7 +1191,15 @@ mod tests {
                 .native_surface_formats
                 .iter()
                 .any(|format| matches!(format, VideoDecodeSurfaceFormat::Nv12))
-                || backend.kind == HardwareKind::VideoToolbox
+                || matches!(backend.kind, HardwareKind::VideoToolbox | HardwareKind::Cpu)
+        }));
+        assert!(plan.video_backends.iter().any(|backend| {
+            backend.kind == HardwareKind::Cpu
+                && backend.codec == VideoCodec::H264
+                && backend.decoder == "chroma-cpu-h264-decoder"
+                && backend.state == CapabilityState::Executable
+                && backend.available
+                && backend.hwaccel.is_none()
         }));
         assert!(
             plan.video_backends

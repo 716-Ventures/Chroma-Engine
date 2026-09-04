@@ -123,7 +123,8 @@
 - [x] AAC audio encode. macOS AudioToolbox backend encodes interleaved i16 PCM to AAC-LC, emits MPEG-4 AudioSpecificConfig, and returns sample-clocked `EncodedAudioFrame` payloads.
 - [ ] AC-3/E-AC-3 bridge encode. The previous oxideav experiment was removed because it was not suitable for real playback latency; this remains a native backend gap.
 - [x] Portable CPU H.264 encoder. A retained OpenH264 session accepts BGRA frames and emits AVCC access units plus avcC decoder configuration on macOS, Windows, Linux, and Linux-based NAS hosts.
-- [ ] Portable software video decoder and AAC encoder. The CPU H.264 encoder alone does not make non-macOS source transcode pipelines executable.
+- [x] Portable CPU H.264 decoder. A retained OpenH264 session converts AVCC packets into timestamped BGRA frames and can feed the same bounded decode/scale/encode pipeline as VideoToolbox.
+- [ ] Portable HEVC video decoder and AAC encoder. Non-macOS full transcode is currently limited to H.264 sources with copy-compatible audio.
 - [ ] Linux executable VAAPI/NVENC/QSV path. Capability models exist, but no Linux decode/encode backend is executable or verified yet.
 - [ ] Windows executable NVENC/QSV/AMF/D3D path. Capability models exist, but no Windows decode/encode backend is executable or verified yet.
 - [x] Warm encoder session initialization. AAC AudioToolbox, VideoToolbox H.264/HEVC, and portable OpenH264 backends run tiny real encodes before playback so startup failures surface before the first segment request.

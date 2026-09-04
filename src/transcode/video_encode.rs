@@ -212,6 +212,53 @@ impl CpuH264EncoderSession {
     }
 }
 
+/// Preferred retained H.264 encoder, with platform hardware first and CPU fallback.
+#[derive(Debug)]
+pub enum H264EncoderSession {
+    /// Apple VideoToolbox encoder selected on macOS.
+    VideoToolbox(VideoToolboxH264EncoderSession),
+    /// Portable OpenH264 software encoder.
+    Cpu(Box<CpuH264EncoderSession>),
+}
+
+impl H264EncoderSession {
+    /// Creates the preferred executable H.264 encoder for the current host.
+    pub fn new(format: RawVideoFormat, bitrate: u32) -> Result<Self, VideoEncodeError> {
+        #[cfg(target_os = "macos")]
+        if let Ok(session) = VideoToolboxH264EncoderSession::new(format, bitrate) {
+            return Ok(Self::VideoToolbox(session));
+        }
+        CpuH264EncoderSession::new(format, bitrate).map(|session| Self::Cpu(Box::new(session)))
+    }
+
+    /// Encodes one ordered frame batch using the selected retained backend.
+    pub fn encode(
+        &mut self,
+        frames: &[RawVideoFrameRef<'_>],
+    ) -> Result<EncodedVideoOutput, VideoEncodeError> {
+        match self {
+            Self::VideoToolbox(session) => session.encode(frames),
+            Self::Cpu(session) => session.encode(frames),
+        }
+    }
+
+    /// Returns the number of batches encoded by the selected backend.
+    pub fn encoded_batches(&self) -> u64 {
+        match self {
+            Self::VideoToolbox(session) => session.encoded_batches(),
+            Self::Cpu(session) => session.encoded_batches(),
+        }
+    }
+
+    /// Returns the stable backend identifier selected for this session.
+    pub fn backend_name(&self) -> &'static str {
+        match self {
+            Self::VideoToolbox(_) => "chroma-videotoolbox-h264",
+            Self::Cpu(_) => "chroma-cpu-h264",
+        }
+    }
+}
+
 #[derive(Debug)]
 struct OpenH264AccessUnit {
     payload: Vec<u8>,
