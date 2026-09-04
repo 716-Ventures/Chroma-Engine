@@ -363,7 +363,13 @@ pub fn parse_chunk_plan(
     let selected = select_chunk_track(&meta.tracks, requested_track_id)?;
     let segment = find_first_child(bytes, 0x1853_8067)?;
     let timecode_scale = parse_segment_timecode_scale(segment);
-    if let Some(plan) = parse_cue_chunk_plan(segment, &selected, timecode_scale, target_ms) {
+    if let Some(mut plan) = parse_cue_chunk_plan(segment, &selected, timecode_scale, target_ms) {
+        if let Some(last) = plan.chunks.last_mut()
+            && let Some(duration_ms) = meta.duration_ms
+        {
+            last.duration =
+                TimeDelta::millis(duration_ms.saturating_sub(last.start.as_millis()).max(1));
+        }
         return Some(plan);
     }
     if segment.len() > 512 * 1024 * 1024 {

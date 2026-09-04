@@ -10,7 +10,10 @@ use serde::Serialize;
 use super::scaler::{constrained_h264_format, scale_bgra};
 use crate::{
     codec::ac3::{parse_ac3_specific_box, parse_eac3_specific_box},
-    container::matroska::{MatroskaTrack, MatroskaTrackKind, looks_like_ebml},
+    container::matroska::{
+        MatroskaTrack, MatroskaTrackKind, looks_like_ebml, parse_chunk_plan,
+        parse_packet_tracks_in_time_window,
+    },
     fmp4::{
         Fmp4SampleEntry, Fmp4Track, Fmp4TrackKind, fragment_track_from_chunk_samples,
         fragment_track_from_encoded_audio_frames, fragment_track_from_encoded_video_frames,
@@ -19,7 +22,7 @@ use crate::{
     output::publish_bytes,
     packet::{
         ChunkPlan, ChunkSample, ExtractedChunk, NativeChunk, PacketRange, PacketRef, TimeDelta,
-        TimePoint, TimeScale, extract_packet_payload, packet_samples_for_range, plan_track_chunks,
+        TimePoint, TimeScale, extract_packet_payload, packet_samples_for_range,
     },
     source::MappedMediaFile,
     transcode::{
@@ -162,7 +165,7 @@ pub struct NativeFmp4TranscodePlan {
 pub struct NativeFmp4TranscodeSessionStats {
     /// Source snapshots created by this session.
     pub source_opens: u64,
-    /// Track-selection and packet-index passes completed at session open.
+    /// Track-selection and cue-plan passes completed at session open.
     pub index_parses: u64,
     /// Segment transcode requests served by this session.
     pub segment_requests: u64,
@@ -494,8 +497,6 @@ struct PreparedTranscode {
     audio_track: MatroskaTrack,
     video_codec: VideoCodec,
     decoder_config: Vec<u8>,
-    video_packets: Vec<PacketRef>,
-    audio_packets: Vec<PacketRef>,
     video_chunks: ChunkPlan,
 }
 
@@ -598,24 +599,8 @@ fn prepare_transcode(
         .codec_private
         .clone()
         .ok_or_else(|| anyhow::anyhow!("missing Matroska video decoder config"))?;
-    let requested_ids = [video_track_id.as_str(), audio_track_id.as_str()];
-    let mut indexed = crate::container::matroska::parse_packet_tracks_in_time_window(
-        bytes,
-        &requested_ids,
-        0,
-        u64::MAX,
-    )
-    .ok_or_else(|| anyhow::anyhow!("could not index selected Matroska tracks"))?;
-    let audio_packets = indexed
-        .pop()
-        .ok_or_else(|| anyhow::anyhow!("missing indexed Matroska audio track"))?
-        .packets;
-    let video_packets = indexed
-        .pop()
-        .ok_or_else(|| anyhow::anyhow!("missing indexed Matroska video track"))?
-        .packets;
-    let video_chunks =
-        plan_track_chunks(&video_track_id, &video_packets, options.segment_ms.max(1));
+    let video_chunks = parse_chunk_plan(bytes, Some(&video_track_id), options.segment_ms.max(1))
+        .ok_or_else(|| anyhow::anyhow!("could not plan selected Matroska video track"))?;
     if video_chunks.chunks.is_empty() {
         bail!("selected Matroska video track produced no transcode segments");
     }
@@ -627,8 +612,6 @@ fn prepare_transcode(
         audio_track: audio_track.clone(),
         video_codec,
         decoder_config,
-        video_packets,
-        audio_packets,
         video_chunks,
     })
 }
@@ -640,24 +623,39 @@ fn transcode_prepared_segment(
     prepared: &PreparedTranscode,
     codec_pipeline: Option<&mut NativeVideoCodecPipeline>,
 ) -> Result<TranscodedSegment> {
-    let video_chunk = prepared
+    let mut video_chunk = prepared
         .video_chunks
         .chunks
         .get(usize::try_from(index)?)
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("transcode segment {index} is out of range"))?;
-    let (video_manifest, video_payload) = extract_indexed_chunk(
+    let video_start_ms = video_chunk.start.as_millis();
+    let video_end_ms = video_start_ms.saturating_add(video_chunk.duration.as_millis());
+    let video_packets = parse_packet_window(
         bytes,
         &prepared.video_track_id,
-        &prepared.video_packets,
-        video_chunk,
+        video_start_ms,
+        video_end_ms,
     )?;
-    let video_start_ms = video_manifest.chunk.start.as_millis();
-    let video_end_ms = video_start_ms.saturating_add(video_manifest.chunk.duration.as_millis());
+    video_chunk.packet_range = PacketRange {
+        start: 0,
+        end: u32::try_from(video_packets.len())?,
+    };
+    let (video_manifest, video_payload) =
+        extract_indexed_chunk(bytes, &prepared.video_track_id, &video_packets, video_chunk)?;
+    // Include the preceding audio packet so a packet spanning the video boundary is not
+    // dropped. TrueHD uses the same bounded preroll to locate its preceding major sync.
+    let audio_scan_start_ms = video_start_ms.saturating_sub(1_000);
+    let audio_packets = parse_packet_window(
+        bytes,
+        &prepared.audio_track_id,
+        audio_scan_start_ms,
+        video_end_ms,
+    )?;
     let (audio_manifest, audio_payload) = extract_indexed_time_range(
         bytes,
         &prepared.audio_track_id,
-        &prepared.audio_packets,
+        &audio_packets,
         video_start_ms,
         video_end_ms,
         index,
@@ -721,6 +719,20 @@ fn transcode_prepared_segment(
         first_video_pts: video_segment.first_pts,
         first_audio_pts: audio_segment.first_pts,
     })
+}
+
+fn parse_packet_window(
+    bytes: &[u8],
+    track_id: &str,
+    start_ms: u64,
+    end_ms: u64,
+) -> Result<Vec<PacketRef>> {
+    parse_packet_tracks_in_time_window(bytes, &[track_id], start_ms, end_ms)
+        .and_then(|mut tracks| tracks.pop())
+        .map(|track| track.packets)
+        .ok_or_else(|| {
+            anyhow::anyhow!("Matroska track {track_id} has no packets in {start_ms}..{end_ms} ms")
+        })
 }
 
 fn extract_indexed_chunk(

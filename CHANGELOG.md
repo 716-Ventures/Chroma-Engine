@@ -13,6 +13,8 @@
   macOS, Windows, Linux, and Linux-based NAS targets.
 - Added portable TrueHD decoding and a TrueHD-to-AAC fMP4 bridge with six-channel presentation
   selection and source-anchored audio timing on macOS, Windows, Linux, and Linux-based NAS targets.
+- Replaced eager whole-file Matroska transcode indexes with cue-derived plans and bounded
+  per-segment packet windows, and normalized packet-copy composition offsets before fMP4 muxing.
 - Added native Ubuntu ARM64 and Windows ARM64 CI checks, portable-codec tests, and release builds.
 - Added retained VideoToolbox H.264/HEVC decoder and H.264 encoder sessions plus retained
   AudioToolbox AAC converter sessions, with explicit batch counters and discontinuity resets.
@@ -26,7 +28,7 @@
   private copy-on-write clone when available; other filesystems retain a read handle and validate
   source identity around operations without an eager disk copy.
 - Added reusable native fMP4 transcode sessions that retain the source snapshot, selected tracks,
-  packet indexes, and chunk plan across segment requests.
+  and cue-derived chunk plan while loading bounded packet windows for each segment request.
 - Routed HLS, subtitle, transcode, manifest-derived init, and remux outputs through a single
   race-safe immutable publisher; concurrent writers can no longer replace the winning artifact.
 - Removed duplicate MP4 source opens from stateless HLS adapters.

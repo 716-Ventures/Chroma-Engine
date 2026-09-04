@@ -364,6 +364,17 @@ pub fn fragment_track_from_chunk_samples(
     if expected_offset != payload.len() as u64 {
         bail!("packet-copy sample bytes do not match fMP4 fragment payload bytes");
     }
+    if let Some(min_offset) = out_samples
+        .iter()
+        .map(|sample| sample.composition_time_offset)
+        .min()
+        && min_offset < 0
+    {
+        for sample in &mut out_samples {
+            sample.composition_time_offset =
+                sample.composition_time_offset.saturating_sub(min_offset);
+        }
+    }
 
     Ok(Fmp4FragmentTrack {
         track_id,
@@ -1393,6 +1404,37 @@ mod tests {
         assert_eq!(track.samples[0].composition_time_offset, 40);
         assert_eq!(track.samples[0].flags, 0x0200_0000);
         assert_eq!(track.samples[1].flags, 0x0101_0000);
+    }
+
+    #[test]
+    fn packet_copy_fragment_normalizes_negative_composition_offsets() {
+        let samples = vec![
+            ChunkSample {
+                index: 0,
+                payload_offset: 0,
+                byte_count: 1,
+                pts: TimePoint::millis(0),
+                dts: TimePoint::millis(40),
+                duration: TimeDelta::millis(40),
+                keyframe: true,
+            },
+            ChunkSample {
+                index: 1,
+                payload_offset: 1,
+                byte_count: 1,
+                pts: TimePoint::millis(80),
+                dts: TimePoint::millis(80),
+                duration: TimeDelta::millis(40),
+                keyframe: false,
+            },
+        ];
+
+        let track = fragment_track_from_chunk_samples(1, &samples, b"ab".to_vec(), 1_000)
+            .expect("normalized packet-copy fragment");
+
+        assert_eq!(track.samples[0].composition_time_offset, 0);
+        assert_eq!(track.samples[1].composition_time_offset, 40);
+        media_fragment(1, &[track]).expect("valid media fragment");
     }
 
     #[test]
