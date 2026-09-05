@@ -1,6 +1,9 @@
 # Third-Party Notices
 
-## mediaway-common and mediaway-encoder
+## mediaway-common, mediaway-decoder, and mediaway-encoder
+
+Chroma Engine uses the source at commit `ad056ebf139a624a024016727030365eca9cfa08`
+(Mediaway v0.1.4).
 
 MIT License
 

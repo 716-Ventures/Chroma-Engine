@@ -87,9 +87,14 @@ nuxodecs = { version = "0.1.2", optional = true, default-features = false, featu
 oxideav-nvidia = { version = "0.0.3", optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-mediaway-common = "=0.1.4"
-mediaway-encoder = { version = "=0.1.4", default-features = false, features = ["video"] }
+mediaway-common = { version = "=0.1.4", git = "https://github.com/nyxways/mediaway.git", rev = "ad056ebf139a624a024016727030365eca9cfa08" }
+mediaway-decoder = { version = "=0.1.4", git = "https://github.com/nyxways/mediaway.git", rev = "ad056ebf139a624a024016727030365eca9cfa08", default-features = false, features = ["video"] }
+mediaway-encoder = { version = "=0.1.4", git = "https://github.com/nyxways/mediaway.git", rev = "ad056ebf139a624a024016727030365eca9cfa08", default-features = false, features = ["video"] }
 windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi_Common",
     "Win32_Media_MediaFoundation",
     "Win32_System_Com",
 ] }

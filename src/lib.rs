@@ -117,4 +117,6 @@ pub use transcode::{
     VaapiHevcEncoderSession,
 };
 #[cfg(target_os = "windows")]
-pub use transcode::{WindowsH264EncoderSession, WindowsHevcEncoderSession};
+pub use transcode::{
+    WindowsH264BgraDecoderSession, WindowsH264EncoderSession, WindowsHevcEncoderSession,
+};

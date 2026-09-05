@@ -1036,6 +1036,11 @@ fn video_decode_backend_state(os: &str, kind: HardwareKind, codec: VideoCodec) -
         ("linux", HardwareKind::Nvdec) if linux_nvidia_decode_device_present() => {
             CapabilityState::Detected
         }
+        ("windows", HardwareKind::D3d11Va)
+            if codec == VideoCodec::H264 && windows_h264_decode_available() =>
+        {
+            CapabilityState::Executable
+        }
         ("windows", HardwareKind::D3d11Va | HardwareKind::D3d12Va | HardwareKind::Dxva2) => {
             windows_media_foundation_decode_state(codec)
         }
@@ -1184,7 +1189,71 @@ fn windows_media_foundation_decode_state(_codec: VideoCodec) -> CapabilityState 
 }
 
 #[cfg(target_os = "windows")]
+fn windows_h264_decode_available() -> bool {
+    use std::sync::OnceLock;
+
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        let smoke = || -> Option<bool> {
+            use crate::transcode::{
+                CompressedVideoPacket, CpuH264EncoderSession, RawVideoFrameRef, VideoDecodeInput,
+                WindowsH264BgraDecoderSession,
+            };
+
+            let format = windows_probe_video_format();
+            let bgra = vec![0_u8; format.width as usize * format.height as usize * 4];
+            let scale = crate::packet::TimeScale {
+                units_per_second: 24,
+            };
+            let encoded = CpuH264EncoderSession::new(format, 500_000)
+                .and_then(|mut session| {
+                    session.encode(&[RawVideoFrameRef {
+                        pts: crate::packet::TimePoint { units: 0, scale },
+                        dts: crate::packet::TimePoint { units: 0, scale },
+                        duration: crate::packet::TimeDelta { units: 1, scale },
+                        bytes: &bgra,
+                        keyframe: true,
+                    }])
+                })
+                .ok()?;
+            let decoder_config = encoded.stream.decoder_config.as_deref()?;
+            let mut decoder = WindowsH264BgraDecoderSession::new(format, decoder_config).ok()?;
+            let encoded_frame = encoded.frames.first()?;
+            let decoded = decoder
+                .decode(&VideoDecodeInput {
+                    codec: VideoCodec::H264,
+                    time_scale: scale,
+                    decoder_config: Some(decoder_config),
+                    packets: vec![CompressedVideoPacket {
+                        index: 0,
+                        pts: encoded_frame.pts,
+                        dts: encoded_frame.dts,
+                        duration: encoded_frame.duration,
+                        keyframe: encoded_frame.keyframe,
+                        bytes: &encoded_frame.payload,
+                    }],
+                    end_of_stream: true,
+                })
+                .ok()?;
+            Some(decoded.frames.iter().any(|frame| {
+                frame.pixels.len() == format.width as usize * format.height as usize * 4
+            }))
+        };
+        smoke().unwrap_or(false)
+    })
+}
+
+#[cfg(not(target_os = "windows"))]
+fn windows_h264_decode_available() -> bool {
+    false
+}
+
+#[cfg(target_os = "windows")]
 fn windows_hardware_decode_unavailable_reason(kind: HardwareKind, codec: VideoCodec) -> String {
+    if kind == HardwareKind::D3d11Va && codec == VideoCodec::H264 {
+        return "the Windows hardware H.264 decode smoke did not produce a readable D3D11 NV12 frame"
+            .to_string();
+    }
     let probe = windows_mf::probe();
     if probe.decoder_opened(codec) {
         format!(

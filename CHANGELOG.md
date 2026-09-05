@@ -2,10 +2,14 @@
 
 ## Unreleased
 
+- Added retained Windows hardware H.264 decoding through Media Foundation and D3D11, including
+  a hardware-only transform, NV12 texture staging readback, checked padded-plane conversion to
+  BGRA, source timing restoration, runtime decode smoke verification, and portable fallback.
 - Added retained Windows H.264 and HEVC Main native encoding with BGRA-to-NV12 upload and
-  runtime selection across hardware NVENC, hardware Intel Quick Sync, and Media Foundation. The sessions preserve
-  source timing, emit fMP4-ready length-prefixed samples and avcC/hvcC configuration, require a
-  real encode before advertising availability, and retain the portable H.264 fallback.
+  runtime selection across hardware NVENC, hardware Intel Quick Sync, and Media Foundation. The
+  sessions preserve source timing, emit fMP4-ready length-prefixed samples and avcC/hvcC
+  configuration, require a real encode before advertising availability, and retain the portable
+  H.264 fallback.
 - Added retained Linux NVIDIA H.264 and HEVC Main encoding through runtime-loaded CUDA/NVENC
   libraries, with checked BGRA-to-I420 conversion, AVCC/hvcC output, timing preservation, real
   encode capability smoke probes, and automatic fallback when NVIDIA hardware or drivers are
