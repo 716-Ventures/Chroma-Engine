@@ -47,10 +47,10 @@ impl Engine {
         PlaybackSession::open(input, options)
     }
 
-    /// Opens the retained Matroska-to-fMP4 execution path used by HLS hosts.
+    /// Opens the retained modern-container-to-fMP4 execution path used by HLS hosts.
     ///
     /// The returned session keeps packet indexes and supported native codec
-    /// sessions alive across sequential segment requests.
+    /// sessions alive across sequential MP4/MOV or Matroska/WebM segment requests.
     pub fn open_native_fmp4_transcode_session(
         self,
         input: &Path,

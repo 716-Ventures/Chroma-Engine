@@ -17,7 +17,7 @@ The target is a native media architecture, not an FFmpeg-compatible facade. Chro
 - `remux-mp4`: remux supported sources into an efficient ISO-BMFF output path.
 - `encoder-probe`: report platform encoder capabilities.
 - `decoder-probe`: report executable and runtime-verified decoder backends on macOS, Linux, and Windows, while keeping non-selectable capability states explicit.
-- `transcode-fmp4-segments`: emit a contiguous Matroska-to-fMP4 window while retaining native decoder and encoder sessions.
+- `transcode-fmp4-segments`: emit a contiguous MP4/MOV- or Matroska/WebM-to-fMP4 window while retaining native decoder and encoder sessions.
 - `warmup`: initialize selected hardware/software backends before the first playback session.
 
 This crate is intentionally not a general FFmpeg clone. It implements the container, codec, muxing, scheduling, and encoding behavior Chroma actually needs, with room to expose new capabilities instead of inheriting old command-line constraints.

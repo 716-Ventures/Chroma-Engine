@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Extended the retained native fMP4 transcode session to MP4/MOV inputs, reusing one mapped
+  source, packet index, decoder, and encoder across a requested segment window.
+
 - Added checksummed, self-contained release archives for macOS, Linux, Windows, Linux ARM64/NAS,
   and Windows ARM64. ARM64 CI now embeds dependency metadata, bundles dav1d, smoke-tests the
   packaged executable, verifies its checksum, and uploads the resulting archive; rustdoc warnings

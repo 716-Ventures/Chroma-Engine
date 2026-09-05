@@ -10,9 +10,18 @@ use serde::Serialize;
 use super::scaler::{constrained_h264_format, scale_bgra};
 use crate::{
     codec::ac3::{parse_ac3_specific_box, parse_eac3_specific_box},
-    container::matroska::{
-        MatroskaTrack, MatroskaTrackKind, looks_like_ebml, parse_chunk_plan,
-        parse_packet_tracks_in_time_window,
+    container::{
+        ContainerKind,
+        matroska::{
+            MatroskaTrack, MatroskaTrackKind, parse_chunk_plan as parse_matroska_chunk_plan,
+            parse_packet_tracks_in_time_window,
+        },
+        mp4::{
+            Mp4Track, Mp4TrackKind, parse_basic_metadata as parse_mp4_metadata,
+            parse_chunk_plan as parse_mp4_chunk_plan, parse_codec_config as parse_mp4_codec_config,
+            parse_packet_track as parse_mp4_packet_track,
+        },
+        sniff_container,
     },
     fmp4::{
         Fmp4SampleEntry, Fmp4Track, Fmp4TrackKind, fragment_track_from_chunk_samples,
@@ -42,7 +51,7 @@ const VIDEO_DECODE_BATCH_PACKETS: usize = 16;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-/// Options for native Matroska-to-fMP4 HLS transcoding.
+/// Options for native MP4/MOV or Matroska/WebM-to-fMP4 HLS transcoding.
 pub struct NativeFmp4TranscodeOptions {
     /// Source video track id, such as `v0`.
     pub video_track_id: Option<String>,
@@ -182,7 +191,7 @@ pub struct NativeFmp4TranscodeSessionStats {
     pub codec_session_resets: u64,
 }
 
-/// Stateful Matroska-to-fMP4 transcode session retaining one immutable source snapshot.
+/// Stateful modern-container-to-fMP4 transcode session retaining one immutable source snapshot.
 #[derive(Debug)]
 pub struct NativeFmp4TranscodeSession {
     source: MappedMediaFile,
@@ -197,10 +206,17 @@ impl NativeFmp4TranscodeSession {
     /// Opens and validates a reusable transcode session.
     pub fn open(input: &Path, options: NativeFmp4TranscodeOptions) -> Result<Self> {
         let source = MappedMediaFile::open(input)?;
-        if !looks_like_ebml(source.as_ref()) {
-            bail!("native fMP4 transcode currently supports Matroska/WebM sources");
-        }
-        let prepared = prepare_transcode(source.as_ref(), &options)?;
+        let prepared = match sniff_container(source.as_ref()) {
+            ContainerKind::Mp4 | ContainerKind::Mov => {
+                prepare_mp4_transcode(source.as_ref(), &options)?
+            }
+            ContainerKind::Matroska | ContainerKind::Webm => {
+                prepare_matroska_transcode(source.as_ref(), &options)?
+            }
+            ContainerKind::Unknown => bail!(
+                "native fMP4 transcode supports only modern MP4/MOV and Matroska/WebM sources"
+            ),
+        };
         let codec_pipeline = match options.video_mode {
             NativeFmp4VideoMode::Copy => None,
             NativeFmp4VideoMode::H264 => Some(NativeVideoCodecPipeline::new(&prepared, &options)?),
@@ -494,11 +510,37 @@ struct AudioSegment {
 struct PreparedTranscode {
     video_track_id: String,
     audio_track_id: String,
-    video_track: MatroskaTrack,
-    audio_track: MatroskaTrack,
+    video_track: PreparedVideoTrack,
+    audio_track: PreparedAudioTrack,
     video_codec: VideoCodec,
     decoder_config: Vec<u8>,
     video_chunks: ChunkPlan,
+    source_index: PreparedSourceIndex,
+}
+
+#[derive(Debug, Clone)]
+struct PreparedVideoTrack {
+    codec: String,
+    width: u32,
+    height: u32,
+    frame_rate: Option<f64>,
+}
+
+#[derive(Debug, Clone)]
+struct PreparedAudioTrack {
+    codec: String,
+    channels: u32,
+    sample_rate: u32,
+    codec_private: Option<Vec<u8>>,
+}
+
+#[derive(Debug)]
+enum PreparedSourceIndex {
+    Matroska,
+    Mp4 {
+        video_packets: Vec<PacketRef>,
+        audio_packets: Vec<PacketRef>,
+    },
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -578,7 +620,7 @@ impl NativeVideoCodecPipeline {
     }
 }
 
-fn prepare_transcode(
+fn prepare_matroska_transcode(
     bytes: &[u8],
     options: &NativeFmp4TranscodeOptions,
 ) -> Result<PreparedTranscode> {
@@ -598,8 +640,9 @@ fn prepare_transcode(
         .clone()
         .or_else(|| (video_codec == VideoCodec::Av1).then(Vec::new))
         .ok_or_else(|| anyhow::anyhow!("missing Matroska video decoder config"))?;
-    let video_chunks = parse_chunk_plan(bytes, Some(&video_track_id), options.segment_ms.max(1))
-        .ok_or_else(|| anyhow::anyhow!("could not plan selected Matroska video track"))?;
+    let video_chunks =
+        parse_matroska_chunk_plan(bytes, Some(&video_track_id), options.segment_ms.max(1))
+            .ok_or_else(|| anyhow::anyhow!("could not plan selected Matroska video track"))?;
     if video_chunks.chunks.is_empty() {
         bail!("selected Matroska video track produced no transcode segments");
     }
@@ -607,12 +650,134 @@ fn prepare_transcode(
     Ok(PreparedTranscode {
         video_track_id,
         audio_track_id,
-        video_track: video_track.clone(),
-        audio_track: audio_track.clone(),
+        video_track: PreparedVideoTrack::from(video_track),
+        audio_track: PreparedAudioTrack::from(audio_track),
         video_codec,
         decoder_config,
         video_chunks,
+        source_index: PreparedSourceIndex::Matroska,
     })
+}
+
+fn prepare_mp4_transcode(
+    bytes: &[u8],
+    options: &NativeFmp4TranscodeOptions,
+) -> Result<PreparedTranscode> {
+    let meta = parse_mp4_metadata(bytes);
+    let (video_track_id, video_track) = select_mp4_track(
+        &meta.tracks,
+        Mp4TrackKind::Video,
+        options.video_track_id.as_deref(),
+    )
+    .ok_or_else(|| anyhow::anyhow!("no matching MP4/MOV video track found"))?;
+    let (audio_track_id, audio_track) =
+        select_mp4_audio_track(&meta.tracks, options.audio_track_id.as_deref())
+            .ok_or_else(|| anyhow::anyhow!("no executable MP4/MOV audio track found"))?;
+    let video_codec = video_codec_from_label(&video_track.codec)?;
+    let decoder_config = if video_codec == VideoCodec::Av1 {
+        Vec::new()
+    } else {
+        mp4_decoder_config(bytes, &video_track_id, "video")?
+    };
+    let video_index = parse_mp4_packet_track(bytes, Some(&video_track_id))
+        .ok_or_else(|| anyhow::anyhow!("missing MP4/MOV video packet index"))?;
+    let audio_index = parse_mp4_packet_track(bytes, Some(&audio_track_id))
+        .ok_or_else(|| anyhow::anyhow!("missing MP4/MOV audio packet index"))?;
+    let video_chunks =
+        parse_mp4_chunk_plan(bytes, Some(&video_track_id), options.segment_ms.max(1))
+            .ok_or_else(|| anyhow::anyhow!("could not plan selected MP4/MOV video track"))?;
+    if video_chunks.chunks.is_empty() {
+        bail!("selected MP4/MOV video track produced no transcode segments");
+    }
+    let mut prepared_audio = PreparedAudioTrack::from(audio_track);
+    if prepared_audio.codec == "aac" {
+        prepared_audio.codec_private = Some(mp4_decoder_config(bytes, &audio_track_id, "audio")?);
+    }
+
+    Ok(PreparedTranscode {
+        video_track_id,
+        audio_track_id,
+        video_track: PreparedVideoTrack::from(video_track),
+        audio_track: prepared_audio,
+        video_codec,
+        decoder_config,
+        video_chunks,
+        source_index: PreparedSourceIndex::Mp4 {
+            video_packets: video_index.packets,
+            audio_packets: audio_index.packets,
+        },
+    })
+}
+
+fn mp4_decoder_config(bytes: &[u8], track_id: &str, kind: &str) -> Result<Vec<u8>> {
+    let config = parse_mp4_codec_config(bytes, Some(track_id))
+        .ok_or_else(|| anyhow::anyhow!("missing MP4/MOV {kind} decoder config"))?;
+    let hex = config
+        .description_hex
+        .ok_or_else(|| anyhow::anyhow!("missing MP4/MOV {kind} decoder config payload"))?;
+    decode_hex(&hex).ok_or_else(|| anyhow::anyhow!("invalid MP4/MOV {kind} decoder config hex"))
+}
+
+fn decode_hex(value: &str) -> Option<Vec<u8>> {
+    if !value.len().is_multiple_of(2) {
+        return None;
+    }
+    value
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let text = std::str::from_utf8(pair).ok()?;
+            u8::from_str_radix(text, 16).ok()
+        })
+        .collect()
+}
+
+impl From<&MatroskaTrack> for PreparedVideoTrack {
+    fn from(track: &MatroskaTrack) -> Self {
+        let frame_rate = track
+            .default_duration_ns
+            .filter(|duration| *duration > 0)
+            .map(|duration| 1_000_000_000.0 / duration as f64);
+        Self {
+            codec: track.codec.clone(),
+            width: track.width.unwrap_or(1_920),
+            height: track.height.unwrap_or(1_080),
+            frame_rate,
+        }
+    }
+}
+
+impl From<&Mp4Track> for PreparedVideoTrack {
+    fn from(track: &Mp4Track) -> Self {
+        Self {
+            codec: track.codec.clone(),
+            width: track.width.unwrap_or(1_920),
+            height: track.height.unwrap_or(1_080),
+            frame_rate: track.frame_rate,
+        }
+    }
+}
+
+impl From<&MatroskaTrack> for PreparedAudioTrack {
+    fn from(track: &MatroskaTrack) -> Self {
+        Self {
+            codec: track.codec.clone(),
+            channels: track.channels.unwrap_or(2),
+            sample_rate: track.sample_rate.unwrap_or(48_000),
+            codec_private: track.codec_private.clone(),
+        }
+    }
+}
+
+impl From<&Mp4Track> for PreparedAudioTrack {
+    fn from(track: &Mp4Track) -> Self {
+        Self {
+            codec: track.codec.clone(),
+            channels: track.channels.unwrap_or(2),
+            sample_rate: track.sample_rate.unwrap_or(48_000),
+            codec_private: None,
+        }
+    }
 }
 
 fn transcode_prepared_segment(
@@ -630,38 +795,52 @@ fn transcode_prepared_segment(
         .ok_or_else(|| anyhow::anyhow!("transcode segment {index} is out of range"))?;
     let video_start_ms = video_chunk.start.as_millis();
     let video_end_ms = video_start_ms.saturating_add(video_chunk.duration.as_millis());
-    let video_packets = parse_packet_window(
-        bytes,
-        &prepared.video_track_id,
-        video_start_ms,
-        video_end_ms,
-    )?;
-    video_chunk.packet_range = PacketRange {
-        start: 0,
-        end: u32::try_from(video_packets.len())?,
+    let owned_video_packets;
+    let video_packets = match &prepared.source_index {
+        PreparedSourceIndex::Matroska => {
+            owned_video_packets = parse_packet_window(
+                bytes,
+                &prepared.video_track_id,
+                video_start_ms,
+                video_end_ms,
+            )?;
+            video_chunk.packet_range = PacketRange {
+                start: 0,
+                end: u32::try_from(owned_video_packets.len())?,
+            };
+            owned_video_packets.as_slice()
+        }
+        PreparedSourceIndex::Mp4 { video_packets, .. } => video_packets.as_slice(),
     };
     let (video_manifest, video_payload) =
-        extract_indexed_chunk(bytes, &prepared.video_track_id, &video_packets, video_chunk)?;
+        extract_indexed_chunk(bytes, &prepared.video_track_id, video_packets, video_chunk)?;
     // Include the preceding audio packet so a packet spanning the video boundary is not
     // dropped. TrueHD uses the same bounded preroll to locate its preceding major sync.
     let audio_scan_start_ms = video_start_ms.saturating_sub(1_000);
-    let audio_packets = parse_packet_window(
-        bytes,
-        &prepared.audio_track_id,
-        audio_scan_start_ms,
-        video_end_ms,
-    )?;
+    let owned_audio_packets;
+    let audio_packets = match &prepared.source_index {
+        PreparedSourceIndex::Matroska => {
+            owned_audio_packets = parse_packet_window(
+                bytes,
+                &prepared.audio_track_id,
+                audio_scan_start_ms,
+                video_end_ms,
+            )?;
+            owned_audio_packets.as_slice()
+        }
+        PreparedSourceIndex::Mp4 { audio_packets, .. } => audio_packets.as_slice(),
+    };
     let (audio_manifest, audio_payload) = extract_indexed_time_range(
         bytes,
         &prepared.audio_track_id,
-        &audio_packets,
+        audio_packets,
         video_start_ms,
         video_end_ms,
         index,
         prepared.audio_track.codec == "truehd",
     )?;
 
-    let video_segment = matroska_video_segment(
+    let video_segment = native_video_segment(
         &prepared.video_track,
         prepared.video_codec,
         prepared.decoder_config.clone(),
@@ -671,7 +850,7 @@ fn transcode_prepared_segment(
         codec_pipeline,
     )?;
 
-    let audio_segment = matroska_audio_segment(
+    let audio_segment = native_audio_segment(
         &prepared.audio_track,
         audio_manifest,
         audio_payload,
@@ -766,16 +945,16 @@ fn extract_indexed_time_range(
     index: u32,
     preroll_to_truehd_sync: bool,
 ) -> Result<(ExtractedChunk, Vec<u8>)> {
-    let target_start = packets
-        .iter()
-        .position(|packet| {
-            packet
-                .pts
-                .as_millis()
-                .saturating_add(packet.duration.as_millis().max(1))
-                > start_ms
-        })
-        .ok_or_else(|| anyhow::anyhow!("audio track has no packets for segment {index}"))?;
+    let target_start = packets.partition_point(|packet| {
+        packet
+            .pts
+            .as_millis()
+            .saturating_add(packet.duration.as_millis().max(1))
+            <= start_ms
+    });
+    if target_start == packets.len() {
+        bail!("audio track has no packets for segment {index}");
+    }
     let start = if preroll_to_truehd_sync {
         (0..=target_start)
             .rev()
@@ -784,14 +963,10 @@ fn extract_indexed_time_range(
     } else {
         target_start
     };
-    let end = packets
-        .iter()
-        .enumerate()
-        .skip(start)
-        .take_while(|(_, packet)| packet.pts.as_millis() < end_ms)
-        .map(|(packet_index, _)| packet_index + 1)
-        .last()
-        .ok_or_else(|| anyhow::anyhow!("audio track has no packets for segment {index}"))?;
+    let end = packets.partition_point(|packet| packet.pts.as_millis() < end_ms);
+    if end <= start {
+        bail!("audio track has no packets for segment {index}");
+    }
     let range = PacketRange {
         start: u32::try_from(start)?,
         end: u32::try_from(end)?,
@@ -899,6 +1074,65 @@ fn matroska_audio_track_executable(track: &MatroskaTrack) -> bool {
     )
 }
 
+fn select_mp4_track<'a>(
+    tracks: &'a [Mp4Track],
+    kind: Mp4TrackKind,
+    requested_track_id: Option<&str>,
+) -> Option<(String, &'a Mp4Track)> {
+    let prefix = match kind {
+        Mp4TrackKind::Video => 'v',
+        Mp4TrackKind::Audio => 'a',
+        Mp4TrackKind::Subtitle => 's',
+        Mp4TrackKind::Unknown => 'x',
+    };
+    let candidates = tracks
+        .iter()
+        .filter(|track| track.kind == kind)
+        .enumerate()
+        .map(|(index, track)| (format!("{prefix}{index}"), track))
+        .collect::<Vec<_>>();
+    if let Some(requested) = requested_track_id {
+        return candidates
+            .into_iter()
+            .find(|(track_id, _)| track_id == requested);
+    }
+    candidates
+        .iter()
+        .find(|(_, track)| track.default)
+        .or_else(|| candidates.first())
+        .map(|(track_id, track)| (track_id.clone(), *track))
+}
+
+fn select_mp4_audio_track<'a>(
+    tracks: &'a [Mp4Track],
+    requested_track_id: Option<&str>,
+) -> Option<(String, &'a Mp4Track)> {
+    let candidates = tracks
+        .iter()
+        .filter(|track| track.kind == Mp4TrackKind::Audio)
+        .enumerate()
+        .map(|(index, track)| (format!("a{index}"), track))
+        .collect::<Vec<_>>();
+    if let Some(requested) = requested_track_id {
+        return candidates
+            .into_iter()
+            .find(|(track_id, track)| track_id == requested && mp4_audio_track_executable(track));
+    }
+    candidates
+        .iter()
+        .find(|(_, track)| track.default && mp4_audio_track_executable(track))
+        .or_else(|| {
+            candidates
+                .iter()
+                .find(|(_, track)| mp4_audio_track_executable(track))
+        })
+        .map(|(track_id, track)| (track_id.clone(), *track))
+}
+
+fn mp4_audio_track_executable(track: &Mp4Track) -> bool {
+    matches!(track.codec.as_str(), "aac" | "ac3" | "eac3")
+}
+
 fn video_codec_from_label(codec: &str) -> Result<VideoCodec> {
     match codec {
         "h264" => Ok(VideoCodec::H264),
@@ -908,26 +1142,26 @@ fn video_codec_from_label(codec: &str) -> Result<VideoCodec> {
     }
 }
 
-fn matroska_video_sample_entry(
-    track: &MatroskaTrack,
+fn native_video_sample_entry(
+    track: &PreparedVideoTrack,
     codec_config: Vec<u8>,
 ) -> Result<Fmp4SampleEntry> {
     match track.codec.as_str() {
         "h264" => Ok(Fmp4SampleEntry::Avc {
             codec_config,
-            width: track.width.unwrap_or(0).min(u32::from(u16::MAX)) as u16,
-            height: track.height.unwrap_or(0).min(u32::from(u16::MAX)) as u16,
+            width: track.width.min(u32::from(u16::MAX)) as u16,
+            height: track.height.min(u32::from(u16::MAX)) as u16,
         }),
         "hevc" => Ok(Fmp4SampleEntry::Hevc {
             codec_config,
-            width: track.width.unwrap_or(0).min(u32::from(u16::MAX)) as u16,
-            height: track.height.unwrap_or(0).min(u32::from(u16::MAX)) as u16,
+            width: track.width.min(u32::from(u16::MAX)) as u16,
+            height: track.height.min(u32::from(u16::MAX)) as u16,
         }),
         other => bail!("selected video track codec {other} is not supported by fMP4 packet-copy"),
     }
 }
 
-fn video_codec_string(track: &MatroskaTrack) -> String {
+fn video_codec_string(track: &PreparedVideoTrack) -> String {
     match track.codec.as_str() {
         "h264" => "h264".to_string(),
         "hevc" => "hevc".to_string(),
@@ -935,8 +1169,8 @@ fn video_codec_string(track: &MatroskaTrack) -> String {
     }
 }
 
-fn matroska_video_segment(
-    track: &MatroskaTrack,
+fn native_video_segment(
+    track: &PreparedVideoTrack,
     codec: VideoCodec,
     decoder_config: Vec<u8>,
     manifest: ExtractedChunk,
@@ -946,7 +1180,7 @@ fn matroska_video_segment(
 ) -> Result<VideoSegment> {
     match options.video_mode {
         NativeFmp4VideoMode::Copy => {
-            copy_matroska_video_segment(track, decoder_config, manifest, payload)
+            copy_native_video_segment(track, decoder_config, manifest, payload)
         }
         NativeFmp4VideoMode::H264 => transcode_h264_video_segment(
             track,
@@ -960,14 +1194,14 @@ fn matroska_video_segment(
     }
 }
 
-fn copy_matroska_video_segment(
-    track: &MatroskaTrack,
+fn copy_native_video_segment(
+    track: &PreparedVideoTrack,
     decoder_config: Vec<u8>,
     manifest: ExtractedChunk,
     payload: Vec<u8>,
 ) -> Result<VideoSegment> {
     let timescale = chunk_time_scale(&manifest).units_per_second;
-    let sample_entry = matroska_video_sample_entry(track, decoder_config)?;
+    let sample_entry = native_video_sample_entry(track, decoder_config)?;
     let default_sample_duration = default_sample_duration(&manifest, timescale);
     let first_pts = manifest.samples.first().map(|sample| sample.pts);
     let sample_count = manifest.samples.len();
@@ -987,7 +1221,7 @@ fn copy_matroska_video_segment(
 }
 
 fn transcode_h264_video_segment(
-    track: &MatroskaTrack,
+    track: &PreparedVideoTrack,
     codec: VideoCodec,
     decoder_config: Vec<u8>,
     manifest: &ExtractedChunk,
@@ -1079,12 +1313,11 @@ fn transcode_h264_video_segment(
     })
 }
 
-fn video_formats(track: &MatroskaTrack) -> (RawVideoFormat, RawVideoFormat) {
-    let frame_duration_ns = track.default_duration_ns.unwrap_or(41_666_667);
-    let (frame_rate_num, frame_rate_den) = frame_rate_from_duration_ns(frame_duration_ns);
+fn video_formats(track: &PreparedVideoTrack) -> (RawVideoFormat, RawVideoFormat) {
+    let (frame_rate_num, frame_rate_den) = frame_rate_ratio(track.frame_rate);
     let decode_format = RawVideoFormat {
-        width: track.width.unwrap_or(1920),
-        height: track.height.unwrap_or(1080),
+        width: track.width,
+        height: track.height,
         frame_rate_num,
         frame_rate_den,
         pixel_format: RawVideoPixelFormat::Bgra,
@@ -1092,22 +1325,26 @@ fn video_formats(track: &MatroskaTrack) -> (RawVideoFormat, RawVideoFormat) {
     (decode_format, constrained_h264_format(decode_format))
 }
 
-fn frame_rate_from_duration_ns(duration_ns: u64) -> (u32, u32) {
-    let duration_ns = duration_ns.max(1);
-    if (41_700_000..=41_720_000).contains(&duration_ns) {
-        return (24_000, 1_001);
+fn frame_rate_ratio(frame_rate: Option<f64>) -> (u32, u32) {
+    let rate = frame_rate.filter(|rate| rate.is_finite() && *rate > 0.0);
+    let Some(rate) = rate else {
+        return (24, 1);
+    };
+    for (candidate, ratio) in [
+        (23.976, (24_000, 1_001)),
+        (29.97, (30_000, 1_001)),
+        (59.94, (60_000, 1_001)),
+    ] {
+        if (rate - candidate).abs() < 0.01 {
+            return ratio;
+        }
     }
-    if (33_360_000..=33_370_000).contains(&duration_ns) {
-        return (30_000, 1_001);
-    }
-    if (16_680_000..=16_690_000).contains(&duration_ns) {
-        return (60_000, 1_001);
-    }
-
-    let gcd = gcd_u64(1_000_000_000, duration_ns);
-    let num = (1_000_000_000 / gcd).min(u64::from(u32::MAX)) as u32;
-    let den = (duration_ns / gcd).min(u64::from(u32::MAX)) as u32;
-    (num.max(1), den.max(1))
+    let denominator = 1_000_u32;
+    let numerator = (rate * f64::from(denominator))
+        .round()
+        .clamp(1.0, f64::from(u32::MAX)) as u32;
+    let divisor = gcd_u64(u64::from(numerator), u64::from(denominator)) as u32;
+    (numerator / divisor, denominator / divisor)
 }
 
 fn gcd_u64(mut a: u64, mut b: u64) -> u64 {
@@ -1119,8 +1356,8 @@ fn gcd_u64(mut a: u64, mut b: u64) -> u64 {
     a.max(1)
 }
 
-fn matroska_audio_segment(
-    track: &MatroskaTrack,
+fn native_audio_segment(
+    track: &PreparedAudioTrack,
     manifest: ExtractedChunk,
     payload: Vec<u8>,
     bitrate: u32,
@@ -1132,7 +1369,7 @@ fn matroska_audio_segment(
         "truehd" => {
             transcode_compressed_audio_segment(AudioDecodeCodec::TrueHd, manifest, payload, bitrate)
         }
-        "aac" | "ac3" | "eac3" => copy_matroska_audio_segment(track, manifest, payload),
+        "aac" | "ac3" | "eac3" => copy_native_audio_segment(track, manifest, payload),
         other => bail!("selected audio track codec {other} is not supported by native fMP4 output"),
     }
 }
@@ -1247,13 +1484,13 @@ fn transcode_compressed_audio_segment(
     })
 }
 
-fn copy_matroska_audio_segment(
-    track: &MatroskaTrack,
+fn copy_native_audio_segment(
+    track: &PreparedAudioTrack,
     manifest: ExtractedChunk,
     payload: Vec<u8>,
 ) -> Result<AudioSegment> {
     let timescale = chunk_time_scale(&manifest).units_per_second;
-    let sample_entry = matroska_audio_sample_entry(track, &manifest.samples, &payload)?;
+    let sample_entry = native_audio_sample_entry(track, &manifest.samples, &payload)?;
     let default_sample_duration = default_sample_duration(&manifest, timescale);
     let first_pts = manifest.samples.first().map(|sample| sample.pts);
     let fragment =
@@ -1269,8 +1506,8 @@ fn copy_matroska_audio_segment(
     })
 }
 
-fn matroska_audio_sample_entry(
-    track: &MatroskaTrack,
+fn native_audio_sample_entry(
+    track: &PreparedAudioTrack,
     samples: &[ChunkSample],
     payload: &[u8],
 ) -> Result<Fmp4SampleEntry> {
@@ -1280,30 +1517,30 @@ fn matroska_audio_sample_entry(
                 .codec_private
                 .clone()
                 .ok_or_else(|| anyhow::anyhow!("missing Matroska AAC private data"))?,
-            channel_count: track.channels.unwrap_or(2).min(u32::from(u16::MAX)) as u16,
-            sample_rate: track.sample_rate.unwrap_or(48_000),
+            channel_count: track.channels.min(u32::from(u16::MAX)) as u16,
+            sample_rate: track.sample_rate,
         }),
         "ac3" => {
             let frame = first_sample_payload(samples, payload)?;
             Ok(Fmp4SampleEntry::Ac3 {
                 dac3: parse_ac3_specific_box(frame)?.dac3_payload(),
-                channel_count: track.channels.unwrap_or(2).min(u32::from(u16::MAX)) as u16,
-                sample_rate: track.sample_rate.unwrap_or(48_000),
+                channel_count: track.channels.min(u32::from(u16::MAX)) as u16,
+                sample_rate: track.sample_rate,
             })
         }
         "eac3" => {
             let access_unit = first_sample_payload(samples, payload)?;
             Ok(Fmp4SampleEntry::Eac3 {
                 dec3: parse_eac3_specific_box(access_unit)?.dec3_payload(),
-                channel_count: track.channels.unwrap_or(2).min(u32::from(u16::MAX)) as u16,
-                sample_rate: track.sample_rate.unwrap_or(48_000),
+                channel_count: track.channels.min(u32::from(u16::MAX)) as u16,
+                sample_rate: track.sample_rate,
             })
         }
         other => bail!("selected audio track codec {other} is not supported by fMP4 packet-copy"),
     }
 }
 
-fn fmp4_audio_codec_string(track: &MatroskaTrack) -> String {
+fn fmp4_audio_codec_string(track: &PreparedAudioTrack) -> String {
     match track.codec.as_str() {
         "aac" => "aac".to_string(),
         "ac3" => "ac-3".to_string(),
