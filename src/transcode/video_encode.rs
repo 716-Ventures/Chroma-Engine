@@ -9,6 +9,8 @@ mod vaapi_encode;
 
 #[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
 pub use vaapi_encode::VaapiH264EncoderSession;
+#[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
+pub use vaapi_encode::VaapiHevcEncoderSession;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -1467,7 +1469,6 @@ fn build_avc_decoder_config(parameter_sets: &[Vec<u8>], nal_length_size: i32) ->
     Some(out)
 }
 
-#[cfg(target_os = "macos")]
 fn build_hevc_decoder_config(parameter_sets: &[Vec<u8>], nal_length_size: i32) -> Option<Vec<u8>> {
     let mut arrays: Vec<(u8, Vec<&[u8]>)> = Vec::new();
     let mut sps = None;

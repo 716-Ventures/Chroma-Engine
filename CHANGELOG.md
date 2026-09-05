@@ -10,6 +10,8 @@
 - Added retained Linux VA-API H.264 encoding from the BGRA pipeline boundary, including checked
   NV12 upload, Annex-B-to-AVCC conversion, avcC extraction, runtime smoke probing, and OpenH264
   fallback.
+- Added retained Linux VA-API HEVC Main encoding with the same runtime-only libva contract,
+  checked NV12 upload, length-prefixed sample conversion, hvcC extraction, and smoke probing.
 - Extended the runtime-loaded Linux VA-API probe through synchronized NV12/P010 image derivation,
   plane-layout validation, CPU buffer mapping, and balanced image cleanup without link-time GPU
   dependencies.

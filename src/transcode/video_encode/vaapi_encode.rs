@@ -3,10 +3,16 @@ use std::sync::Arc;
 use nuxodecs::{
     BlockingMode, DecodedFormat, Fourcc, Resolution,
     backend::vaapi::encoder::VaapiBackend,
-    codec::h264::parser::{Level, Profile},
-    encoder::h264::EncoderConfig,
-    encoder::stateless::h264::StatelessEncoder,
+    codec::{
+        h264::parser::{Level as H264Level, Profile as H264Profile},
+        h265::parser::{Level as H265Level, Profile as H265Profile},
+    },
+    encoder::stateless::{
+        h264::StatelessEncoder as H264StatelessEncoder,
+        h265::StatelessEncoder as H265StatelessEncoder,
+    },
     encoder::{FrameMetadata, PredictionStructure, RateControl, Tunings, VideoEncoder},
+    encoder::{h264::EncoderConfig as H264EncoderConfig, h265::EncoderConfig as H265EncoderConfig},
     libva::{Display, Surface},
 };
 
@@ -14,11 +20,16 @@ use crate::transcode::video_decode::vaapi_decode::{VaapiCpuFrame, VaapiUserPtrDe
 
 use super::{
     EncodedVideoFrame, EncodedVideoOutput, EncodedVideoStream, RawVideoFormat, RawVideoFrameRef,
-    VideoCodec, VideoEncodeError, build_avc_decoder_config, validate_raw_video_format,
-    validate_raw_video_frames,
+    VideoCodec, VideoEncodeError, build_avc_decoder_config, build_hevc_decoder_config,
+    validate_raw_video_format, validate_raw_video_frames,
 };
 
-type Encoder = StatelessEncoder<
+type H264Encoder = H264StatelessEncoder<
+    VaapiCpuFrame,
+    VaapiBackend<VaapiUserPtrDescriptor, Surface<VaapiUserPtrDescriptor>>,
+>;
+
+type H265Encoder = H265StatelessEncoder<
     VaapiCpuFrame,
     VaapiBackend<VaapiUserPtrDescriptor, Surface<VaapiUserPtrDescriptor>>,
 >;
@@ -29,7 +40,7 @@ pub struct VaapiH264EncoderSession {
     encoded_batches: u64,
     next_token: u64,
     decoder_config: Option<Vec<u8>>,
-    encoder: Encoder,
+    encoder: H264Encoder,
 }
 
 impl std::fmt::Debug for VaapiH264EncoderSession {
@@ -66,10 +77,10 @@ impl VaapiH264EncoderSession {
             .and_then(|value| value.checked_div(format.frame_rate_den))
             .unwrap_or(0)
             .max(1);
-        let config = EncoderConfig {
+        let config = H264EncoderConfig {
             resolution,
-            profile: Profile::Main,
-            level: Level::L4,
+            profile: H264Profile::Main,
+            level: H264Level::L4,
             pred_structure: PredictionStructure::LowDelay { limit: 240 },
             initial_tunings: Tunings {
                 rate_control: RateControl::ConstantBitrate(u64::from(bitrate)),
@@ -77,7 +88,7 @@ impl VaapiH264EncoderSession {
                 ..Default::default()
             },
         };
-        let encoder = Encoder::new_vaapi(
+        let encoder = H264Encoder::new_vaapi(
             Arc::clone(&display),
             config,
             Fourcc::from(b"NV12"),
@@ -181,6 +192,167 @@ impl VaapiH264EncoderSession {
     }
 }
 
+/// Retained Linux VA-API HEVC Main encoder accepting Chroma's BGRA frame boundary.
+pub struct VaapiHevcEncoderSession {
+    format: RawVideoFormat,
+    encoded_batches: u64,
+    next_token: u64,
+    decoder_config: Option<Vec<u8>>,
+    encoder: H265Encoder,
+}
+
+impl std::fmt::Debug for VaapiHevcEncoderSession {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("VaapiHevcEncoderSession")
+            .field("format", &self.format)
+            .field("encoded_batches", &self.encoded_batches)
+            .finish_non_exhaustive()
+    }
+}
+
+impl VaapiHevcEncoderSession {
+    /// Opens a VA-API HEVC Main encoder on the first usable DRM render node.
+    pub fn new(format: RawVideoFormat, bitrate: u32) -> Result<Self, VideoEncodeError> {
+        validate_raw_video_format(format)?;
+        if !format.width.is_multiple_of(2) || !format.height.is_multiple_of(2) {
+            return Err(VideoEncodeError::InvalidInput {
+                reason: "VA-API HEVC requires even width and height".to_string(),
+            });
+        }
+        if bitrate == 0 {
+            return Err(VideoEncodeError::InvalidInput {
+                reason: "bitrate must be greater than zero".to_string(),
+            });
+        }
+        let display = Display::open().ok_or_else(|| VideoEncodeError::BackendUnavailable {
+            reason: "libva could not open a DRM render node".to_string(),
+        })?;
+        let resolution = Resolution::from((format.width, format.height));
+        let frame_rate = format
+            .frame_rate_num
+            .checked_add(format.frame_rate_den / 2)
+            .and_then(|value| value.checked_div(format.frame_rate_den))
+            .unwrap_or(0)
+            .max(1);
+        let config = H265EncoderConfig {
+            resolution,
+            profile: H265Profile::Main,
+            level: H265Level::L4,
+            pred_structure: PredictionStructure::LowDelay { limit: 240 },
+            initial_tunings: Tunings {
+                rate_control: RateControl::ConstantBitrate(u64::from(bitrate)),
+                framerate: frame_rate,
+                ..Default::default()
+            },
+        };
+        let encoder = H265Encoder::new_vaapi(
+            Arc::clone(&display),
+            config,
+            Fourcc::from(b"NV12"),
+            resolution,
+            false,
+            BlockingMode::Blocking,
+        )
+        .map_err(|error| VideoEncodeError::BackendUnavailable {
+            reason: format!("VA-API HEVC encoder initialization failed: {error}"),
+        })?;
+        Ok(Self {
+            format,
+            encoded_batches: 0,
+            next_token: 1,
+            decoder_config: None,
+            encoder,
+        })
+    }
+
+    /// Encodes one ordered BGRA frame batch without recreating the VA context.
+    pub fn encode(
+        &mut self,
+        frames: &[RawVideoFrameRef<'_>],
+    ) -> Result<EncodedVideoOutput, VideoEncodeError> {
+        validate_raw_video_frames(self.format, frames)?;
+        let mut output = Vec::with_capacity(frames.len());
+        for frame in frames {
+            let token = self.next_token;
+            self.next_token =
+                self.next_token
+                    .checked_add(1)
+                    .ok_or_else(|| VideoEncodeError::BackendFailed {
+                        reason: "VA-API encoder timestamp token space was exhausted".to_string(),
+                    })?;
+            let mut surface = VaapiCpuFrame::new(
+                Resolution::from((self.format.width, self.format.height)),
+                DecodedFormat::NV12,
+            )
+            .map_err(|reason| VideoEncodeError::BackendFailed { reason })?;
+            surface
+                .copy_bgra_to_nv12(frame.bytes)
+                .map_err(|reason| VideoEncodeError::BackendFailed { reason })?;
+            self.encoder
+                .encode(
+                    FrameMetadata {
+                        timestamp: token,
+                        layout: surface.frame_layout(),
+                        force_keyframe: frame.keyframe,
+                        force_idr: frame.keyframe,
+                    },
+                    surface,
+                )
+                .map_err(encode_error("HEVC frame submission"))?;
+            let coded = self
+                .encoder
+                .poll()
+                .map_err(encode_error("HEVC output polling"))?
+                .ok_or_else(|| VideoEncodeError::BackendFailed {
+                    reason: "VA-API HEVC encoder produced no output in blocking mode".to_string(),
+                })?;
+            if coded.metadata.timestamp != token {
+                return Err(VideoEncodeError::BackendFailed {
+                    reason: format!(
+                        "VA-API HEVC encoder returned timestamp token {}, expected {token}",
+                        coded.metadata.timestamp
+                    ),
+                });
+            }
+            let access_unit = hevc_annex_b_to_length_prefixed(&coded.bitstream)?;
+            if !access_unit.parameter_sets.is_empty() {
+                self.decoder_config = build_hevc_decoder_config(&access_unit.parameter_sets, 4);
+            }
+            output.push(EncodedVideoFrame {
+                pts: frame.pts,
+                dts: frame.dts,
+                duration: frame.duration,
+                payload: access_unit.payload,
+                keyframe: access_unit.keyframe,
+            });
+        }
+        let decoder_config =
+            self.decoder_config
+                .clone()
+                .ok_or_else(|| VideoEncodeError::BackendFailed {
+                    reason: "VA-API HEVC encoder emitted no VPS/SPS/PPS decoder configuration"
+                        .to_string(),
+                })?;
+        self.encoded_batches = self.encoded_batches.saturating_add(1);
+        Ok(EncodedVideoOutput {
+            stream: EncodedVideoStream {
+                codec: VideoCodec::Hevc,
+                width: self.format.width,
+                height: self.format.height,
+                time_scale: frames[0].pts.scale,
+                decoder_config: Some(decoder_config),
+            },
+            frames: output,
+        })
+    }
+
+    /// Returns the number of frame batches encoded by this session.
+    pub fn encoded_batches(&self) -> u64 {
+        self.encoded_batches
+    }
+}
+
 fn encode_error(
     operation: &'static str,
 ) -> impl FnOnce(nuxodecs::encoder::EncodeError) -> VideoEncodeError {
@@ -232,6 +404,49 @@ fn annex_b_to_avcc(bytes: &[u8]) -> Result<AvccAccessUnit, VideoEncodeError> {
     })
 }
 
+fn hevc_annex_b_to_length_prefixed(bytes: &[u8]) -> Result<AvccAccessUnit, VideoEncodeError> {
+    let nal_units = annex_b_nal_units(bytes);
+    if nal_units.is_empty() {
+        return Err(VideoEncodeError::BackendFailed {
+            reason: "VA-API HEVC encoder returned no Annex-B NAL units".to_string(),
+        });
+    }
+    let mut payload = Vec::with_capacity(bytes.len());
+    let mut parameter_sets = Vec::new();
+    let mut keyframe = false;
+    for nal in nal_units {
+        if nal.len() < 2 {
+            return Err(VideoEncodeError::BackendFailed {
+                reason: "VA-API HEVC encoder returned a truncated NAL unit".to_string(),
+            });
+        }
+        let nal_type = (nal[0] >> 1) & 0x3f;
+        match nal_type {
+            32..=34 => parameter_sets.push(nal.to_vec()),
+            35 => {}
+            _ => {
+                keyframe |= (16..=23).contains(&nal_type);
+                let size =
+                    u32::try_from(nal.len()).map_err(|_| VideoEncodeError::BackendFailed {
+                        reason: "VA-API HEVC NAL unit exceeds the length-prefix limit".to_string(),
+                    })?;
+                payload.extend_from_slice(&size.to_be_bytes());
+                payload.extend_from_slice(nal);
+            }
+        }
+    }
+    if payload.is_empty() {
+        return Err(VideoEncodeError::BackendFailed {
+            reason: "VA-API HEVC encoder returned parameter sets without a coded slice".to_string(),
+        });
+    }
+    Ok(AvccAccessUnit {
+        payload,
+        parameter_sets,
+        keyframe,
+    })
+}
+
 fn annex_b_nal_units(mut bytes: &[u8]) -> Vec<&[u8]> {
     let mut units = Vec::new();
     while let Some(start) = find_start_code(bytes, 0) {
@@ -270,5 +485,17 @@ mod tests {
         assert_eq!(access_unit.parameter_sets.len(), 2);
         assert!(access_unit.keyframe);
         assert_eq!(access_unit.payload, [0, 0, 0, 3, 0x65, 5, 6]);
+    }
+
+    #[test]
+    fn converts_hevc_annex_b_output_and_extracts_parameter_sets() {
+        let access_unit = hevc_annex_b_to_length_prefixed(&[
+            0, 0, 0, 1, 0x40, 1, 2, 0, 0, 1, 0x42, 1, 3, 0, 0, 1, 0x44, 1, 4, 0, 0, 0, 1, 0x26, 1,
+            5, 6,
+        ])
+        .unwrap();
+        assert_eq!(access_unit.parameter_sets.len(), 3);
+        assert!(access_unit.keyframe);
+        assert_eq!(access_unit.payload, [0, 0, 0, 4, 0x26, 1, 5, 6]);
     }
 }

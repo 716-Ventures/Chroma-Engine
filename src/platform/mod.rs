@@ -359,10 +359,44 @@ fn run_warmup_task(task: &EncoderWarmupTask) -> Result<(), EncoderWarmupError> {
         (EncoderWarmupKind::Video, "chroma-videotoolbox-hevc", "hevc") => warm_hevc_encoder(),
         (EncoderWarmupKind::Video, "chroma-cpu-h264", "h264") => warm_cpu_h264_encoder(),
         (EncoderWarmupKind::Video, "chroma-vaapi-h264", "h264") => warm_vaapi_h264_encoder(),
+        (EncoderWarmupKind::Video, "chroma-vaapi-hevc", "hevc") => warm_vaapi_hevc_encoder(),
         (EncoderWarmupKind::Audio, "chroma-audiotoolbox-aac", "aac") => warm_aac_encoder(),
         (EncoderWarmupKind::Audio, "chroma-cpu-aac", "aac") => warm_cpu_aac_encoder(),
         _ => Ok(()),
     }
+}
+
+fn warm_vaapi_hevc_encoder() -> Result<(), EncoderWarmupError> {
+    #[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
+    {
+        use crate::transcode::{RawVideoFrameRef, VaapiHevcEncoderSession};
+
+        let format = RawVideoFormat {
+            width: 128,
+            height: 72,
+            frame_rate_num: 24,
+            frame_rate_den: 1,
+            pixel_format: RawVideoPixelFormat::Bgra,
+        };
+        let bgra = vec![0_u8; format.width as usize * format.height as usize * 4];
+        let scale = crate::packet::TimeScale {
+            units_per_second: 24,
+        };
+        VaapiHevcEncoderSession::new(format, 500_000)
+            .and_then(|mut session| {
+                session.encode(&[RawVideoFrameRef {
+                    pts: crate::packet::TimePoint { units: 0, scale },
+                    dts: crate::packet::TimePoint { units: 0, scale },
+                    duration: crate::packet::TimeDelta { units: 1, scale },
+                    bytes: &bgra,
+                    keyframe: true,
+                }])
+            })
+            .map_err(|error| EncoderWarmupError {
+                reason: format!("VA-API HEVC warmup failed: {error}"),
+            })?;
+    }
+    Ok(())
 }
 
 fn warm_vaapi_h264_encoder() -> Result<(), EncoderWarmupError> {
@@ -999,6 +1033,14 @@ fn native_encoder_profiles() -> Vec<EncoderProfile> {
                 hwaccel: Some("vaapi".to_string()),
             });
         }
+        if linux_vaapi_hevc_encoder_available() {
+            profiles.push(EncoderProfile {
+                kind: HardwareKind::Vaapi,
+                video_encoder: "chroma-vaapi-hevc".to_string(),
+                codec: VideoOutputCodec::Hevc,
+                hwaccel: Some("vaapi".to_string()),
+            });
+        }
         profiles.push(default_cpu_profile());
         profiles
     }
@@ -1031,11 +1073,7 @@ fn video_backend_matrix() -> Vec<EncoderBackend> {
                 "chroma-nvenc-hevc",
             ),
             vaapi_h264_video_backend(),
-            planned_video_backend(
-                HardwareKind::Vaapi,
-                VideoOutputCodec::Hevc,
-                "chroma-vaapi-hevc",
-            ),
+            vaapi_hevc_video_backend(),
             planned_video_backend(HardwareKind::Qsv, VideoOutputCodec::H264, "chroma-qsv-h264"),
             planned_video_backend(HardwareKind::Qsv, VideoOutputCodec::Hevc, "chroma-qsv-hevc"),
             executable_video_backend(HardwareKind::Cpu, VideoOutputCodec::H264, "chroma-cpu-h264"),
@@ -1081,6 +1119,22 @@ fn vaapi_h264_video_backend() -> EncoderBackend {
     }
 }
 
+fn vaapi_hevc_video_backend() -> EncoderBackend {
+    if linux_vaapi_hevc_encoder_available() {
+        executable_video_backend(
+            HardwareKind::Vaapi,
+            VideoOutputCodec::Hevc,
+            "chroma-vaapi-hevc",
+        )
+    } else {
+        planned_video_backend(
+            HardwareKind::Vaapi,
+            VideoOutputCodec::Hevc,
+            "chroma-vaapi-hevc",
+        )
+    }
+}
+
 #[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
 fn linux_vaapi_h264_encoder_available() -> bool {
     use std::sync::OnceLock;
@@ -1114,8 +1168,46 @@ fn linux_vaapi_h264_encoder_available() -> bool {
     })
 }
 
+#[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
+fn linux_vaapi_hevc_encoder_available() -> bool {
+    use std::sync::OnceLock;
+
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        use crate::transcode::RawVideoFrameRef;
+
+        let format = RawVideoFormat {
+            width: 128,
+            height: 72,
+            frame_rate_num: 24,
+            frame_rate_den: 1,
+            pixel_format: RawVideoPixelFormat::Bgra,
+        };
+        let bgra = vec![0_u8; format.width as usize * format.height as usize * 4];
+        let scale = crate::packet::TimeScale {
+            units_per_second: 24,
+        };
+        crate::transcode::VaapiHevcEncoderSession::new(format, 500_000)
+            .and_then(|mut session| {
+                session.encode(&[RawVideoFrameRef {
+                    pts: crate::packet::TimePoint { units: 0, scale },
+                    dts: crate::packet::TimePoint { units: 0, scale },
+                    duration: crate::packet::TimeDelta { units: 1, scale },
+                    bytes: &bgra,
+                    keyframe: true,
+                }])
+            })
+            .is_ok()
+    })
+}
+
 #[cfg(not(all(target_os = "linux", feature = "linux-vaapi")))]
 fn linux_vaapi_h264_encoder_available() -> bool {
+    false
+}
+
+#[cfg(not(all(target_os = "linux", feature = "linux-vaapi")))]
+fn linux_vaapi_hevc_encoder_available() -> bool {
     false
 }
 
