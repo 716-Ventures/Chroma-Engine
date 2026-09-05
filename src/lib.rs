@@ -74,8 +74,6 @@ pub use session::{
     PlaybackPlan, PlaybackTarget, StageKind, StageMode, TransportKind, TransportPlan,
     plan_multi_audio_outputs, plan_playback,
 };
-#[cfg(all(target_os = "linux", feature = "linux-nvidia"))]
-pub use transcode::NvencH264EncoderSession;
 pub use transcode::{
     AacEncoderSession, AudioClockConfig, AudioCodec, AudioDecodeCodec, AudioDecodeError,
     AudioDecodeInput, AudioEncodeError, AudioFrameTiming, AudioOp, AudioSampleClock,
@@ -107,6 +105,11 @@ pub use transcode::{
     probe_videotoolbox_hevc_decoder_session, probe_videotoolbox_hevc_session,
     validate_decoded_video_format, write_native_fmp4_transcode_init,
     write_native_fmp4_transcode_segment, write_native_fmp4_transcode_start,
+};
+#[cfg(all(target_os = "linux", feature = "linux-nvidia"))]
+pub use transcode::{
+    NvdecH264BgraDecoderSession, NvdecHevcBgraDecoderSession, NvencH264EncoderSession,
+    NvencHevcEncoderSession,
 };
 #[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
 pub use transcode::{

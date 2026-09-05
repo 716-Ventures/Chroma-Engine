@@ -365,6 +365,7 @@ fn run_warmup_task(task: &EncoderWarmupTask) -> Result<(), EncoderWarmupError> {
         (EncoderWarmupKind::Video, "chroma-vaapi-h264", "h264") => warm_vaapi_h264_encoder(),
         (EncoderWarmupKind::Video, "chroma-vaapi-hevc", "hevc") => warm_vaapi_hevc_encoder(),
         (EncoderWarmupKind::Video, "chroma-nvenc-h264", "h264") => warm_nvenc_h264_encoder(),
+        (EncoderWarmupKind::Video, "chroma-nvenc-hevc", "hevc") => warm_nvenc_hevc_encoder(),
         (EncoderWarmupKind::Audio, "chroma-audiotoolbox-aac", "aac") => warm_aac_encoder(),
         (EncoderWarmupKind::Audio, "chroma-cpu-aac", "aac") => warm_cpu_aac_encoder(),
         (EncoderWarmupKind::Audio, "chroma-cpu-ac3", "ac3") => warm_cpu_ac3_encoder(),
@@ -401,6 +402,33 @@ fn warm_nvenc_h264_encoder() -> Result<(), EncoderWarmupError> {
             })
             .map_err(|error| EncoderWarmupError {
                 reason: format!("NVENC H.264 warmup failed: {error}"),
+            })?;
+    }
+    Ok(())
+}
+
+fn warm_nvenc_hevc_encoder() -> Result<(), EncoderWarmupError> {
+    #[cfg(all(target_os = "linux", feature = "linux-nvidia"))]
+    {
+        use crate::transcode::{NvencHevcEncoderSession, RawVideoFrameRef};
+
+        let format = hardware_probe_video_format();
+        let bgra = vec![0_u8; format.width as usize * format.height as usize * 4];
+        let scale = crate::packet::TimeScale {
+            units_per_second: 24,
+        };
+        NvencHevcEncoderSession::new(format, 500_000)
+            .and_then(|mut session| {
+                session.encode(&[RawVideoFrameRef {
+                    pts: crate::packet::TimePoint { units: 0, scale },
+                    dts: crate::packet::TimePoint { units: 0, scale },
+                    duration: crate::packet::TimeDelta { units: 1, scale },
+                    bytes: &bgra,
+                    keyframe: true,
+                }])
+            })
+            .map_err(|error| EncoderWarmupError {
+                reason: format!("NVENC HEVC warmup failed: {error}"),
             })?;
     }
     Ok(())
@@ -676,7 +704,6 @@ fn video_decoder_backend_matrix_for_os(os: &str) -> Vec<VideoDecoderBackend> {
                 &[
                     VideoDecodeSurfaceFormat::CudaSurface,
                     VideoDecodeSurfaceFormat::Nv12,
-                    VideoDecodeSurfaceFormat::P010,
                 ],
             ),
             video_decoder_backend(
@@ -927,7 +954,7 @@ fn video_decode_unavailable_reason(os: &str, kind: HardwareKind, codec: VideoCod
         "Linux Quick Sync decode is detected through DRM but is not executable in this build"
             .to_string()
     } else if kind == HardwareKind::Nvdec && os == "linux" {
-        "NVIDIA decode device was not detected under /dev/nvidiactl".to_string()
+        linux_nvdec_decode_unavailable_reason(codec)
     } else if os == "windows" {
         windows_hardware_decode_unavailable_reason(kind, codec)
     } else {
@@ -956,6 +983,13 @@ fn video_decode_backend_state(os: &str, kind: HardwareKind, codec: VideoCodec) -
         }
         ("linux", HardwareKind::Vaapi | HardwareKind::Qsv) if linux_dri_decode_device_present() => {
             CapabilityState::Detected
+        }
+        ("linux", HardwareKind::Nvdec)
+            if cfg!(feature = "linux-nvidia")
+                && matches!(codec, VideoCodec::H264 | VideoCodec::Hevc)
+                && linux_nvdec_decode_supported(codec) =>
+        {
+            CapabilityState::Executable
         }
         ("linux", HardwareKind::Nvdec) if linux_nvidia_decode_device_present() => {
             CapabilityState::Detected
@@ -1035,6 +1069,62 @@ fn linux_nvidia_decode_device_present() -> bool {
 #[cfg(not(target_os = "linux"))]
 fn linux_nvidia_decode_device_present() -> bool {
     false
+}
+
+#[cfg(all(target_os = "linux", feature = "linux-nvidia"))]
+fn linux_nvdec_decode_supported(codec: VideoCodec) -> bool {
+    use std::sync::OnceLock;
+
+    static SUPPORT: OnceLock<(bool, bool)> = OnceLock::new();
+    let support = SUPPORT.get_or_init(|| {
+        let query = || {
+            let cuda = oxideav_nvidia::Cuda::init().ok()?;
+            if cuda.device_count().ok()? == 0 {
+                return None;
+            }
+            let device = cuda.device(0).ok()?;
+            let _context = cuda.create_context_for(&device).ok()?;
+            let h264 = oxideav_nvidia::nvdec_caps(
+                oxideav_nvidia::CudaVideoCodec::H264,
+                oxideav_nvidia::sys::CUDA_VIDEO_CHROMA_FORMAT_420,
+                8,
+            )
+            .ok()
+            .is_some_and(|caps| caps.is_supported != 0);
+            let hevc = oxideav_nvidia::nvdec_caps(
+                oxideav_nvidia::CudaVideoCodec::Hevc,
+                oxideav_nvidia::sys::CUDA_VIDEO_CHROMA_FORMAT_420,
+                8,
+            )
+            .ok()
+            .is_some_and(|caps| caps.is_supported != 0);
+            Some((h264, hevc))
+        };
+        query().unwrap_or((false, false))
+    });
+    match codec {
+        VideoCodec::H264 => support.0,
+        VideoCodec::Hevc => support.1,
+        VideoCodec::Av1 => false,
+    }
+}
+
+#[cfg(not(all(target_os = "linux", feature = "linux-nvidia")))]
+fn linux_nvdec_decode_supported(_codec: VideoCodec) -> bool {
+    false
+}
+
+fn linux_nvdec_decode_unavailable_reason(codec: VideoCodec) -> String {
+    if !cfg!(feature = "linux-nvidia") {
+        return "NVIDIA decode support is disabled in this build".to_string();
+    }
+    if !linux_nvidia_decode_device_present() {
+        return "NVIDIA decode device was not detected under /dev/nvidiactl".to_string();
+    }
+    if !linux_nvdec_decode_supported(codec) {
+        return format!("NVDEC does not report 8-bit YUV420 {codec:?} decode support");
+    }
+    "NVDEC decoder is unavailable".to_string()
 }
 
 #[cfg(target_os = "windows")]
@@ -1117,6 +1207,14 @@ fn native_encoder_profiles() -> Vec<EncoderProfile> {
                 hwaccel: Some("nvenc".to_string()),
             });
         }
+        if linux_nvenc_hevc_encoder_available() {
+            profiles.push(EncoderProfile {
+                kind: HardwareKind::Nvenc,
+                video_encoder: "chroma-nvenc-hevc".to_string(),
+                codec: VideoOutputCodec::Hevc,
+                hwaccel: Some("nvenc".to_string()),
+            });
+        }
         if linux_vaapi_h264_encoder_available() {
             profiles.push(EncoderProfile {
                 kind: HardwareKind::Vaapi,
@@ -1155,11 +1253,7 @@ fn video_backend_matrix() -> Vec<EncoderBackend> {
         ],
         "linux" => vec![
             linux_nvenc_h264_video_backend(),
-            planned_video_backend(
-                HardwareKind::Nvenc,
-                VideoOutputCodec::Hevc,
-                "chroma-nvenc-hevc",
-            ),
+            linux_nvenc_hevc_video_backend(),
             vaapi_h264_video_backend(),
             vaapi_hevc_video_backend(),
             planned_video_backend(HardwareKind::Qsv, VideoOutputCodec::H264, "chroma-qsv-h264"),
@@ -1207,6 +1301,33 @@ fn linux_nvenc_h264_video_backend() -> EncoderBackend {
     }
 }
 
+fn linux_nvenc_hevc_video_backend() -> EncoderBackend {
+    if linux_nvenc_hevc_encoder_available() {
+        executable_video_backend(
+            HardwareKind::Nvenc,
+            VideoOutputCodec::Hevc,
+            "chroma-nvenc-hevc",
+        )
+    } else {
+        planned_video_backend(
+            HardwareKind::Nvenc,
+            VideoOutputCodec::Hevc,
+            "chroma-nvenc-hevc",
+        )
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "linux-nvidia"))]
+fn hardware_probe_video_format() -> RawVideoFormat {
+    RawVideoFormat {
+        width: 128,
+        height: 72,
+        frame_rate_num: 24,
+        frame_rate_den: 1,
+        pixel_format: RawVideoPixelFormat::Bgra,
+    }
+}
+
 #[cfg(all(target_os = "linux", feature = "linux-nvidia"))]
 fn linux_nvenc_h264_encoder_available() -> bool {
     use std::sync::OnceLock;
@@ -1240,8 +1361,40 @@ fn linux_nvenc_h264_encoder_available() -> bool {
     })
 }
 
+#[cfg(all(target_os = "linux", feature = "linux-nvidia"))]
+fn linux_nvenc_hevc_encoder_available() -> bool {
+    use std::sync::OnceLock;
+
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        use crate::transcode::{NvencHevcEncoderSession, RawVideoFrameRef};
+
+        let format = hardware_probe_video_format();
+        let bgra = vec![0_u8; format.width as usize * format.height as usize * 4];
+        let scale = crate::packet::TimeScale {
+            units_per_second: 24,
+        };
+        NvencHevcEncoderSession::new(format, 500_000)
+            .and_then(|mut session| {
+                session.encode(&[RawVideoFrameRef {
+                    pts: crate::packet::TimePoint { units: 0, scale },
+                    dts: crate::packet::TimePoint { units: 0, scale },
+                    duration: crate::packet::TimeDelta { units: 1, scale },
+                    bytes: &bgra,
+                    keyframe: true,
+                }])
+            })
+            .is_ok()
+    })
+}
+
 #[cfg(not(all(target_os = "linux", feature = "linux-nvidia")))]
 fn linux_nvenc_h264_encoder_available() -> bool {
+    false
+}
+
+#[cfg(not(all(target_os = "linux", feature = "linux-nvidia")))]
+fn linux_nvenc_hevc_encoder_available() -> bool {
     false
 }
 
@@ -1655,10 +1808,12 @@ mod tests {
         assert!(backends.iter().any(|backend| {
             backend.kind == HardwareKind::Vaapi
                 && backend.codec == VideoCodec::H264
-                && !backend.available
                 && matches!(
                     backend.state,
-                    CapabilityState::Modeled | CapabilityState::Detected | CapabilityState::Opened
+                    CapabilityState::Modeled
+                        | CapabilityState::Detected
+                        | CapabilityState::Opened
+                        | CapabilityState::Executable
                 )
                 && backend
                     .native_surface_formats
@@ -1672,7 +1827,7 @@ mod tests {
                     .contains(&VideoDecodeSurfaceFormat::CudaSurface)
                 && backend
                     .native_surface_formats
-                    .contains(&VideoDecodeSurfaceFormat::P010)
+                    .contains(&VideoDecodeSurfaceFormat::Nv12)
         }));
         assert!(backends.iter().any(|backend| {
             backend.kind == HardwareKind::Qsv

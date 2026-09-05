@@ -7,8 +7,8 @@ use oxideav_core::{
 
 use super::{
     EncodedVideoFrame, EncodedVideoOutput, EncodedVideoStream, RawVideoFormat, RawVideoFrameRef,
-    VideoCodec, VideoEncodeError, build_avc_decoder_config, validate_raw_video_format,
-    validate_raw_video_frames,
+    VideoCodec, VideoEncodeError, build_avc_decoder_config, build_hevc_decoder_config,
+    validate_raw_video_format, validate_raw_video_frames,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -165,6 +165,154 @@ impl NvencH264EncoderSession {
     }
 }
 
+/// Retained Linux NVIDIA NVENC HEVC Main encoder accepting Chroma's BGRA frame boundary.
+pub struct NvencHevcEncoderSession {
+    format: RawVideoFormat,
+    encoder: Box<dyn oxideav_core::Encoder>,
+    pending: HashMap<i64, PendingTiming>,
+    next_token: i64,
+    decoder_config: Option<Vec<u8>>,
+    encoded_batches: u64,
+}
+
+impl std::fmt::Debug for NvencHevcEncoderSession {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NvencHevcEncoderSession")
+            .field("format", &self.format)
+            .field("pending_frames", &self.pending.len())
+            .field("encoded_batches", &self.encoded_batches)
+            .finish_non_exhaustive()
+    }
+}
+
+impl NvencHevcEncoderSession {
+    /// Opens an NVENC HEVC Main-profile encoder on the first usable CUDA device.
+    pub fn new(format: RawVideoFormat, bitrate: u32) -> Result<Self, VideoEncodeError> {
+        validate_raw_video_format(format)?;
+        if !format.width.is_multiple_of(2) || !format.height.is_multiple_of(2) {
+            return Err(VideoEncodeError::InvalidInput {
+                reason: "NVENC HEVC requires even width and height".to_string(),
+            });
+        }
+        if bitrate == 0 {
+            return Err(VideoEncodeError::InvalidInput {
+                reason: "bitrate must be greater than zero".to_string(),
+            });
+        }
+        let mut parameters = CodecParameters::video(CodecId::new("hevc"));
+        parameters.width = Some(format.width);
+        parameters.height = Some(format.height);
+        parameters.pixel_format = Some(PixelFormat::Yuv420P);
+        parameters.frame_rate = Some(Rational::new(
+            i64::from(format.frame_rate_num),
+            i64::from(format.frame_rate_den),
+        ));
+        parameters.bit_rate = Some(u64::from(bitrate));
+        let encoder = oxideav_nvidia::HevcNvEncoder::make(&parameters).map_err(map_init_error)?;
+        Ok(Self {
+            format,
+            encoder,
+            pending: HashMap::new(),
+            next_token: 1,
+            decoder_config: None,
+            encoded_batches: 0,
+        })
+    }
+
+    /// Encodes one ordered BGRA batch without recreating the CUDA/NVENC session.
+    pub fn encode(
+        &mut self,
+        frames: &[RawVideoFrameRef<'_>],
+    ) -> Result<EncodedVideoOutput, VideoEncodeError> {
+        validate_raw_video_frames(self.format, frames)?;
+        let mut output = Vec::with_capacity(frames.len());
+        for frame in frames {
+            let token = self.next_token;
+            self.next_token =
+                self.next_token
+                    .checked_add(1)
+                    .ok_or_else(|| VideoEncodeError::BackendFailed {
+                        reason: "NVENC timestamp token space was exhausted".to_string(),
+                    })?;
+            self.pending.insert(
+                token,
+                PendingTiming {
+                    pts: frame.pts,
+                    dts: frame.dts,
+                    duration: frame.duration,
+                },
+            );
+            let video_frame = Frame::Video(bgra_to_i420(self.format, frame.bytes, token)?);
+            self.encoder
+                .send_frame(&video_frame)
+                .map_err(map_runtime_error("HEVC frame submission"))?;
+            self.receive_available(&mut output)?;
+        }
+        if output.is_empty() {
+            return Err(VideoEncodeError::BackendFailed {
+                reason: "NVENC buffered the entire HEVC input batch without emitting output"
+                    .to_string(),
+            });
+        }
+        let decoder_config =
+            self.decoder_config
+                .clone()
+                .ok_or_else(|| VideoEncodeError::BackendFailed {
+                    reason: "NVENC emitted no HEVC VPS/SPS/PPS decoder configuration".to_string(),
+                })?;
+        self.encoded_batches = self.encoded_batches.saturating_add(1);
+        Ok(EncodedVideoOutput {
+            stream: EncodedVideoStream {
+                codec: VideoCodec::Hevc,
+                width: self.format.width,
+                height: self.format.height,
+                time_scale: frames[0].pts.scale,
+                decoder_config: Some(decoder_config),
+            },
+            frames: output,
+        })
+    }
+
+    fn receive_available(
+        &mut self,
+        output: &mut Vec<EncodedVideoFrame>,
+    ) -> Result<(), VideoEncodeError> {
+        loop {
+            let packet = match self.encoder.receive_packet() {
+                Ok(packet) => packet,
+                Err(OxideError::NeedMore | OxideError::Eof) => return Ok(()),
+                Err(error) => return Err(map_runtime_error("HEVC output receive")(error)),
+            };
+            let token = packet.pts.ok_or_else(|| VideoEncodeError::BackendFailed {
+                reason: "NVENC returned an HEVC packet without its timestamp token".to_string(),
+            })?;
+            let timing =
+                self.pending
+                    .remove(&token)
+                    .ok_or_else(|| VideoEncodeError::BackendFailed {
+                        reason: format!("NVENC returned unknown HEVC timestamp token {token}"),
+                    })?;
+            let access_unit = annex_b_hevc_to_length_prefixed(&packet.data)?;
+            if !access_unit.parameter_sets.is_empty() {
+                self.decoder_config = build_hevc_decoder_config(&access_unit.parameter_sets, 4);
+            }
+            output.push(EncodedVideoFrame {
+                pts: timing.pts,
+                dts: timing.dts,
+                duration: timing.duration,
+                payload: access_unit.payload,
+                keyframe: access_unit.keyframe || packet.flags.keyframe,
+            });
+        }
+    }
+
+    /// Returns the number of frame batches accepted by this session.
+    pub fn encoded_batches(&self) -> u64 {
+        self.encoded_batches
+    }
+}
+
 fn map_init_error(error: OxideError) -> VideoEncodeError {
     match error {
         OxideError::Unsupported(reason) => VideoEncodeError::BackendUnavailable { reason },
@@ -290,6 +438,44 @@ fn annex_b_h264_to_avcc(bytes: &[u8]) -> Result<AvccAccessUnit, VideoEncodeError
     })
 }
 
+fn annex_b_hevc_to_length_prefixed(bytes: &[u8]) -> Result<AvccAccessUnit, VideoEncodeError> {
+    let nals = annex_b_nals(bytes);
+    if nals.is_empty() {
+        return Err(VideoEncodeError::BackendFailed {
+            reason: "NVENC returned no HEVC Annex-B NAL units".to_string(),
+        });
+    }
+    let mut payload = Vec::new();
+    let mut parameter_sets = Vec::new();
+    let mut keyframe = false;
+    for nal in nals {
+        let nal_type = (nal[0] >> 1) & 0x3f;
+        match nal_type {
+            32..=34 => parameter_sets.push(nal.to_vec()),
+            35 => {}
+            _ => {
+                keyframe |= (16..=21).contains(&nal_type);
+                let size =
+                    u32::try_from(nal.len()).map_err(|_| VideoEncodeError::BackendFailed {
+                        reason: "NVENC HEVC NAL unit exceeds the length-prefix limit".to_string(),
+                    })?;
+                payload.extend_from_slice(&size.to_be_bytes());
+                payload.extend_from_slice(nal);
+            }
+        }
+    }
+    if payload.is_empty() {
+        return Err(VideoEncodeError::BackendFailed {
+            reason: "NVENC returned only HEVC parameter-set NAL units".to_string(),
+        });
+    }
+    Ok(AvccAccessUnit {
+        payload,
+        parameter_sets,
+        keyframe,
+    })
+}
+
 fn annex_b_nals(mut bytes: &[u8]) -> Vec<&[u8]> {
     let mut nals = Vec::new();
     while let Some((start, prefix)) = find_start_code(bytes) {
@@ -346,5 +532,17 @@ mod tests {
         assert_eq!(frame.planes[0].data, [16; 4]);
         assert_eq!(frame.planes[1].data, [128]);
         assert_eq!(frame.planes[2].data, [128]);
+    }
+
+    #[test]
+    fn converts_hevc_annex_b_and_extracts_parameter_sets() {
+        let unit = annex_b_hevc_to_length_prefixed(&[
+            0, 0, 0, 1, 0x40, 1, 2, 0, 0, 1, 0x42, 3, 4, 0, 0, 1, 0x44, 5, 6, 0, 0, 1, 0x26, 7, 8,
+        ])
+        .expect("convert NVENC HEVC output");
+
+        assert_eq!(unit.parameter_sets.len(), 3);
+        assert!(unit.keyframe);
+        assert_eq!(unit.payload, [0, 0, 0, 3, 0x26, 7, 8]);
     }
 }

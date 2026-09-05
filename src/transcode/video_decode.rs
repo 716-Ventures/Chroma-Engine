@@ -11,6 +11,11 @@ use super::yuv::limited_yuv_to_bgra;
 #[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
 pub(in crate::transcode) mod vaapi_decode;
 
+#[cfg(all(target_os = "linux", feature = "linux-nvidia"))]
+mod nvidia_decode;
+
+#[cfg(all(target_os = "linux", feature = "linux-nvidia"))]
+pub use nvidia_decode::{NvdecH264BgraDecoderSession, NvdecHevcBgraDecoderSession};
 #[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
 pub use vaapi_decode::{VaapiH264BgraDecoderSession, VaapiHevcBgraDecoderSession};
 
@@ -630,6 +635,12 @@ pub enum BgraDecoderSession {
     /// Linux VA-API HEVC decoder using runtime-loaded libva.
     #[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
     VaapiHevc(Box<VaapiHevcBgraDecoderSession>),
+    /// Linux NVIDIA NVDEC H.264 decoder using runtime-loaded CUDA libraries.
+    #[cfg(all(target_os = "linux", feature = "linux-nvidia"))]
+    NvdecH264(Box<NvdecH264BgraDecoderSession>),
+    /// Linux NVIDIA NVDEC HEVC decoder using runtime-loaded CUDA libraries.
+    #[cfg(all(target_os = "linux", feature = "linux-nvidia"))]
+    NvdecHevc(Box<NvdecHevcBgraDecoderSession>),
 }
 
 impl BgraDecoderSession {
@@ -644,6 +655,18 @@ impl BgraDecoderSession {
             VideoToolboxBgraDecoderSession::new(codec, output_format, decoder_config)
         {
             return Ok(Self::VideoToolbox(session));
+        }
+        #[cfg(all(target_os = "linux", feature = "linux-nvidia"))]
+        if codec == VideoCodec::H264
+            && let Ok(session) = NvdecH264BgraDecoderSession::new(output_format, decoder_config)
+        {
+            return Ok(Self::NvdecH264(Box::new(session)));
+        }
+        #[cfg(all(target_os = "linux", feature = "linux-nvidia"))]
+        if codec == VideoCodec::Hevc
+            && let Ok(session) = NvdecHevcBgraDecoderSession::new(output_format, decoder_config)
+        {
+            return Ok(Self::NvdecHevc(Box::new(session)));
         }
         #[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
         if codec == VideoCodec::H264
@@ -681,6 +704,10 @@ impl BgraDecoderSession {
             Self::VaapiH264(session) => session.decode(input),
             #[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
             Self::VaapiHevc(session) => session.decode(input),
+            #[cfg(all(target_os = "linux", feature = "linux-nvidia"))]
+            Self::NvdecH264(session) => session.decode(input),
+            #[cfg(all(target_os = "linux", feature = "linux-nvidia"))]
+            Self::NvdecHevc(session) => session.decode(input),
         }
     }
 
@@ -695,6 +722,10 @@ impl BgraDecoderSession {
             Self::VaapiH264(session) => session.decoded_batches(),
             #[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
             Self::VaapiHevc(session) => session.decoded_batches(),
+            #[cfg(all(target_os = "linux", feature = "linux-nvidia"))]
+            Self::NvdecH264(session) => session.decoded_batches(),
+            #[cfg(all(target_os = "linux", feature = "linux-nvidia"))]
+            Self::NvdecHevc(session) => session.decoded_batches(),
         }
     }
 
@@ -713,6 +744,10 @@ impl BgraDecoderSession {
             Self::VaapiH264(_) => "chroma-vaapi-h264-decoder",
             #[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
             Self::VaapiHevc(_) => "chroma-vaapi-hevc-decoder",
+            #[cfg(all(target_os = "linux", feature = "linux-nvidia"))]
+            Self::NvdecH264(_) => "chroma-nvdec-h264-decoder",
+            #[cfg(all(target_os = "linux", feature = "linux-nvidia"))]
+            Self::NvdecHevc(_) => "chroma-nvdec-hevc-decoder",
         }
     }
 }

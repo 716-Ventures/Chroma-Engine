@@ -47,10 +47,10 @@ pub use video_decode::{
     probe_videotoolbox_h264_decoder_session, probe_videotoolbox_hevc_decoder_session,
     validate_decoded_video_format,
 };
+#[cfg(all(target_os = "linux", feature = "linux-nvidia"))]
+pub use video_decode::{NvdecH264BgraDecoderSession, NvdecHevcBgraDecoderSession};
 #[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
 pub use video_decode::{VaapiH264BgraDecoderSession, VaapiHevcBgraDecoderSession};
-#[cfg(all(target_os = "linux", feature = "linux-nvidia"))]
-pub use video_encode::NvencH264EncoderSession;
 pub use video_encode::{
     CpuH264EncoderSession, EncodedVideoFrame, EncodedVideoOutput, EncodedVideoStream,
     H264EncoderSession, RawVideoFormat, RawVideoFrameRef, RawVideoPixelFormat, VideoEncodeError,
@@ -59,6 +59,8 @@ pub use video_encode::{
     encode_hevc_videotoolbox_bgra_frame, probe_videotoolbox_h264_session,
     probe_videotoolbox_hevc_session,
 };
+#[cfg(all(target_os = "linux", feature = "linux-nvidia"))]
+pub use video_encode::{NvencH264EncoderSession, NvencHevcEncoderSession};
 #[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
 pub use video_encode::{VaapiH264EncoderSession, VaapiHevcEncoderSession};
 pub use yuv::{convert_nv12_to_bgra, convert_p010_to_bgra};

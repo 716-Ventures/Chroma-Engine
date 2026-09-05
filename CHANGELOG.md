@@ -2,9 +2,14 @@
 
 ## Unreleased
 
-- Added retained Linux NVIDIA H.264 encoding through runtime-loaded CUDA/NVENC libraries, with
-  checked BGRA-to-I420 conversion, AVCC/configuration output, timing preservation, a real encode
-  capability smoke probe, and automatic fallback when NVIDIA hardware or drivers are unavailable.
+- Added retained Linux NVIDIA H.264 and HEVC Main encoding through runtime-loaded CUDA/NVENC
+  libraries, with checked BGRA-to-I420 conversion, AVCC/hvcC output, timing preservation, real
+  encode capability smoke probes, and automatic fallback when NVIDIA hardware or drivers are
+  unavailable.
+- Added retained Linux NVIDIA NVDEC H.264 and HEVC Main decoding with runtime codec-capability
+  queries, length-prefixed-to-Annex-B packet conversion, decode-order-safe timing, checked
+  I420-to-BGRA output, and portable fallback. Main10 remains on VA-API or the CPU decoder until the
+  NVIDIA runtime exposes a checked P010 host-output path.
 - Replaced placeholder Windows DirectX decode detection with real Media Foundation hardware-MFT
   enumeration and activation probes for H.264 and HEVC decode/encode transforms.
 - Added a retained portable DTS Core decoder from a pinned `oxideav-dts` revision, with DTS-HD
