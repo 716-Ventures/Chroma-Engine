@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added checksummed, self-contained release archives for macOS, Linux, Windows, Linux ARM64/NAS,
+  and Windows ARM64. ARM64 CI now bundles dav1d, smoke-tests the packaged executable, and uploads
+  the resulting archive; rustdoc warnings are explicitly denied in the platform test matrix.
 - Added retained Windows HEVC Main hardware decoding through the existing Media Foundation/D3D11
   path. Chroma converts hvcC parameter sets and length-prefixed samples to Annex B, reads back
   NV12 textures with checked row pitches, and advertises the backend only after a generated HEVC

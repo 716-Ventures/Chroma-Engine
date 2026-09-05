@@ -16,7 +16,7 @@ The target is a native media architecture, not an FFmpeg-compatible facade. Chro
 - `extract-chunk`: write a native compressed chunk payload and emit its manifest.
 - `remux-mp4`: remux supported sources into an efficient ISO-BMFF output path.
 - `encoder-probe`: report platform encoder capabilities.
-- `decoder-probe`: report platform decoder backend capabilities and status states, including native hardware surface families for macOS plus designed Linux/Windows targets.
+- `decoder-probe`: report executable and runtime-verified decoder backends on macOS, Linux, and Windows, while keeping non-selectable capability states explicit.
 - `transcode-fmp4-segments`: emit a contiguous Matroska-to-fMP4 window while retaining native decoder and encoder sessions.
 - `warmup`: initialize selected hardware/software backends before the first playback session.
 

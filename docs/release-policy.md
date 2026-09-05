@@ -40,9 +40,15 @@ A release candidate must pass:
 - `cargo machete`
 - fuzz target smoke checks for containers, codecs, subtitles, and fMP4
 
-Release artifacts must be built from a clean commit and published with checksums. Platform artifacts should include dependency metadata or an SBOM once release packaging is added.
+Release artifacts must be built from a clean commit and published with checksums. Platform
+artifacts include cargo-auditable dependency metadata and the native dav1d runtime required by the
+executable. The checksum is for the exact `.tar.gz` or `.zip` archive uploaded by CI.
 
-The CI `release-build` job uses `cargo auditable build --locked --release --bin chroma-engine` on macOS, Linux, and Windows so release binaries carry dependency metadata before packaging is formalized. Dedicated native ARM64 jobs compile, test the portable codec, and produce release binaries on Ubuntu and Windows; Linux ARM64 is the baseline for ARM-based NAS deployments.
+The CI `release-build` job uses `cargo auditable build --locked --release --bin chroma-engine` on
+macOS, Linux, and Windows, then smoke-tests and archives a self-contained runtime bundle with a
+SHA-256 checksum. Dedicated native ARM64 jobs compile all targets, test the portable codec, bundle
+dav1d, smoke-test the packaged executable, and upload checksummed archives on Ubuntu and Windows;
+Linux ARM64 is the baseline for ARM-based NAS deployments.
 
 The Apple video boundary uses the maintained `objc2` framework crates and `block2`; the legacy
 `block 0.1.6` graph and its local compatibility patch are absent. Keep

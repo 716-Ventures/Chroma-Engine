@@ -27,14 +27,15 @@ Chroma Engine is not a command-compatible FFmpeg replacement. It is a media engi
 - **Raw-frame queues are bounded.** The VideoToolbox path decodes and encodes small packet batches inside each segment instead of retaining an entire keyframe span as BGRA. On the 720p HEVC/AAC smoke fixture this reduced observed maximum resident size from roughly 1.09 GB to 238 MB.
 - **Real media smoke tests are separate from fixtures.** Scripts may inspect mounted local media, but committed tests use generated or sanitized fixtures so the repo stays small and deterministic.
 
-Near-term implementation order:
+## Current Integration Boundary
 
-1. Deepen native probe until it covers real library files across MP4/MOV and Matroska/WebM.
-2. Deepen the Chroma playback session manifest with concrete packet/decode/encode stage contracts.
-3. Build zero-copy packet readers for MP4 and Matroska.
-4. Build ISO-BMFF/fMP4 writers as reusable muxers.
-5. Add platform encode/decode backends only where stream copy cannot satisfy the requested session.
-6. Add any legacy transport adapters only after the native Chroma transport is stable.
+The original native-engine implementation sequence is complete: probe, playback manifests,
+bounded packet readers, reusable fMP4 muxing, retained codec sessions, and executable platform
+backends now exist. Remaining legacy-binary removal is a host integration task. GenusServer still
+has ffprobe-based MP4 analysis and FFmpeg fallback call sites that must be migrated and validated
+against its complete media corpus before its vendored binaries can be removed. Chroma Engine must
+continue returning explicit unsupported-capability errors for formats outside its declared scope;
+it must not conceal those gaps by spawning legacy media tools.
 
 ## Engineering Baseline
 
