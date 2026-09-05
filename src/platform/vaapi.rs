@@ -121,6 +121,17 @@ impl VaapiDecodeProbe {
         }
     }
 
+    pub fn supports_intel(&self, codec: VideoCodec) -> bool {
+        let device = match codec {
+            VideoCodec::H264 => self.h264.as_ref(),
+            VideoCodec::Hevc => self.hevc.as_ref(),
+            VideoCodec::Av1 => None,
+        };
+        device
+            .and_then(|device| device.vendor.as_deref())
+            .is_some_and(is_intel_vendor)
+    }
+
     pub fn unavailable_reason(&self, codec: VideoCodec) -> String {
         let codec_device = match codec {
             VideoCodec::H264 => self.h264.as_ref(),
@@ -177,6 +188,11 @@ impl VaapiDecodeProbe {
             "VA-API opened {device}{vendor}, but the driver did not report a {codec:?} VLD profile"
         )
     }
+}
+
+fn is_intel_vendor(vendor: &str) -> bool {
+    let vendor = vendor.to_ascii_lowercase();
+    vendor.contains("intel") || vendor.contains("ihd") || vendor.contains("i965")
 }
 
 pub(super) fn decode_probe() -> &'static VaapiDecodeProbe {
@@ -809,6 +825,27 @@ mod tests {
             probe.unavailable_reason(VideoCodec::Hevc),
             "libva runtime unavailable"
         );
+    }
+
+    #[test]
+    fn quick_sync_requires_an_intel_vaapi_vendor() {
+        let mut probe = VaapiDecodeProbe {
+            h264: Some(VaapiCodecDevice {
+                path: PathBuf::from("/dev/dri/renderD128"),
+                vendor: Some("Intel iHD driver for Intel(R) Gen Graphics".to_string()),
+                mapped_surface_format: Some("NV12"),
+                mapping_failure: None,
+            }),
+            hevc: None,
+            h264_failure: None,
+            hevc_failure: None,
+            failure: None,
+        };
+        assert!(probe.supports_intel(VideoCodec::H264));
+
+        probe.h264.as_mut().unwrap().vendor = Some("Mesa Gallium AMD Radeon".to_string());
+        assert!(!probe.supports_intel(VideoCodec::H264));
+        assert!(!probe.supports_intel(VideoCodec::Av1));
     }
 
     #[test]

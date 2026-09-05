@@ -113,8 +113,9 @@ pub use transcode::{
 };
 #[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
 pub use transcode::{
-    VaapiH264BgraDecoderSession, VaapiH264EncoderSession, VaapiHevcBgraDecoderSession,
-    VaapiHevcEncoderSession,
+    QsvH264BgraDecoderSession, QsvH264EncoderSession, QsvHevcBgraDecoderSession,
+    QsvHevcEncoderSession, VaapiH264BgraDecoderSession, VaapiH264EncoderSession,
+    VaapiHevcBgraDecoderSession, VaapiHevcEncoderSession,
 };
 #[cfg(target_os = "windows")]
 pub use transcode::{

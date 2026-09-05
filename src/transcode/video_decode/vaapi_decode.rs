@@ -42,6 +42,16 @@ pub struct VaapiHevcBgraDecoderSession {
     core: VaapiDecoderCore,
 }
 
+/// Retained Intel Quick Sync H.264 decoder exposed through Intel's VA-API driver.
+pub struct QsvH264BgraDecoderSession {
+    inner: VaapiH264BgraDecoderSession,
+}
+
+/// Retained Intel Quick Sync HEVC decoder exposed through Intel's VA-API driver.
+pub struct QsvHevcBgraDecoderSession {
+    inner: VaapiHevcBgraDecoderSession,
+}
+
 struct VaapiDecoderCore {
     output_format: RawVideoFormat,
     codec: VideoCodec,
@@ -71,6 +81,20 @@ impl VaapiH264BgraDecoderSession {
         output_format: RawVideoFormat,
         decoder_config: &[u8],
     ) -> Result<Self, VideoDecodeError> {
+        Self::new_with_display(
+            output_format,
+            decoder_config,
+            open_display()?,
+            "chroma-vaapi-h264-decoder",
+        )
+    }
+
+    fn new_with_display(
+        output_format: RawVideoFormat,
+        decoder_config: &[u8],
+        display: Arc<Display>,
+        decoder_name: &'static str,
+    ) -> Result<Self, VideoDecodeError> {
         validate_decoded_video_format(output_format)?;
         let config =
             crate::codec::h264::parse_avc_decoder_config(decoder_config).map_err(|error| {
@@ -88,7 +112,6 @@ impl VaapiH264BgraDecoderSession {
             parameter_sets.extend_from_slice(&[0, 0, 0, 1]);
             parameter_sets.extend_from_slice(parameter_set);
         }
-        let display = open_display()?;
         let decoder = StatelessDecoder::<H264, VaapiBackend<VaapiCpuFrame>>::new_vaapi(
             display,
             BlockingMode::Blocking,
@@ -101,7 +124,7 @@ impl VaapiH264BgraDecoderSession {
             core: VaapiDecoderCore {
                 output_format,
                 codec: VideoCodec::H264,
-                decoder_name: "chroma-vaapi-h264-decoder",
+                decoder_name,
                 decoded_batches: 0,
                 nalu_length_size: config.nalu_length_size,
                 parameter_sets: Some(parameter_sets),
@@ -143,6 +166,20 @@ impl VaapiHevcBgraDecoderSession {
         output_format: RawVideoFormat,
         decoder_config: &[u8],
     ) -> Result<Self, VideoDecodeError> {
+        Self::new_with_display(
+            output_format,
+            decoder_config,
+            open_display()?,
+            "chroma-vaapi-hevc-decoder",
+        )
+    }
+
+    fn new_with_display(
+        output_format: RawVideoFormat,
+        decoder_config: &[u8],
+        display: Arc<Display>,
+        decoder_name: &'static str,
+    ) -> Result<Self, VideoDecodeError> {
         validate_decoded_video_format(output_format)?;
         let config =
             crate::codec::hevc::parse_hevc_decoder_config(decoder_config).map_err(|error| {
@@ -156,7 +193,6 @@ impl VaapiHevcBgraDecoderSession {
                 reason: "HEVC decoder configuration does not contain VPS/SPS/PPS".to_string(),
             });
         }
-        let display = open_display()?;
         let decoder = StatelessDecoder::<H265, VaapiBackend<VaapiCpuFrame>>::new_vaapi(
             display,
             BlockingMode::Blocking,
@@ -169,7 +205,7 @@ impl VaapiHevcBgraDecoderSession {
             core: VaapiDecoderCore {
                 output_format,
                 codec: VideoCodec::Hevc,
-                decoder_name: "chroma-vaapi-hevc-decoder",
+                decoder_name,
                 decoded_batches: 0,
                 nalu_length_size: config.nalu_length_size,
                 parameter_sets: Some(parameter_sets),
@@ -194,9 +230,107 @@ impl VaapiHevcBgraDecoderSession {
     }
 }
 
+impl std::fmt::Debug for QsvH264BgraDecoderSession {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("QsvH264BgraDecoderSession")
+            .field("inner", &self.inner)
+            .finish()
+    }
+}
+
+impl QsvH264BgraDecoderSession {
+    /// Opens an Intel VA-API render node and creates a Quick Sync H.264 decoder.
+    pub fn new(
+        output_format: RawVideoFormat,
+        decoder_config: &[u8],
+    ) -> Result<Self, VideoDecodeError> {
+        Ok(Self {
+            inner: VaapiH264BgraDecoderSession::new_with_display(
+                output_format,
+                decoder_config,
+                open_intel_display()?,
+                "chroma-qsv-h264-decoder",
+            )?,
+        })
+    }
+
+    /// Decodes one ordered H.264 packet batch without recreating the VA context.
+    pub fn decode(
+        &mut self,
+        input: &VideoDecodeInput<'_>,
+    ) -> Result<DecodedVideoOutput, VideoDecodeError> {
+        self.inner.decode(input)
+    }
+
+    /// Returns the number of packet batches decoded by this session.
+    pub fn decoded_batches(&self) -> u64 {
+        self.inner.decoded_batches()
+    }
+}
+
+impl std::fmt::Debug for QsvHevcBgraDecoderSession {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("QsvHevcBgraDecoderSession")
+            .field("inner", &self.inner)
+            .finish()
+    }
+}
+
+impl QsvHevcBgraDecoderSession {
+    /// Opens an Intel VA-API render node and creates a Quick Sync HEVC decoder.
+    pub fn new(
+        output_format: RawVideoFormat,
+        decoder_config: &[u8],
+    ) -> Result<Self, VideoDecodeError> {
+        Ok(Self {
+            inner: VaapiHevcBgraDecoderSession::new_with_display(
+                output_format,
+                decoder_config,
+                open_intel_display()?,
+                "chroma-qsv-hevc-decoder",
+            )?,
+        })
+    }
+
+    /// Decodes one ordered HEVC packet batch without recreating the VA context.
+    pub fn decode(
+        &mut self,
+        input: &VideoDecodeInput<'_>,
+    ) -> Result<DecodedVideoOutput, VideoDecodeError> {
+        self.inner.decode(input)
+    }
+
+    /// Returns the number of packet batches decoded by this session.
+    pub fn decoded_batches(&self) -> u64 {
+        self.inner.decoded_batches()
+    }
+}
+
 fn open_display() -> Result<Arc<Display>, VideoDecodeError> {
     Display::open().ok_or_else(|| VideoDecodeError::BackendUnavailable {
         reason: "libva could not open a DRM render node".to_string(),
+    })
+}
+
+pub(in crate::transcode) fn open_intel_display() -> Result<Arc<Display>, VideoDecodeError> {
+    for index in 128..192 {
+        let path = format!("/dev/dri/renderD{index}");
+        let Ok(display) = Display::open_drm_display(&path) else {
+            continue;
+        };
+        let vendor = display.query_vendor_string().unwrap_or_default();
+        let vendor_lower = vendor.to_ascii_lowercase();
+        if vendor_lower.contains("intel")
+            || vendor_lower.contains("ihd")
+            || vendor_lower.contains("i965")
+        {
+            return Ok(display);
+        }
+    }
+    Err(VideoDecodeError::BackendUnavailable {
+        reason: "no Intel VA-API render node was available for Quick Sync".to_string(),
     })
 }
 

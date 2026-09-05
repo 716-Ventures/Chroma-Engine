@@ -16,7 +16,9 @@ use nuxodecs::{
     libva::{Display, Surface},
 };
 
-use crate::transcode::video_decode::vaapi_decode::{VaapiCpuFrame, VaapiUserPtrDescriptor};
+use crate::transcode::video_decode::vaapi_decode::{
+    VaapiCpuFrame, VaapiUserPtrDescriptor, open_intel_display,
+};
 
 use super::{
     EncodedVideoFrame, EncodedVideoOutput, EncodedVideoStream, RawVideoFormat, RawVideoFrameRef,
@@ -56,6 +58,17 @@ impl std::fmt::Debug for VaapiH264EncoderSession {
 impl VaapiH264EncoderSession {
     /// Opens a VA-API H.264 Main-profile encoder on the first usable DRM render node.
     pub fn new(format: RawVideoFormat, bitrate: u32) -> Result<Self, VideoEncodeError> {
+        let display = Display::open().ok_or_else(|| VideoEncodeError::BackendUnavailable {
+            reason: "libva could not open a DRM render node".to_string(),
+        })?;
+        Self::new_with_display(format, bitrate, display)
+    }
+
+    fn new_with_display(
+        format: RawVideoFormat,
+        bitrate: u32,
+        display: Arc<Display>,
+    ) -> Result<Self, VideoEncodeError> {
         validate_raw_video_format(format)?;
         if !format.width.is_multiple_of(2) || !format.height.is_multiple_of(2) {
             return Err(VideoEncodeError::InvalidInput {
@@ -67,9 +80,6 @@ impl VaapiH264EncoderSession {
                 reason: "bitrate must be greater than zero".to_string(),
             });
         }
-        let display = Display::open().ok_or_else(|| VideoEncodeError::BackendUnavailable {
-            reason: "libva could not open a DRM render node".to_string(),
-        })?;
         let resolution = Resolution::from((format.width, format.height));
         let frame_rate = format
             .frame_rate_num
@@ -201,6 +211,86 @@ pub struct VaapiHevcEncoderSession {
     encoder: H265Encoder,
 }
 
+/// Retained Intel Quick Sync H.264 encoder exposed through Intel's VA-API driver.
+pub struct QsvH264EncoderSession {
+    inner: VaapiH264EncoderSession,
+}
+
+/// Retained Intel Quick Sync HEVC encoder exposed through Intel's VA-API driver.
+pub struct QsvHevcEncoderSession {
+    inner: VaapiHevcEncoderSession,
+}
+
+impl std::fmt::Debug for QsvH264EncoderSession {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("QsvH264EncoderSession")
+            .field("inner", &self.inner)
+            .finish()
+    }
+}
+
+impl QsvH264EncoderSession {
+    /// Opens an Intel VA-API render node and creates a Quick Sync H.264 encoder.
+    pub fn new(format: RawVideoFormat, bitrate: u32) -> Result<Self, VideoEncodeError> {
+        let display =
+            open_intel_display().map_err(|error| VideoEncodeError::BackendUnavailable {
+                reason: error.to_string(),
+            })?;
+        Ok(Self {
+            inner: VaapiH264EncoderSession::new_with_display(format, bitrate, display)?,
+        })
+    }
+
+    /// Encodes one ordered BGRA frame batch without recreating the VA context.
+    pub fn encode(
+        &mut self,
+        frames: &[RawVideoFrameRef<'_>],
+    ) -> Result<EncodedVideoOutput, VideoEncodeError> {
+        self.inner.encode(frames)
+    }
+
+    /// Returns the number of frame batches encoded by this session.
+    pub fn encoded_batches(&self) -> u64 {
+        self.inner.encoded_batches()
+    }
+}
+
+impl std::fmt::Debug for QsvHevcEncoderSession {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("QsvHevcEncoderSession")
+            .field("inner", &self.inner)
+            .finish()
+    }
+}
+
+impl QsvHevcEncoderSession {
+    /// Opens an Intel VA-API render node and creates a Quick Sync HEVC encoder.
+    pub fn new(format: RawVideoFormat, bitrate: u32) -> Result<Self, VideoEncodeError> {
+        let display =
+            open_intel_display().map_err(|error| VideoEncodeError::BackendUnavailable {
+                reason: error.to_string(),
+            })?;
+        Ok(Self {
+            inner: VaapiHevcEncoderSession::new_with_display(format, bitrate, display)?,
+        })
+    }
+
+    /// Encodes one ordered BGRA frame batch without recreating the VA context.
+    pub fn encode(
+        &mut self,
+        frames: &[RawVideoFrameRef<'_>],
+    ) -> Result<EncodedVideoOutput, VideoEncodeError> {
+        self.inner.encode(frames)
+    }
+
+    /// Returns the number of frame batches encoded by this session.
+    pub fn encoded_batches(&self) -> u64 {
+        self.inner.encoded_batches()
+    }
+}
+
 impl std::fmt::Debug for VaapiHevcEncoderSession {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -214,6 +304,17 @@ impl std::fmt::Debug for VaapiHevcEncoderSession {
 impl VaapiHevcEncoderSession {
     /// Opens a VA-API HEVC Main encoder on the first usable DRM render node.
     pub fn new(format: RawVideoFormat, bitrate: u32) -> Result<Self, VideoEncodeError> {
+        let display = Display::open().ok_or_else(|| VideoEncodeError::BackendUnavailable {
+            reason: "libva could not open a DRM render node".to_string(),
+        })?;
+        Self::new_with_display(format, bitrate, display)
+    }
+
+    fn new_with_display(
+        format: RawVideoFormat,
+        bitrate: u32,
+        display: Arc<Display>,
+    ) -> Result<Self, VideoEncodeError> {
         validate_raw_video_format(format)?;
         if !format.width.is_multiple_of(2) || !format.height.is_multiple_of(2) {
             return Err(VideoEncodeError::InvalidInput {
@@ -225,9 +326,6 @@ impl VaapiHevcEncoderSession {
                 reason: "bitrate must be greater than zero".to_string(),
             });
         }
-        let display = Display::open().ok_or_else(|| VideoEncodeError::BackendUnavailable {
-            reason: "libva could not open a DRM render node".to_string(),
-        })?;
         let resolution = Resolution::from((format.width, format.height));
         let frame_rate = format
             .frame_rate_num

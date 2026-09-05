@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Added retained Linux Intel Quick Sync H.264/HEVC decode and Main encode sessions through the
+  runtime-loaded iHD/i965 VA-API driver. QSV selection now requires an Intel vendor render node and
+  real codec probes, remains distinct from generic VA-API, and adds no oneVPL link dependency.
+
 - Added retained Windows hardware H.264 decoding through Media Foundation and D3D11, including
   a hardware-only transform, NV12 texture staging readback, checked padded-plane conversion to
   BGRA, source timing restoration, runtime decode smoke verification, and portable fallback.

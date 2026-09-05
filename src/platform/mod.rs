@@ -366,6 +366,8 @@ fn run_warmup_task(task: &EncoderWarmupTask) -> Result<(), EncoderWarmupError> {
         (EncoderWarmupKind::Video, "chroma-cpu-h264", "h264") => warm_cpu_h264_encoder(),
         (EncoderWarmupKind::Video, "chroma-vaapi-h264", "h264") => warm_vaapi_h264_encoder(),
         (EncoderWarmupKind::Video, "chroma-vaapi-hevc", "hevc") => warm_vaapi_hevc_encoder(),
+        (EncoderWarmupKind::Video, "chroma-qsv-h264", "h264") => warm_qsv_h264_encoder(),
+        (EncoderWarmupKind::Video, "chroma-qsv-hevc", "hevc") => warm_qsv_hevc_encoder(),
         (EncoderWarmupKind::Video, "chroma-nvenc-h264", "h264") => warm_nvenc_h264_encoder(),
         (EncoderWarmupKind::Video, "chroma-nvenc-hevc", "hevc") => warm_nvenc_hevc_encoder(),
         (EncoderWarmupKind::Video, encoder, "h264") if encoder.starts_with("chroma-windows-") => {
@@ -537,6 +539,60 @@ fn warm_vaapi_h264_encoder() -> Result<(), EncoderWarmupError> {
             })
             .map_err(|error| EncoderWarmupError {
                 reason: format!("VA-API H.264 warmup failed: {error}"),
+            })?;
+    }
+    Ok(())
+}
+
+fn warm_qsv_h264_encoder() -> Result<(), EncoderWarmupError> {
+    #[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
+    {
+        use crate::transcode::{QsvH264EncoderSession, RawVideoFrameRef};
+
+        let format = hardware_probe_video_format();
+        let bgra = vec![0_u8; format.width as usize * format.height as usize * 4];
+        let scale = crate::packet::TimeScale {
+            units_per_second: 24,
+        };
+        QsvH264EncoderSession::new(format, 500_000)
+            .and_then(|mut session| {
+                session.encode(&[RawVideoFrameRef {
+                    pts: crate::packet::TimePoint { units: 0, scale },
+                    dts: crate::packet::TimePoint { units: 0, scale },
+                    duration: crate::packet::TimeDelta { units: 1, scale },
+                    bytes: &bgra,
+                    keyframe: true,
+                }])
+            })
+            .map_err(|error| EncoderWarmupError {
+                reason: format!("Quick Sync H.264 warmup failed: {error}"),
+            })?;
+    }
+    Ok(())
+}
+
+fn warm_qsv_hevc_encoder() -> Result<(), EncoderWarmupError> {
+    #[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
+    {
+        use crate::transcode::{QsvHevcEncoderSession, RawVideoFrameRef};
+
+        let format = hardware_probe_video_format();
+        let bgra = vec![0_u8; format.width as usize * format.height as usize * 4];
+        let scale = crate::packet::TimeScale {
+            units_per_second: 24,
+        };
+        QsvHevcEncoderSession::new(format, 500_000)
+            .and_then(|mut session| {
+                session.encode(&[RawVideoFrameRef {
+                    pts: crate::packet::TimePoint { units: 0, scale },
+                    dts: crate::packet::TimePoint { units: 0, scale },
+                    duration: crate::packet::TimeDelta { units: 1, scale },
+                    bytes: &bgra,
+                    keyframe: true,
+                }])
+            })
+            .map_err(|error| EncoderWarmupError {
+                reason: format!("Quick Sync HEVC warmup failed: {error}"),
             })?;
     }
     Ok(())
@@ -993,8 +1049,12 @@ fn video_decode_unavailable_reason(os: &str, kind: HardwareKind, codec: VideoCod
     } else if kind == HardwareKind::Vaapi && os == "linux" {
         linux_vaapi_decode_unavailable_reason(codec)
     } else if kind == HardwareKind::Qsv && os == "linux" {
-        "Linux Quick Sync decode is detected through DRM but is not executable in this build"
-            .to_string()
+        if !cfg!(feature = "linux-vaapi") {
+            "Linux Quick Sync decode requires the linux-vaapi feature and an Intel iHD/i965 driver"
+                .to_string()
+        } else {
+            format!("no Intel VA-API render node reported executable Quick Sync {codec:?} decode")
+        }
     } else if kind == HardwareKind::Nvdec && os == "linux" {
         linux_nvdec_decode_unavailable_reason(codec)
     } else if os == "windows" {
@@ -1023,7 +1083,14 @@ fn video_decode_backend_state(os: &str, kind: HardwareKind, codec: VideoCodec) -
         ("linux", HardwareKind::Vaapi) if linux_vaapi_decode_supported(codec) => {
             CapabilityState::Opened
         }
-        ("linux", HardwareKind::Vaapi | HardwareKind::Qsv) if linux_dri_decode_device_present() => {
+        ("linux", HardwareKind::Qsv)
+            if cfg!(feature = "linux-vaapi")
+                && matches!(codec, VideoCodec::H264 | VideoCodec::Hevc)
+                && linux_qsv_decode_supported(codec) =>
+        {
+            CapabilityState::Executable
+        }
+        ("linux", HardwareKind::Vaapi) if linux_dri_decode_device_present() => {
             CapabilityState::Detected
         }
         ("linux", HardwareKind::Nvdec)
@@ -1086,6 +1153,16 @@ fn linux_dri_decode_device_present() -> bool {
 #[cfg(target_os = "linux")]
 fn linux_vaapi_decode_supported(codec: VideoCodec) -> bool {
     vaapi::decode_probe().supports(codec)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_qsv_decode_supported(codec: VideoCodec) -> bool {
+    vaapi::decode_probe().supports_intel(codec)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn linux_qsv_decode_supported(_codec: VideoCodec) -> bool {
+    false
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -1332,6 +1409,22 @@ fn native_encoder_profiles() -> Vec<EncoderProfile> {
                 hwaccel: Some("nvenc".to_string()),
             });
         }
+        if linux_qsv_h264_encoder_available() {
+            profiles.push(EncoderProfile {
+                kind: HardwareKind::Qsv,
+                video_encoder: "chroma-qsv-h264".to_string(),
+                codec: VideoOutputCodec::H264,
+                hwaccel: Some("qsv".to_string()),
+            });
+        }
+        if linux_qsv_hevc_encoder_available() {
+            profiles.push(EncoderProfile {
+                kind: HardwareKind::Qsv,
+                video_encoder: "chroma-qsv-hevc".to_string(),
+                codec: VideoOutputCodec::Hevc,
+                hwaccel: Some("qsv".to_string()),
+            });
+        }
         if linux_vaapi_h264_encoder_available() {
             profiles.push(EncoderProfile {
                 kind: HardwareKind::Vaapi,
@@ -1373,8 +1466,8 @@ fn video_backend_matrix() -> Vec<EncoderBackend> {
             linux_nvenc_hevc_video_backend(),
             vaapi_h264_video_backend(),
             vaapi_hevc_video_backend(),
-            planned_video_backend(HardwareKind::Qsv, VideoOutputCodec::H264, "chroma-qsv-h264"),
-            planned_video_backend(HardwareKind::Qsv, VideoOutputCodec::Hevc, "chroma-qsv-hevc"),
+            qsv_h264_video_backend(),
+            qsv_hevc_video_backend(),
             executable_video_backend(HardwareKind::Cpu, VideoOutputCodec::H264, "chroma-cpu-h264"),
         ],
         "windows" => vec![
@@ -1662,6 +1755,22 @@ fn vaapi_hevc_video_backend() -> EncoderBackend {
     }
 }
 
+fn qsv_h264_video_backend() -> EncoderBackend {
+    if linux_qsv_h264_encoder_available() {
+        executable_video_backend(HardwareKind::Qsv, VideoOutputCodec::H264, "chroma-qsv-h264")
+    } else {
+        planned_video_backend(HardwareKind::Qsv, VideoOutputCodec::H264, "chroma-qsv-h264")
+    }
+}
+
+fn qsv_hevc_video_backend() -> EncoderBackend {
+    if linux_qsv_hevc_encoder_available() {
+        executable_video_backend(HardwareKind::Qsv, VideoOutputCodec::Hevc, "chroma-qsv-hevc")
+    } else {
+        planned_video_backend(HardwareKind::Qsv, VideoOutputCodec::Hevc, "chroma-qsv-hevc")
+    }
+}
+
 #[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
 fn linux_vaapi_h264_encoder_available() -> bool {
     use std::sync::OnceLock;
@@ -1728,6 +1837,60 @@ fn linux_vaapi_hevc_encoder_available() -> bool {
     })
 }
 
+#[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
+fn linux_qsv_h264_encoder_available() -> bool {
+    use std::sync::OnceLock;
+
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        use crate::transcode::{QsvH264EncoderSession, RawVideoFrameRef};
+
+        let format = hardware_probe_video_format();
+        let bgra = vec![0_u8; format.width as usize * format.height as usize * 4];
+        let scale = crate::packet::TimeScale {
+            units_per_second: 24,
+        };
+        QsvH264EncoderSession::new(format, 500_000)
+            .and_then(|mut session| {
+                session.encode(&[RawVideoFrameRef {
+                    pts: crate::packet::TimePoint { units: 0, scale },
+                    dts: crate::packet::TimePoint { units: 0, scale },
+                    duration: crate::packet::TimeDelta { units: 1, scale },
+                    bytes: &bgra,
+                    keyframe: true,
+                }])
+            })
+            .is_ok()
+    })
+}
+
+#[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
+fn linux_qsv_hevc_encoder_available() -> bool {
+    use std::sync::OnceLock;
+
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        use crate::transcode::{QsvHevcEncoderSession, RawVideoFrameRef};
+
+        let format = hardware_probe_video_format();
+        let bgra = vec![0_u8; format.width as usize * format.height as usize * 4];
+        let scale = crate::packet::TimeScale {
+            units_per_second: 24,
+        };
+        QsvHevcEncoderSession::new(format, 500_000)
+            .and_then(|mut session| {
+                session.encode(&[RawVideoFrameRef {
+                    pts: crate::packet::TimePoint { units: 0, scale },
+                    dts: crate::packet::TimePoint { units: 0, scale },
+                    duration: crate::packet::TimeDelta { units: 1, scale },
+                    bytes: &bgra,
+                    keyframe: true,
+                }])
+            })
+            .is_ok()
+    })
+}
+
 #[cfg(not(all(target_os = "linux", feature = "linux-vaapi")))]
 fn linux_vaapi_h264_encoder_available() -> bool {
     false
@@ -1735,6 +1898,16 @@ fn linux_vaapi_h264_encoder_available() -> bool {
 
 #[cfg(not(all(target_os = "linux", feature = "linux-vaapi")))]
 fn linux_vaapi_hevc_encoder_available() -> bool {
+    false
+}
+
+#[cfg(not(all(target_os = "linux", feature = "linux-vaapi")))]
+fn linux_qsv_h264_encoder_available() -> bool {
+    false
+}
+
+#[cfg(not(all(target_os = "linux", feature = "linux-vaapi")))]
+fn linux_qsv_hevc_encoder_available() -> bool {
     false
 }
 
@@ -1856,6 +2029,8 @@ mod tests {
                 HardwareKind::VideoToolbox
             } else if linux_nvenc_h264_encoder_available() {
                 HardwareKind::Nvenc
+            } else if linux_qsv_h264_encoder_available() {
+                HardwareKind::Qsv
             } else if linux_vaapi_h264_encoder_available() {
                 HardwareKind::Vaapi
             } else {

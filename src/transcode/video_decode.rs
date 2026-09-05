@@ -20,7 +20,10 @@ mod windows_decode;
 #[cfg(all(target_os = "linux", feature = "linux-nvidia"))]
 pub use nvidia_decode::{NvdecH264BgraDecoderSession, NvdecHevcBgraDecoderSession};
 #[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
-pub use vaapi_decode::{VaapiH264BgraDecoderSession, VaapiHevcBgraDecoderSession};
+pub use vaapi_decode::{
+    QsvH264BgraDecoderSession, QsvHevcBgraDecoderSession, VaapiH264BgraDecoderSession,
+    VaapiHevcBgraDecoderSession,
+};
 #[cfg(target_os = "windows")]
 pub use windows_decode::WindowsH264BgraDecoderSession;
 
@@ -643,6 +646,12 @@ pub enum BgraDecoderSession {
     /// Linux VA-API HEVC decoder using runtime-loaded libva.
     #[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
     VaapiHevc(Box<VaapiHevcBgraDecoderSession>),
+    /// Intel Quick Sync H.264 decoder exposed through Intel's Linux VA-API driver.
+    #[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
+    QsvH264(Box<QsvH264BgraDecoderSession>),
+    /// Intel Quick Sync HEVC decoder exposed through Intel's Linux VA-API driver.
+    #[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
+    QsvHevc(Box<QsvHevcBgraDecoderSession>),
     /// Linux NVIDIA NVDEC H.264 decoder using runtime-loaded CUDA libraries.
     #[cfg(all(target_os = "linux", feature = "linux-nvidia"))]
     NvdecH264(Box<NvdecH264BgraDecoderSession>),
@@ -684,6 +693,18 @@ impl BgraDecoderSession {
         }
         #[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
         if codec == VideoCodec::H264
+            && let Ok(session) = QsvH264BgraDecoderSession::new(output_format, decoder_config)
+        {
+            return Ok(Self::QsvH264(Box::new(session)));
+        }
+        #[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
+        if codec == VideoCodec::Hevc
+            && let Ok(session) = QsvHevcBgraDecoderSession::new(output_format, decoder_config)
+        {
+            return Ok(Self::QsvHevc(Box::new(session)));
+        }
+        #[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
+        if codec == VideoCodec::H264
             && let Ok(session) = VaapiH264BgraDecoderSession::new(output_format, decoder_config)
         {
             return Ok(Self::VaapiH264(Box::new(session)));
@@ -720,6 +741,10 @@ impl BgraDecoderSession {
             Self::VaapiH264(session) => session.decode(input),
             #[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
             Self::VaapiHevc(session) => session.decode(input),
+            #[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
+            Self::QsvH264(session) => session.decode(input),
+            #[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
+            Self::QsvHevc(session) => session.decode(input),
             #[cfg(all(target_os = "linux", feature = "linux-nvidia"))]
             Self::NvdecH264(session) => session.decode(input),
             #[cfg(all(target_os = "linux", feature = "linux-nvidia"))]
@@ -740,6 +765,10 @@ impl BgraDecoderSession {
             Self::VaapiH264(session) => session.decoded_batches(),
             #[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
             Self::VaapiHevc(session) => session.decoded_batches(),
+            #[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
+            Self::QsvH264(session) => session.decoded_batches(),
+            #[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
+            Self::QsvHevc(session) => session.decoded_batches(),
             #[cfg(all(target_os = "linux", feature = "linux-nvidia"))]
             Self::NvdecH264(session) => session.decoded_batches(),
             #[cfg(all(target_os = "linux", feature = "linux-nvidia"))]
@@ -764,6 +793,10 @@ impl BgraDecoderSession {
             Self::VaapiH264(_) => "chroma-vaapi-h264-decoder",
             #[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
             Self::VaapiHevc(_) => "chroma-vaapi-hevc-decoder",
+            #[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
+            Self::QsvH264(_) => "chroma-qsv-h264-decoder",
+            #[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
+            Self::QsvHevc(_) => "chroma-qsv-hevc-decoder",
             #[cfg(all(target_os = "linux", feature = "linux-nvidia"))]
             Self::NvdecH264(_) => "chroma-nvdec-h264-decoder",
             #[cfg(all(target_os = "linux", feature = "linux-nvidia"))]
