@@ -6,6 +6,8 @@ use crate::{
     transcode::{RawVideoFormat, RawVideoPixelFormat, VideoCodec},
 };
 
+use super::yuv::limited_yuv_to_bgra;
+
 /// Borrowed compressed packet ready to feed a native video decoder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CompressedVideoPacket<'a> {
@@ -817,14 +819,8 @@ fn copy_hevc_bgra_frame(
             let chroma_index = (row / 2) * chroma_width + column / 2;
             let u = hevc_pixel_to_u8(&decoded.u, chroma_index, decoded.bit_depth)?;
             let v = hevc_pixel_to_u8(&decoded.v, chroma_index, decoded.bit_depth)?;
-            let c = i32::from(y).saturating_sub(16);
-            let d = i32::from(u) - 128;
-            let e = i32::from(v) - 128;
-            let red = ((298 * c + 459 * e + 128) >> 8).clamp(0, 255) as u8;
-            let green = ((298 * c - 55 * d - 136 * e + 128) >> 8).clamp(0, 255) as u8;
-            let blue = ((298 * c + 541 * d + 128) >> 8).clamp(0, 255) as u8;
             let offset = (row * width + column) * 4;
-            pixels[offset..offset + 4].copy_from_slice(&[blue, green, red, 255]);
+            pixels[offset..offset + 4].copy_from_slice(&limited_yuv_to_bgra(y, u, v));
         }
     }
     Ok(DecodedVideoFrame {
@@ -955,14 +951,8 @@ fn copy_dav1d_bgra_frame(
                     )?,
                 )
             };
-            let c = i32::from(y).saturating_sub(16);
-            let d = i32::from(u) - 128;
-            let e = i32::from(v) - 128;
-            let red = ((298 * c + 459 * e + 128) >> 8).clamp(0, 255) as u8;
-            let green = ((298 * c - 55 * d - 136 * e + 128) >> 8).clamp(0, 255) as u8;
-            let blue = ((298 * c + 541 * d + 128) >> 8).clamp(0, 255) as u8;
             let offset = (row * width + column) * 4;
-            pixels[offset..offset + 4].copy_from_slice(&[blue, green, red, 255]);
+            pixels[offset..offset + 4].copy_from_slice(&limited_yuv_to_bgra(y, u, v));
         }
     }
     Ok(DecodedVideoFrame {

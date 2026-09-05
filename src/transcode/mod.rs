@@ -11,6 +11,7 @@ mod scaler;
 mod segment;
 mod video_decode;
 mod video_encode;
+mod yuv;
 
 pub use audio_clock::{AudioClockConfig, AudioFrameTiming, AudioSampleClock};
 pub use audio_decode::{
@@ -53,6 +54,7 @@ pub use video_encode::{
     encode_hevc_videotoolbox_bgra_frame, probe_videotoolbox_h264_session,
     probe_videotoolbox_hevc_session,
 };
+pub use yuv::convert_nv12_to_bgra;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]

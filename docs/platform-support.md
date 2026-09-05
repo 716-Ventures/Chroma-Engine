@@ -22,3 +22,5 @@ CI runs the complete check, Clippy, test, documentation, and release-build gates
 Hardware capability states stay deliberately conservative: `modeled` and `detected` backends cannot be selected. Only executable or verified implementations may enter a runtime plan.
 
 Linux VA-API probing loads `libva.so.2` and `libva-drm.so.2` at runtime, opens each DRM render node, checks H.264/HEVC profiles for the VLD decode entrypoint, and creates a small codec config, surface, and decode context. It does not require libva headers or a link-time libva dependency. A missing runtime, inaccessible device, unsupported profile, or allocation failure leaves the portable CPU path intact and reports a diagnostic through `decoder-probe`.
+
+The decoded-surface boundary accepts independently padded NV12 Y and UV planes and copies them into tightly packed BGRA with checked dimensions and plane bounds. This conversion is dependency-free so the eventual executable VA-API path does not force GPU libraries into portable Linux and NAS builds. Packet submission and surface mapping are still under implementation.
