@@ -38,6 +38,7 @@ truehd = "0.7.1"
 [features]
 default = []
 fuzzing = []
+linux-vaapi = ["dep:nuxodecs"]
 
 [dev-dependencies]
 assert_cmd = "2.0"
@@ -78,3 +79,4 @@ objc2-video-toolbox = "0.3.2"
 # VA-API is optional at runtime. Loading it dynamically keeps Linux/NAS
 # binaries buildable and runnable on hosts without graphics development files.
 libloading = "0.8.9"
+nuxodecs = { version = "0.1.2", optional = true, default-features = false, features = ["vaapi"] }

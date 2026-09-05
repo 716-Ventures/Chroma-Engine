@@ -24,7 +24,7 @@ This crate is intentionally not a general FFmpeg clone. It implements the contai
 
 ## Current Status
 
-The native probe path parses MP4/MOV and Matroska/WebM structure, emits typed tracks, and has integration tests against generated fixtures. macOS VideoToolbox encode/decode probes are executable today. Retained OpenH264 sessions provide H.264 decode and encode, safe Rust provides HEVC Main/Main10 decode, and retained dav1d sessions provide AV1 decode on macOS, Windows, Linux, and Linux-based NAS hosts on both x86-64 and ARM64. Linux VA-API probing now opens real DRM render nodes, allocates H.264/HEVC VLD contexts, and attempts synchronized CPU mapping of derived NV12/P010 surfaces through runtime-loaded libva; packet submission is still pending, and other Linux plus Windows hardware backends remain modeled. Source builds need libdav1d 1.3+ discoverable through `pkg-config`; release bundles must include the corresponding native library.
+The native probe path parses MP4/MOV and Matroska/WebM structure, emits typed tracks, and has integration tests against generated fixtures. macOS VideoToolbox encode/decode probes are executable today. Retained OpenH264 sessions provide H.264 decode and encode, safe Rust provides HEVC Main/Main10 decode, and retained dav1d sessions provide AV1 decode on macOS, Windows, Linux, and Linux-based NAS hosts on both x86-64 and ARM64. Linux release builds enable the `linux-vaapi` feature: H.264 packets are submitted through a retained VA-API decoder into page-aligned NV12 user-pointer surfaces and copied to the same BGRA boundary as the portable decoders. libva is loaded at runtime, so systems and NAS hosts without a usable render node fall back to OpenH264. HEVC VA-API execution and other Linux plus Windows hardware backends remain modeled. Source builds need libdav1d 1.3+ discoverable through `pkg-config`; release bundles must include the corresponding native library.
 
 Media inputs are held through file-backed views rather than file-sized heap buffers. Clone-capable
 macOS filesystems get a private copy-on-write snapshot; the portable fallback retains the open read
@@ -65,6 +65,10 @@ cargo run -- decoder-probe
 cargo run --release -- transcode-fmp4-segments /path/to/media.mkv /tmp/chroma-window \
   --init-output /tmp/chroma-window/init.mp4 --count 2 --video-mode h264
 ```
+
+Linux distributors can enable H.264 VA-API decode with `cargo build --features linux-vaapi`.
+That feature needs Clang and libva development headers at build time, but the resulting binary
+loads libva dynamically and still starts on hosts without libva.
 
 Quality gates:
 

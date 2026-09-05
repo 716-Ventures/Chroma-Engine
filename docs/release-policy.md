@@ -10,7 +10,7 @@ Chroma Engine uses the same status terms in documentation and runtime DTOs:
 - `executable`: Chroma Engine has an implementation that can run for the codec/profile.
 - `verified`: Chroma Engine completed a real warmup or smoke probe for the codec/profile on the current host.
 
-Planning may only select `executable` or `verified` backends. Linux VA-API device/profile probing can reach `opened`, but Linux and Windows hardware paths are not executable yet. The OpenH264 CPU H.264 decode and encode backends are executable on all supported operating systems and are reported separately from hardware capability.
+Planning may only select `executable` or `verified` backends. Linux builds with `linux-vaapi` report H.264 VA-API as executable after the runtime probe opens a matching VLD context; release builds enable that feature. HEVC VA-API and Windows hardware paths are not executable yet. The OpenH264 CPU H.264 decode and encode backends remain executable on every supported operating system and provide the Linux/NAS fallback.
 
 ## Schema Compatibility
 

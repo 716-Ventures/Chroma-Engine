@@ -751,6 +751,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
     fn silent_pcm(format: PcmAudioFormat, frames: usize) -> Vec<i16> {
         vec![0; frames * format.channels as usize]
     }

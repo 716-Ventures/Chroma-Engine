@@ -30,6 +30,9 @@ jobs:
           components: clippy,rustfmt
       - name: Native AV1 decoder
         uses: ./.github/actions/setup-dav1d
+      - name: Linux VA-API build headers
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y clang libva-dev
       - name: Cache cargo
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
@@ -121,7 +124,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-latest, windows-latest]
+        include:
+          - os: macos-latest
+            features: ""
+          - os: ubuntu-latest
+            features: "--features linux-vaapi"
+          - os: windows-latest
+            features: ""
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -131,6 +140,9 @@ jobs:
           toolchain: "1.97.1"
       - name: Native AV1 decoder
         uses: ./.github/actions/setup-dav1d
+      - name: Linux VA-API build headers
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y clang libva-dev
       - name: Cache cargo
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
@@ -144,7 +156,7 @@ jobs:
       - name: Build auditable binary
         env:
           RUSTFLAGS: -A linker-messages
-        run: cargo auditable build --locked --release --bin chroma-engine
+        run: cargo auditable build --locked --release --bin chroma-engine ${{ matrix.features }}
       - name: Prepare release bundle
         shell: bash
         run: |
@@ -213,6 +225,9 @@ jobs:
           toolchain: "1.90.0"
       - name: Native AV1 decoder
         uses: ./.github/actions/setup-dav1d
+      - name: Linux VA-API build headers
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y clang libva-dev
       - name: Cache cargo
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:

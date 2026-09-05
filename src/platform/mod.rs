@@ -6,9 +6,11 @@ use crate::{
     transcode::{
         AudioCodec, PcmAudioFormat, RawVideoFormat, RawVideoPixelFormat, VideoCodec,
         encode_aac_cpu_from_interleaved_i16, encode_h264_cpu_bgra_frames,
-        encode_h264_videotoolbox_bgra_frame, encode_hevc_videotoolbox_bgra_frame,
     },
 };
+
+#[cfg(target_os = "macos")]
+use crate::transcode::{encode_h264_videotoolbox_bgra_frame, encode_hevc_videotoolbox_bgra_frame};
 
 #[cfg(target_os = "linux")]
 mod vaapi;
@@ -805,6 +807,13 @@ fn video_decode_backend_state(os: &str, kind: HardwareKind, codec: VideoCodec) -
     match (os, kind) {
         (_, HardwareKind::Cpu) => CapabilityState::Executable,
         ("macos", HardwareKind::VideoToolbox) if video_toolbox_decode_supported(codec) => {
+            CapabilityState::Executable
+        }
+        ("linux", HardwareKind::Vaapi)
+            if cfg!(feature = "linux-vaapi")
+                && codec == VideoCodec::H264
+                && linux_vaapi_decode_supported(codec) =>
+        {
             CapabilityState::Executable
         }
         ("linux", HardwareKind::Vaapi) if linux_vaapi_decode_supported(codec) => {

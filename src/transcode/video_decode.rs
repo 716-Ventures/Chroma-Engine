@@ -8,6 +8,12 @@ use crate::{
 
 use super::yuv::limited_yuv_to_bgra;
 
+#[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
+mod vaapi_decode;
+
+#[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
+pub use vaapi_decode::VaapiH264BgraDecoderSession;
+
 /// Borrowed compressed packet ready to feed a native video decoder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CompressedVideoPacket<'a> {
@@ -618,6 +624,9 @@ pub enum BgraDecoderSession {
     CpuHevc(Box<CpuHevcBgraDecoderSession>),
     /// Portable dav1d AV1 software decoder.
     CpuAv1(Box<CpuAv1BgraDecoderSession>),
+    /// Linux VA-API H.264 decoder using runtime-loaded libva.
+    #[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
+    VaapiH264(Box<VaapiH264BgraDecoderSession>),
 }
 
 impl BgraDecoderSession {
@@ -632,6 +641,12 @@ impl BgraDecoderSession {
             VideoToolboxBgraDecoderSession::new(codec, output_format, decoder_config)
         {
             return Ok(Self::VideoToolbox(session));
+        }
+        #[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
+        if codec == VideoCodec::H264
+            && let Ok(session) = VaapiH264BgraDecoderSession::new(output_format, decoder_config)
+        {
+            return Ok(Self::VaapiH264(Box::new(session)));
         }
         match codec {
             VideoCodec::H264 => CpuH264BgraDecoderSession::new(output_format, decoder_config)
@@ -653,6 +668,8 @@ impl BgraDecoderSession {
             Self::CpuH264(session) => session.decode(input),
             Self::CpuHevc(session) => session.decode(input),
             Self::CpuAv1(session) => session.decode(input),
+            #[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
+            Self::VaapiH264(session) => session.decode(input),
         }
     }
 
@@ -663,6 +680,8 @@ impl BgraDecoderSession {
             Self::CpuH264(session) => session.decoded_batches(),
             Self::CpuHevc(session) => session.decoded_batches(),
             Self::CpuAv1(session) => session.decoded_batches(),
+            #[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
+            Self::VaapiH264(session) => session.decoded_batches(),
         }
     }
 
@@ -677,6 +696,8 @@ impl BgraDecoderSession {
             Self::CpuH264(_) => "chroma-cpu-h264-decoder",
             Self::CpuHevc(_) => "chroma-cpu-hevc-decoder",
             Self::CpuAv1(_) => "chroma-dav1d-av1-decoder",
+            #[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
+            Self::VaapiH264(_) => "chroma-vaapi-h264-decoder",
         }
     }
 }
