@@ -37,8 +37,8 @@ use crate::{
     transcode::{
         AudioDecodeCodec, BgraDecoderSession, H264EncoderSession, RawVideoFormat, RawVideoFrameRef,
         RawVideoPixelFormat, VideoCodec, build_audio_decode_input, build_video_decode_input,
-        decode_dts_to_interleaved_i16, decode_truehd_to_interleaved_i16,
-        encode_aac_from_interleaved_i16,
+        decode_dts_to_interleaved_i16, decode_opus_to_interleaved_i16,
+        decode_truehd_to_interleaved_i16, encode_aac_from_interleaved_i16,
     },
 };
 
@@ -690,7 +690,7 @@ fn prepare_mp4_transcode(
         bail!("selected MP4/MOV video track produced no transcode segments");
     }
     let mut prepared_audio = PreparedAudioTrack::from(audio_track);
-    if prepared_audio.codec == "aac" {
+    if matches!(prepared_audio.codec.as_str(), "aac" | "flac" | "alac") {
         prepared_audio.codec_private = Some(mp4_decoder_config(bytes, &audio_track_id, "audio")?);
     }
 
@@ -837,7 +837,7 @@ fn transcode_prepared_segment(
         video_start_ms,
         video_end_ms,
         index,
-        prepared.audio_track.codec == "truehd",
+        &prepared.audio_track.codec,
     )?;
 
     let video_segment = native_video_segment(
@@ -943,7 +943,7 @@ fn extract_indexed_time_range(
     start_ms: u64,
     end_ms: u64,
     index: u32,
-    preroll_to_truehd_sync: bool,
+    codec: &str,
 ) -> Result<(ExtractedChunk, Vec<u8>)> {
     let target_start = packets.partition_point(|packet| {
         packet
@@ -955,13 +955,15 @@ fn extract_indexed_time_range(
     if target_start == packets.len() {
         bail!("audio track has no packets for segment {index}");
     }
-    let start = if preroll_to_truehd_sync {
-        (0..=target_start)
+    let start = match codec {
+        "truehd" => (0..=target_start)
             .rev()
             .find(|packet_index| packet_contains_truehd_major_sync(bytes, &packets[*packet_index]))
-            .unwrap_or(0)
-    } else {
-        target_start
+            .unwrap_or(0),
+        // A fresh Opus decoder needs the bounded Matroska seek preroll so its
+        // prediction and overlap state are warm before samples are cropped.
+        "opus" => 0,
+        _ => target_start,
     };
     let end = packets.partition_point(|packet| packet.pts.as_millis() < end_ms);
     if end <= start {
@@ -1070,7 +1072,7 @@ fn select_matroska_audio_track<'a>(
 fn matroska_audio_track_executable(track: &MatroskaTrack) -> bool {
     matches!(
         track.codec.as_str(),
-        "aac" | "ac3" | "eac3" | "dts" | "truehd"
+        "aac" | "ac3" | "eac3" | "flac" | "alac" | "opus" | "dts" | "truehd"
     )
 }
 
@@ -1130,7 +1132,10 @@ fn select_mp4_audio_track<'a>(
 }
 
 fn mp4_audio_track_executable(track: &Mp4Track) -> bool {
-    matches!(track.codec.as_str(), "aac" | "ac3" | "eac3")
+    matches!(
+        track.codec.as_str(),
+        "aac" | "ac3" | "eac3" | "flac" | "alac"
+    )
 }
 
 fn video_codec_from_label(codec: &str) -> Result<VideoCodec> {
@@ -1363,19 +1368,37 @@ fn native_audio_segment(
     bitrate: u32,
 ) -> Result<AudioSegment> {
     match track.codec.as_str() {
-        "dts" => {
-            transcode_compressed_audio_segment(AudioDecodeCodec::Dts, manifest, payload, bitrate)
+        "opus" => transcode_compressed_audio_segment(
+            AudioDecodeCodec::Opus,
+            track.codec_private.as_deref(),
+            manifest,
+            payload,
+            bitrate,
+        ),
+        "dts" => transcode_compressed_audio_segment(
+            AudioDecodeCodec::Dts,
+            None,
+            manifest,
+            payload,
+            bitrate,
+        ),
+        "truehd" => transcode_compressed_audio_segment(
+            AudioDecodeCodec::TrueHd,
+            None,
+            manifest,
+            payload,
+            bitrate,
+        ),
+        "aac" | "ac3" | "eac3" | "flac" | "alac" => {
+            copy_native_audio_segment(track, manifest, payload)
         }
-        "truehd" => {
-            transcode_compressed_audio_segment(AudioDecodeCodec::TrueHd, manifest, payload, bitrate)
-        }
-        "aac" | "ac3" | "eac3" => copy_native_audio_segment(track, manifest, payload),
         other => bail!("selected audio track codec {other} is not supported by native fMP4 output"),
     }
 }
 
 fn transcode_compressed_audio_segment(
     codec: AudioDecodeCodec,
+    codec_private: Option<&[u8]>,
     manifest: ExtractedChunk,
     payload: Vec<u8>,
     bitrate: u32,
@@ -1388,10 +1411,15 @@ fn transcode_compressed_audio_segment(
         codec == AudioDecodeCodec::TrueHd,
     )?;
     let decoded = match codec {
+        AudioDecodeCodec::Opus => decode_opus_to_interleaved_i16(
+            codec_private.ok_or_else(|| anyhow::anyhow!("missing OpusHead codec private data"))?,
+            &input,
+        )?,
         AudioDecodeCodec::TrueHd => decode_truehd_to_interleaved_i16(&input)?,
         AudioDecodeCodec::Dts => decode_dts_to_interleaved_i16(&input)?,
     };
     let codec_label = match codec {
+        AudioDecodeCodec::Opus => "Opus",
         AudioDecodeCodec::TrueHd => "TrueHD",
         AudioDecodeCodec::Dts => "DTS",
     };
@@ -1536,6 +1564,22 @@ fn native_audio_sample_entry(
                 sample_rate: track.sample_rate,
             })
         }
+        "flac" => Ok(Fmp4SampleEntry::Flac {
+            stream_info: track
+                .codec_private
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("missing FLAC STREAMINFO"))?,
+            channel_count: track.channels.min(u32::from(u16::MAX)) as u16,
+            sample_rate: track.sample_rate,
+        }),
+        "alac" => Ok(Fmp4SampleEntry::Alac {
+            codec_config: track
+                .codec_private
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("missing ALAC codec config"))?,
+            channel_count: track.channels.min(u32::from(u16::MAX)) as u16,
+            sample_rate: track.sample_rate,
+        }),
         other => bail!("selected audio track codec {other} is not supported by fMP4 packet-copy"),
     }
 }
@@ -1545,6 +1589,8 @@ fn fmp4_audio_codec_string(track: &PreparedAudioTrack) -> String {
         "aac" => "aac".to_string(),
         "ac3" => "ac-3".to_string(),
         "eac3" => "ec-3".to_string(),
+        "flac" => "flac".to_string(),
+        "alac" => "alac".to_string(),
         other => other.to_string(),
     }
 }
@@ -1643,6 +1689,7 @@ mod tests {
 
         let segment = transcode_compressed_audio_segment(
             AudioDecodeCodec::TrueHd,
+            None,
             manifest,
             payload,
             384_000,
@@ -1717,15 +1764,79 @@ mod tests {
             samples,
         };
 
-        let segment =
-            transcode_compressed_audio_segment(AudioDecodeCodec::Dts, manifest, payload, 192_000)
-                .expect("transcode DTS Core");
+        let segment = transcode_compressed_audio_segment(
+            AudioDecodeCodec::Dts,
+            None,
+            manifest,
+            payload,
+            192_000,
+        )
+        .expect("transcode DTS Core");
 
         assert_eq!(segment.codec, "aac");
         assert!(segment.encoded_frame_count > 0);
         assert_eq!(segment.fragment.samples.len(), segment.encoded_frame_count);
         assert!(!segment.fragment.payload.is_empty());
         assert_eq!(segment.first_pts.expect("first PTS").units, source_start);
+        assert!(matches!(segment.sample_entry, Fmp4SampleEntry::Aac { .. }));
+    }
+
+    #[test]
+    fn transcodes_opus_packet_to_clocked_aac_fragment() {
+        let mut encoder =
+            opus_pure::OpusEncoder::new(48_000, 2, opus_pure::Application::Audio).unwrap();
+        let mut payload = vec![0_u8; opus_pure::MAX_PACKET_BYTES];
+        let size = encoder
+            .encode_s16(&vec![0_i16; 960 * 2], 960, &mut payload)
+            .unwrap();
+        payload.truncate(size);
+        let mut codec_private = Vec::from(*b"OpusHead");
+        codec_private.extend_from_slice(&[1, 2]);
+        codec_private.extend_from_slice(&0_u16.to_le_bytes());
+        codec_private.extend_from_slice(&48_000_u32.to_le_bytes());
+        codec_private.extend_from_slice(&0_i16.to_le_bytes());
+        codec_private.push(0);
+        let scale = TimeScale {
+            units_per_second: 48_000,
+        };
+        let start = TimePoint {
+            units: 48_000,
+            scale,
+        };
+        let manifest = ExtractedChunk {
+            track_id: "a0".to_string(),
+            chunk: NativeChunk {
+                index: 0,
+                start,
+                duration: TimeDelta { units: 960, scale },
+                packet_range: PacketRange { start: 0, end: 1 },
+                key_aligned: true,
+            },
+            packet_count: 1,
+            byte_count: payload.len() as u64,
+            samples: vec![ChunkSample {
+                index: 0,
+                payload_offset: 0,
+                byte_count: payload.len() as u32,
+                pts: start,
+                dts: start,
+                duration: TimeDelta { units: 960, scale },
+                keyframe: true,
+            }],
+        };
+
+        let segment = transcode_compressed_audio_segment(
+            AudioDecodeCodec::Opus,
+            Some(&codec_private),
+            manifest,
+            payload,
+            192_000,
+        )
+        .expect("transcode Opus packet");
+
+        assert_eq!(segment.codec, "aac");
+        assert!(segment.encoded_frame_count > 0);
+        assert_eq!(segment.first_pts.expect("first PTS").units, 48_000);
         assert!(matches!(segment.sample_entry, Fmp4SampleEntry::Aac { .. }));
     }
 

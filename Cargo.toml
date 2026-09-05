@@ -28,6 +28,7 @@ openh264 = "0.9.8"
 oxideav-ac3 = "0.0.11"
 oxideav-core = "0.1.35"
 oxideav-dts = { version = "=0.0.1", git = "https://github.com/OxideAV/oxideav-dts.git", rev = "951b4221969b742b1b330149106931f8be416d47", default-features = false }
+opus-pure = "=0.2.0"
 rusty_aac = { version = "0.5.0", default-features = false }
 rust_h265 = "0.1.0"
 serde = { version = "1.0", features = ["derive"] }

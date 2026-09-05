@@ -11,6 +11,8 @@ use crate::{
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum AudioDecodeCodec {
+    /// Opus source packets with an `OpusHead` stream configuration.
+    Opus,
     /// DTS or DTS-HD source packets with a DTS core substream.
     Dts,
     /// Dolby TrueHD/MLP source packets.
@@ -354,6 +356,225 @@ pub fn decode_dts_to_interleaved_i16(
     input: &AudioDecodeInput<'_>,
 ) -> Result<DecodedPcmAudioOutput, AudioDecodeError> {
     DtsAudioDecoderSession::new().decode(input)
+}
+
+#[derive(Debug)]
+enum OpusDecoderBackend {
+    MonoStereo(Box<opus_pure::OpusDecoder>),
+    Surround(Box<opus_pure::OpusMSDecoder>),
+}
+
+/// Retained pure-Rust Opus decoder with continuous codec and sample-clock state.
+#[derive(Debug)]
+pub struct OpusAudioDecoderSession {
+    decoder: OpusDecoderBackend,
+    format: PcmAudioFormat,
+    clock: AudioSampleClock,
+    remaining_pre_skip: usize,
+    decoded_batches: u64,
+}
+
+impl OpusAudioDecoderSession {
+    /// Creates an Opus decoder from a Matroska/WebM `OpusHead` codec-private payload.
+    pub fn new(codec_private: &[u8]) -> Result<Self, AudioDecodeError> {
+        let head = parse_opus_head(codec_private)?;
+        let channels = usize::from(head.channels);
+        let decoder = match head.mapping_family {
+            0 => {
+                let mut decoder =
+                    opus_pure::OpusDecoder::new(48_000, channels).map_err(opus_backend_error)?;
+                decoder.gain_q8 = i32::from(head.output_gain_q8);
+                OpusDecoderBackend::MonoStereo(Box::new(decoder))
+            }
+            1 => {
+                let layout =
+                    opus_pure::ChannelLayout::surround(channels, 1).map_err(opus_backend_error)?;
+                if head.stream_count != layout.nb_streams as u8
+                    || head.coupled_count != layout.nb_coupled_streams as u8
+                    || head.channel_mapping != layout.mapping
+                {
+                    return Err(AudioDecodeError::BackendFailed {
+                        reason: "OpusHead does not use the standard mapping-family-1 layout"
+                            .to_string(),
+                    });
+                }
+                let mut decoder = opus_pure::OpusMSDecoder::new(48_000, channels, 1)
+                    .map_err(opus_backend_error)?;
+                for stream in decoder.streams_mut() {
+                    stream.gain_q8 = i32::from(head.output_gain_q8);
+                }
+                OpusDecoderBackend::Surround(Box::new(decoder))
+            }
+            _ => {
+                return Err(AudioDecodeError::BackendFailed {
+                    reason: format!(
+                        "Opus mapping family {} is outside the modern family-0/1 profile",
+                        head.mapping_family
+                    ),
+                });
+            }
+        };
+        let format = PcmAudioFormat {
+            sample_rate: 48_000,
+            channels: u32::from(head.channels),
+        };
+        Ok(Self {
+            decoder,
+            format,
+            clock: AudioSampleClock::new(AudioClockConfig {
+                sample_rate: format.sample_rate,
+                discontinuity_threshold_ms: 100,
+            }),
+            remaining_pre_skip: usize::from(head.pre_skip),
+            decoded_batches: 0,
+        })
+    }
+
+    /// Decodes one ordered Opus packet batch to interleaved signed 16-bit PCM.
+    pub fn decode(
+        &mut self,
+        input: &AudioDecodeInput<'_>,
+    ) -> Result<DecodedPcmAudioOutput, AudioDecodeError> {
+        if input.codec != AudioDecodeCodec::Opus {
+            return Err(AudioDecodeError::UnsupportedCodec);
+        }
+        if input.time_scale.units_per_second == 0 {
+            return Err(AudioDecodeError::BackendFailed {
+                reason: "packet time scale must be greater than zero".to_string(),
+            });
+        }
+        let channels = self.format.channels as usize;
+        let mut scratch = vec![0_i16; opus_pure::MAX_PACKET_SAMPLES * channels];
+        let mut frames = Vec::new();
+        for packet in &input.packets {
+            validate_audio_packet_time_scale(input.time_scale, packet)?;
+            let sample_count = match &mut self.decoder {
+                OpusDecoderBackend::MonoStereo(decoder) => decoder
+                    .decode_s16(packet.bytes, opus_pure::MAX_PACKET_SAMPLES, &mut scratch)
+                    .map_err(opus_backend_error)?,
+                OpusDecoderBackend::Surround(decoder) => decoder
+                    .decode_s16(packet.bytes, opus_pure::MAX_PACKET_SAMPLES, &mut scratch)
+                    .map_err(opus_backend_error)?,
+            };
+            let skip = self.remaining_pre_skip.min(sample_count);
+            self.remaining_pre_skip -= skip;
+            let kept = sample_count.saturating_sub(skip);
+            if kept == 0 {
+                continue;
+            }
+            let source_pts = advance_time_point(packet.pts, skip, self.format.sample_rate);
+            let timing = self.clock.stamp_frame(
+                Some(source_pts),
+                u32::try_from(kept).map_err(|_| AudioDecodeError::BackendFailed {
+                    reason: "Opus frame sample count exceeds u32".to_string(),
+                })?,
+            );
+            let sample_start = skip * channels;
+            let sample_end = sample_count * channels;
+            frames.push(DecodedPcmAudioFrame {
+                timing,
+                samples: scratch[sample_start..sample_end].to_vec(),
+            });
+        }
+        self.decoded_batches = self.decoded_batches.saturating_add(1);
+        if frames.is_empty() {
+            return Err(AudioDecodeError::NoFrames);
+        }
+        Ok(DecodedPcmAudioOutput {
+            format: self.format,
+            frames,
+        })
+    }
+
+    /// Returns the number of packet batches decoded by this session.
+    pub fn decoded_batches(&self) -> u64 {
+        self.decoded_batches
+    }
+}
+
+/// Decodes one Opus packet batch using portable pure-Rust software.
+pub fn decode_opus_to_interleaved_i16(
+    codec_private: &[u8],
+    input: &AudioDecodeInput<'_>,
+) -> Result<DecodedPcmAudioOutput, AudioDecodeError> {
+    OpusAudioDecoderSession::new(codec_private)?.decode(input)
+}
+
+#[derive(Debug)]
+struct ParsedOpusHead {
+    channels: u8,
+    pre_skip: u16,
+    output_gain_q8: i16,
+    mapping_family: u8,
+    stream_count: u8,
+    coupled_count: u8,
+    channel_mapping: Vec<u8>,
+}
+
+fn parse_opus_head(bytes: &[u8]) -> Result<ParsedOpusHead, AudioDecodeError> {
+    if bytes.len() < 19 || bytes.get(..8) != Some(b"OpusHead") {
+        return Err(AudioDecodeError::BackendFailed {
+            reason: "missing or truncated OpusHead codec configuration".to_string(),
+        });
+    }
+    if bytes[8] >> 4 != 0 {
+        return Err(AudioDecodeError::BackendFailed {
+            reason: "unsupported OpusHead major version".to_string(),
+        });
+    }
+    let channels = bytes[9];
+    if channels == 0 || channels > 8 {
+        return Err(AudioDecodeError::BackendFailed {
+            reason: "Opus channel count must be within 1..=8".to_string(),
+        });
+    }
+    let mapping_family = bytes[18];
+    let (stream_count, coupled_count, channel_mapping) = if mapping_family == 0 {
+        if channels > 2 {
+            return Err(AudioDecodeError::BackendFailed {
+                reason: "Opus mapping family 0 supports only mono or stereo".to_string(),
+            });
+        }
+        (1, channels - 1, Vec::new())
+    } else {
+        let end = 21_usize + usize::from(channels);
+        let mapping = bytes
+            .get(21..end)
+            .ok_or_else(|| AudioDecodeError::BackendFailed {
+                reason: "truncated OpusHead channel mapping".to_string(),
+            })?;
+        (bytes[19], bytes[20], mapping.to_vec())
+    };
+    Ok(ParsedOpusHead {
+        channels,
+        pre_skip: u16::from_le_bytes([bytes[10], bytes[11]]),
+        output_gain_q8: i16::from_le_bytes([bytes[16], bytes[17]]),
+        mapping_family,
+        stream_count,
+        coupled_count,
+        channel_mapping,
+    })
+}
+
+fn advance_time_point(point: TimePoint, samples: usize, sample_rate: u32) -> TimePoint {
+    if samples == 0 || sample_rate == 0 || point.scale.units_per_second == 0 {
+        return point;
+    }
+    let units = ((samples as u128 * u128::from(point.scale.units_per_second))
+        + u128::from(sample_rate / 2))
+        / u128::from(sample_rate);
+    TimePoint {
+        units: point
+            .units
+            .saturating_add(units.min(u128::from(u64::MAX)) as u64),
+        scale: point.scale,
+    }
+}
+
+fn opus_backend_error(error: opus_pure::Error) -> AudioDecodeError {
+    AudioDecodeError::BackendFailed {
+        reason: format!("Opus decode failed: {error}"),
+    }
 }
 
 fn validate_audio_packet_time_scale(
@@ -713,5 +934,87 @@ mod tests {
         );
         assert_eq!(output.frames[0].timing.sample_count, 512);
         assert_eq!(decoder.decoded_batches(), 1);
+    }
+
+    #[test]
+    fn opus_session_decodes_generated_packets_with_continuous_timing() {
+        let mut encoder =
+            opus_pure::OpusEncoder::new(48_000, 2, opus_pure::Application::Audio).unwrap();
+        let pcm = vec![0_i16; 960 * 2];
+        let mut buffer = vec![0_u8; opus_pure::MAX_PACKET_BYTES];
+        let size = encoder.encode_s16(&pcm, 960, &mut buffer).unwrap();
+        let packet = buffer[..size].to_vec();
+        let mut head = Vec::from(*b"OpusHead");
+        head.extend_from_slice(&[1, 2]);
+        head.extend_from_slice(&0_u16.to_le_bytes());
+        head.extend_from_slice(&48_000_u32.to_le_bytes());
+        head.extend_from_slice(&0_i16.to_le_bytes());
+        head.push(0);
+        let scale = TimeScale {
+            units_per_second: 48_000,
+        };
+        let first = AudioDecodeInput {
+            codec: AudioDecodeCodec::Opus,
+            time_scale: scale,
+            packets: vec![CompressedAudioPacket {
+                index: 0,
+                pts: TimePoint {
+                    units: 48_000,
+                    scale,
+                },
+                dts: TimePoint {
+                    units: 48_000,
+                    scale,
+                },
+                duration: TimeDelta { units: 960, scale },
+                bytes: &packet,
+            }],
+            end_of_stream: false,
+        };
+        let second_packet = packet.clone();
+        let second = AudioDecodeInput {
+            codec: AudioDecodeCodec::Opus,
+            time_scale: scale,
+            packets: vec![CompressedAudioPacket {
+                index: 1,
+                pts: TimePoint {
+                    units: 48_960,
+                    scale,
+                },
+                dts: TimePoint {
+                    units: 48_960,
+                    scale,
+                },
+                duration: TimeDelta { units: 960, scale },
+                bytes: &second_packet,
+            }],
+            end_of_stream: true,
+        };
+        let mut decoder = OpusAudioDecoderSession::new(&head).unwrap();
+
+        let first_output = decoder.decode(&first).unwrap();
+        let second_output = decoder.decode(&second).unwrap();
+
+        assert_eq!(first_output.format.sample_rate, 48_000);
+        assert_eq!(first_output.format.channels, 2);
+        assert_eq!(first_output.frames[0].timing.start_sample, 48_000);
+        assert_eq!(second_output.frames[0].timing.start_sample, 48_960);
+        assert_eq!(first_output.frames[0].samples.len(), 1_920);
+        assert_eq!(decoder.decoded_batches(), 2);
+    }
+
+    #[test]
+    fn opus_head_rejects_legacy_custom_mapping_family() {
+        let mut head = Vec::from(*b"OpusHead");
+        head.extend_from_slice(&[1, 2]);
+        head.extend_from_slice(&312_u16.to_le_bytes());
+        head.extend_from_slice(&48_000_u32.to_le_bytes());
+        head.extend_from_slice(&0_i16.to_le_bytes());
+        head.push(255);
+        head.extend_from_slice(&[2, 0, 0, 1]);
+
+        let error = OpusAudioDecoderSession::new(&head).unwrap_err();
+
+        assert!(error.to_string().contains("modern family-0/1 profile"));
     }
 }

@@ -128,6 +128,9 @@
 - [x] Portable AV1 video decoder. A retained `dav1d-rs` session accepts low-overhead AV1 packets, converts 8/10/12-bit planar output to BGRA, and feeds the bounded H.264 transcode pipeline. Redistributable synthetic 8-bit and 10-bit fixtures gate one-shot and retained multi-batch decode/encode behavior.
 - [x] Portable TrueHD audio decoder. Safe Rust TrueHD decoding selects the format-defined six-channel-or-smaller presentation and feeds the portable AAC/fMP4 bridge on macOS, Windows, Linux, and Linux-based NAS hosts.
 - [x] Portable DTS audio decoder. A retained decoder built from pinned `oxideav-dts` commit `951b422` extracts the standard big-endian core from DTS/DTS-HD packets, preserves synthesis and sample-clock state, and emits up to six canonical interleaved PCM channels. On the Gremlins DTS-HD MA 5.1 fixture it decoded 4.02 seconds (377 frames) in 17-22 ms in the decoder-only benchmark and 0.39 seconds through the release CLI including Matroska extraction.
+- [x] Portable Opus audio decoder. A retained `opus-pure` session accepts standard mapping-family
+  0/1 `OpusHead` configurations, applies output gain and pre-skip, preserves codec/sample-clock
+  state, and feeds AAC fMP4 output without a platform-native Opus library.
 - [x] Linux executable VAAPI/NVENC/QSV path. H.264 and HEVC Main/Main10 VA-API decode plus H.264 and HEVC Main VA-API encode are executable behind the release-enabled `linux-vaapi` feature. Intel iHD/i965 render nodes additionally provide separately named Quick Sync H.264/HEVC decode and Main encode sessions after vendor and codec verification, without a link-time oneVPL dependency. Retained stateless sessions use page-aligned NV12/P010 user-pointer surfaces, preserve timing, produce fMP4-ready length-prefixed samples and avcC/hvcC, and fall back to portable codecs. Retained NVENC H.264/HEVC Main encode and NVDEC H.264/HEVC Main/Main10 decode are executable behind the release-enabled `linux-nvidia` feature; encoder profiles require real runtime encode probes and decoders require device codec-capability queries. The vendored NVDEC bridge selects P016 for high-bit-depth streams and keeps its CUDA/NVIDIA libraries runtime optional.
 - [x] Windows executable vendor/D3D path. Retained H.264 and HEVC Main encode sessions execute through hardware NVENC, hardware Intel Quick Sync, or hardware-only Media Foundation using checked BGRA-to-NV12 upload, timing preservation, length-prefixed access units, avcC/hvcC extraction, and real encode smoke probes. Retained H.264 and HEVC Main/Main10 hardware decode execute through hardware-only Media Foundation transforms and D3D11 NV12/P010 textures, with checked staging readback, BGRA conversion, timing restoration, and codec-specific runtime gating. AMD systems use the vendor-neutral Media Foundation hardware MFT instead of adding a redundant AMF SDK path. Non-executable AMF/D3D12/DXVA2/QSV/NVDEC decoder aliases are no longer advertised; public enum values remain reserved for schema compatibility.
 - [x] Warm encoder session initialization. AAC AudioToolbox, portable CPU AAC/AC-3/E-AC-3, VideoToolbox H.264/HEVC, OpenH264, and executable VA-API backends run tiny real encodes before playback so startup failures surface before the first segment request.
@@ -164,8 +167,6 @@
 
 ## Downstream Migration
 
-- [ ] Remove vendored legacy media binaries from GenusServer. This is not remaining Chroma Engine
-  implementation: the engine now supplies native probe, playback, remux, and transcode contracts
-  without spawning FFmpeg. GenusServer still owns ffprobe-shaped probe/cache adapters, its legacy
-  FFmpeg HLS supervisor, packaging scripts, and fallback policy. Those call sites must be migrated
-  and validated in the GenusServer repository before its vendored binaries can be removed.
+- [x] Remove the GenusServer FFmpeg/ffprobe runtime. Probe, remux, playback, diagnostics, and
+  packaging now use Chroma Engine exclusively; legacy database and response-field names remain
+  only for backward-compatible migrations/contracts.

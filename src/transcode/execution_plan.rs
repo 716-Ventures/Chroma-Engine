@@ -378,11 +378,17 @@ fn native_video_decode_reason(family: CodecFamily) -> &'static str {
 }
 
 fn native_audio_decode_ready(family: CodecFamily) -> bool {
-    matches!(family, CodecFamily::TrueHd | CodecFamily::Dts)
+    matches!(
+        family,
+        CodecFamily::Opus | CodecFamily::TrueHd | CodecFamily::Dts
+    )
 }
 
 fn native_audio_decode_reason(family: CodecFamily) -> &'static str {
     match family {
+        CodecFamily::Opus => {
+            "portable pure-Rust Opus decode can feed the target-native audio bridge"
+        }
         CodecFamily::TrueHd => "portable TrueHD decode can feed the target-native audio bridge",
         CodecFamily::Dts => "portable DTS Core decode can feed the target-native audio bridge",
         _ => "portable audio decode can feed the target-native audio bridge",
@@ -432,7 +438,12 @@ fn audio_transcode_codec(target: PlaybackTarget, _family: CodecFamily) -> AudioC
 
 fn audio_transcode_channels(track: &MediaTrack, codec: AudioCodec) -> u32 {
     match codec {
-        AudioCodec::Aac if matches!(track.codec.family, CodecFamily::TrueHd | CodecFamily::Dts) => {
+        AudioCodec::Aac
+            if matches!(
+                track.codec.family,
+                CodecFamily::Opus | CodecFamily::TrueHd | CodecFamily::Dts
+            ) =>
+        {
             audio_channels(track).min(6)
         }
         AudioCodec::Aac => audio_channels(track).min(2),
@@ -692,6 +703,26 @@ mod tests {
             stage.kind == TranscodeStageKind::AudioDecode
                 && stage.status == TranscodeStageStatus::NativeReady
                 && stage.reason.contains("portable DTS Core")
+        }));
+    }
+
+    #[test]
+    fn opus_audio_uses_pure_rust_decode_and_aac_encode() {
+        let probe = probe_with_tracks(vec![
+            video_track("v0", CodecFamily::H264, 1_920, 1_080, 8_000_000, None),
+            audio_track("a0", CodecFamily::Opus, true, 6, 48_000, Some(384_000)),
+        ]);
+
+        let plan = plan_hls_transcode(&probe, request(PlaybackTarget::AppleNative, false, None));
+
+        assert!(plan.engine_executable);
+        let audio = plan.output.audio.as_ref().unwrap();
+        assert_eq!(audio.codec, AudioCodec::Aac);
+        assert_eq!(audio.channels, 6);
+        assert!(plan.stages.iter().any(|stage| {
+            stage.kind == TranscodeStageKind::AudioDecode
+                && stage.status == TranscodeStageStatus::NativeReady
+                && stage.reason.contains("pure-Rust Opus")
         }));
     }
 

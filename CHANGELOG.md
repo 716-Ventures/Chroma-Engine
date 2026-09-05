@@ -4,6 +4,8 @@
 
 - Extended the retained native fMP4 transcode session to MP4/MOV inputs, reusing one mapped
   source, packet index, decoder, and encoder across a requested segment window.
+- Added a retained pure-Rust Opus decoder for standard mono, stereo, and Vorbis-order surround
+  layouts, including OpusHead gain/pre-skip handling and Opus-to-AAC fMP4 bridging.
 
 - Added checksummed, self-contained release archives for macOS, Linux, Windows, Linux ARM64/NAS,
   and Windows ARM64. ARM64 CI now embeds dependency metadata, bundles dav1d, smoke-tests the

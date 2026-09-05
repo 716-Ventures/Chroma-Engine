@@ -484,6 +484,7 @@ dependencies = [
  "objc2-core-video",
  "objc2-video-toolbox",
  "openh264",
+ "opus-pure",
  "oxideav-ac3",
  "oxideav-core",
  "oxideav-dts",
@@ -1599,6 +1600,12 @@ dependencies = [
  "nasm-rs",
  "walkdir",
 ]
+
+[[package]]
+name = "opus-pure"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6d362dc393c2fa3ac50a6215d8d53c561d3b8d244530cbb4ddfa7181f3710ff7"
 
 [[package]]
 name = "oxideav-ac3"

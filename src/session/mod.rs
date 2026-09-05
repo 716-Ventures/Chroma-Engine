@@ -483,7 +483,10 @@ fn audio_can_copy_for_target(family: CodecFamily, target: PlaybackTarget) -> boo
 
 fn audio_can_transcode_for_target(family: CodecFamily, target: PlaybackTarget) -> bool {
     target != PlaybackTarget::NativeChroma
-        && matches!(family, CodecFamily::TrueHd | CodecFamily::Dts)
+        && matches!(
+            family,
+            CodecFamily::Opus | CodecFamily::TrueHd | CodecFamily::Dts
+        )
 }
 
 fn subtitle_can_copy_for_target(family: CodecFamily, target: PlaybackTarget) -> bool {
