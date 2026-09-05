@@ -2,7 +2,10 @@
 
 ## Unreleased
 
-- Added a stride-aware, bounds-checked NV12-to-BGRA conversion path for mapped Linux hardware
+- Extended the runtime-loaded Linux VA-API probe through synchronized NV12/P010 image derivation,
+  plane-layout validation, CPU buffer mapping, and balanced image cleanup without link-time GPU
+  dependencies.
+- Added stride-aware, bounds-checked NV12/P010-to-BGRA conversion paths for mapped Linux hardware
   decode surfaces, including odd display dimensions and padded Y/UV planes.
 - Added headerless, runtime-loaded Linux VA-API probing that opens DRM render nodes, reports the
   driver vendor, and verifies H.264/HEVC VLD profiles by creating real configs, decode surfaces,

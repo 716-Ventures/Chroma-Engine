@@ -56,6 +56,59 @@ pub fn convert_nv12_to_bgra(
     Ok(output)
 }
 
+/// Copies a mapped 10-bit P010 hardware surface into tightly packed BGRA.
+///
+/// P010 stores each component in the upper ten bits of a little-endian 16-bit
+/// sample. The source planes may have independent row padding.
+pub fn convert_p010_to_bgra(
+    y_plane: &[u8],
+    y_stride: usize,
+    uv_plane: &[u8],
+    uv_stride: usize,
+    width: usize,
+    height: usize,
+) -> Result<Vec<u8>, VideoDecodeError> {
+    if width == 0 || height == 0 {
+        return Err(invalid_output("P010 dimensions must be non-zero"));
+    }
+
+    let y_row_bytes = width
+        .checked_mul(2)
+        .ok_or_else(|| invalid_output("P010 luma row byte count overflowed"))?;
+    let chroma_width = width.div_ceil(2);
+    let chroma_height = height.div_ceil(2);
+    let uv_row_bytes = chroma_width
+        .checked_mul(4)
+        .ok_or_else(|| invalid_output("P010 chroma row byte count overflowed"))?;
+    validate_plane(y_plane, y_stride, y_row_bytes, height, "Y")?;
+    validate_plane(uv_plane, uv_stride, uv_row_bytes, chroma_height, "UV")?;
+
+    let output_len = width
+        .checked_mul(height)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| invalid_output("P010 BGRA byte count overflowed"))?;
+    let mut output = vec![0; output_len];
+    for row in 0..height {
+        let y_row = row * y_stride;
+        let uv_row = (row / 2) * uv_stride;
+        for column in 0..width {
+            let y_offset = y_row + column * 2;
+            let uv_offset = uv_row + (column / 2) * 4;
+            let y = p010_sample_to_u8(&y_plane[y_offset..y_offset + 2]);
+            let u = p010_sample_to_u8(&uv_plane[uv_offset..uv_offset + 2]);
+            let v = p010_sample_to_u8(&uv_plane[uv_offset + 2..uv_offset + 4]);
+            let pixel = limited_yuv_to_bgra(y, u, v);
+            let output_offset = (row * width + column) * 4;
+            output[output_offset..output_offset + 4].copy_from_slice(&pixel);
+        }
+    }
+    Ok(output)
+}
+
+fn p010_sample_to_u8(bytes: &[u8]) -> u8 {
+    (u16::from_le_bytes([bytes[0], bytes[1]]) >> 8) as u8
+}
+
 fn validate_plane(
     plane: &[u8],
     stride: usize,
@@ -98,6 +151,31 @@ mod tests {
 
         let white = convert_nv12_to_bgra(&[235; 4], 2, &[128, 128], 2, 2, 2).unwrap();
         assert_eq!(white, [255, 255, 255, 255].repeat(4));
+    }
+
+    #[test]
+    fn converts_p010_black_and_white() {
+        let black_y = [0x00, 0x10].repeat(4);
+        let white_y = [0x00, 0xeb].repeat(4);
+        let neutral_uv = [0x00, 0x80].repeat(2);
+
+        let black = convert_p010_to_bgra(&black_y, 4, &neutral_uv, 4, 2, 2).unwrap();
+        assert_eq!(black, [0, 0, 0, 255].repeat(4));
+
+        let white = convert_p010_to_bgra(&white_y, 4, &neutral_uv, 4, 2, 2).unwrap();
+        assert_eq!(white, [255, 255, 255, 255].repeat(4));
+    }
+
+    #[test]
+    fn p010_respects_padding_and_rejects_short_planes() {
+        let y = [0x00, 0x10, 0x00, 0xeb, 0, 0, 0x00, 0x10, 0x00, 0xeb];
+        let uv = [0x00, 0x80, 0x00, 0x80];
+        let output = convert_p010_to_bgra(&y, 6, &uv, 4, 2, 2).unwrap();
+        assert_eq!(output[0..4], [0, 0, 0, 255]);
+        assert_eq!(output[4..8], [255, 255, 255, 255]);
+
+        let error = convert_p010_to_bgra(&y[..9], 6, &uv, 4, 2, 2).unwrap_err();
+        assert!(error.to_string().contains("Y plane"));
     }
 
     #[test]
