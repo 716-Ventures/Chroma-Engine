@@ -7,10 +7,16 @@ use crate::transcode::VideoCodec;
 #[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
 mod vaapi_encode;
 
+#[cfg(all(target_os = "linux", feature = "linux-nvidia"))]
+mod nvidia_encode;
+
 #[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
 pub use vaapi_encode::VaapiH264EncoderSession;
 #[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
 pub use vaapi_encode::VaapiHevcEncoderSession;
+
+#[cfg(all(target_os = "linux", feature = "linux-nvidia"))]
+pub use nvidia_encode::NvencH264EncoderSession;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -230,6 +236,9 @@ pub enum H264EncoderSession {
     /// Linux VA-API H.264 encoder selected when a compatible render node is available.
     #[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
     Vaapi(Box<VaapiH264EncoderSession>),
+    /// Linux NVIDIA NVENC H.264 encoder selected when a compatible CUDA device is available.
+    #[cfg(all(target_os = "linux", feature = "linux-nvidia"))]
+    Nvenc(Box<NvencH264EncoderSession>),
 }
 
 impl H264EncoderSession {
@@ -238,6 +247,10 @@ impl H264EncoderSession {
         #[cfg(target_os = "macos")]
         if let Ok(session) = VideoToolboxH264EncoderSession::new(format, bitrate) {
             return Ok(Self::VideoToolbox(session));
+        }
+        #[cfg(all(target_os = "linux", feature = "linux-nvidia"))]
+        if let Ok(session) = NvencH264EncoderSession::new(format, bitrate) {
+            return Ok(Self::Nvenc(Box::new(session)));
         }
         #[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
         if let Ok(session) = VaapiH264EncoderSession::new(format, bitrate) {
@@ -256,6 +269,8 @@ impl H264EncoderSession {
             Self::Cpu(session) => session.encode(frames),
             #[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
             Self::Vaapi(session) => session.encode(frames),
+            #[cfg(all(target_os = "linux", feature = "linux-nvidia"))]
+            Self::Nvenc(session) => session.encode(frames),
         }
     }
 
@@ -266,6 +281,8 @@ impl H264EncoderSession {
             Self::Cpu(session) => session.encoded_batches(),
             #[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
             Self::Vaapi(session) => session.encoded_batches(),
+            #[cfg(all(target_os = "linux", feature = "linux-nvidia"))]
+            Self::Nvenc(session) => session.encoded_batches(),
         }
     }
 
@@ -276,6 +293,8 @@ impl H264EncoderSession {
             Self::Cpu(_) => "chroma-cpu-h264",
             #[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
             Self::Vaapi(_) => "chroma-vaapi-h264",
+            #[cfg(all(target_os = "linux", feature = "linux-nvidia"))]
+            Self::Nvenc(_) => "chroma-nvenc-h264",
         }
     }
 }

@@ -312,6 +312,7 @@ dependencies = [
  "oxideav-ac3",
  "oxideav-core",
  "oxideav-dts",
+ "oxideav-nvidia",
  "proptest",
  "rust_h265",
  "rusty_aac",
@@ -835,6 +836,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "linkme"
+version = "0.3.37"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3045e122bd98aef8ec3ad58ce84f0791f64e70163d1a02710af4aa11a4d54cc5"
+dependencies = [
+ "linkme-impl",
+]
+
+[[package]]
+name = "linkme-impl"
+version = "0.3.37"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77060ebe535362c3da75682cd17b0431017b6e7c5661e714fc69a7ad017d1301"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.0",
+]
+
+[[package]]
 name = "linux-raw-sys"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1211,6 +1232,17 @@ dependencies = [
 name = "oxideav-dts"
 version = "0.0.1"
 source = "git+https://github.com/OxideAV/oxideav-dts.git?rev=951b4221969b742b1b330149106931f8be416d47#951b4221969b742b1b330149106931f8be416d47"
+
+[[package]]
+name = "oxideav-nvidia"
+version = "0.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "45a792f766ac33f7ff84cb2362adf71b9b1d8aa277aea79efbf9d95fd660e15e"
+dependencies = [
+ "libloading 0.8.9",
+ "linkme",
+ "oxideav-core",
+]
 
 [[package]]
 name = "pin-project-lite"

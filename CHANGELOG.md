@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added retained Linux NVIDIA H.264 encoding through runtime-loaded CUDA/NVENC libraries, with
+  checked BGRA-to-I420 conversion, AVCC/configuration output, timing preservation, a real encode
+  capability smoke probe, and automatic fallback when NVIDIA hardware or drivers are unavailable.
 - Replaced placeholder Windows DirectX decode detection with real Media Foundation hardware-MFT
   enumeration and activation probes for H.264 and HEVC decode/encode transforms.
 - Added a retained portable DTS Core decoder from a pinned `oxideav-dts` revision, with DTS-HD

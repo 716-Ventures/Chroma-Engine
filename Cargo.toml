@@ -41,6 +41,7 @@ truehd = "0.7.1"
 [features]
 default = []
 fuzzing = []
+linux-nvidia = ["dep:oxideav-nvidia"]
 linux-vaapi = ["dep:nuxodecs"]
 
 [dev-dependencies]
@@ -83,6 +84,7 @@ objc2-video-toolbox = "0.3.2"
 # binaries buildable and runnable on hosts without graphics development files.
 libloading = "0.8.9"
 nuxodecs = { version = "0.1.2", optional = true, default-features = false, features = ["h265", "vaapi"] }
+oxideav-nvidia = { version = "0.0.3", optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.62.2", features = [

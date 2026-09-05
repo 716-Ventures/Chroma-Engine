@@ -364,12 +364,46 @@ fn run_warmup_task(task: &EncoderWarmupTask) -> Result<(), EncoderWarmupError> {
         (EncoderWarmupKind::Video, "chroma-cpu-h264", "h264") => warm_cpu_h264_encoder(),
         (EncoderWarmupKind::Video, "chroma-vaapi-h264", "h264") => warm_vaapi_h264_encoder(),
         (EncoderWarmupKind::Video, "chroma-vaapi-hevc", "hevc") => warm_vaapi_hevc_encoder(),
+        (EncoderWarmupKind::Video, "chroma-nvenc-h264", "h264") => warm_nvenc_h264_encoder(),
         (EncoderWarmupKind::Audio, "chroma-audiotoolbox-aac", "aac") => warm_aac_encoder(),
         (EncoderWarmupKind::Audio, "chroma-cpu-aac", "aac") => warm_cpu_aac_encoder(),
         (EncoderWarmupKind::Audio, "chroma-cpu-ac3", "ac3") => warm_cpu_ac3_encoder(),
         (EncoderWarmupKind::Audio, "chroma-cpu-eac3", "eac3") => warm_cpu_eac3_encoder(),
         _ => Ok(()),
     }
+}
+
+fn warm_nvenc_h264_encoder() -> Result<(), EncoderWarmupError> {
+    #[cfg(all(target_os = "linux", feature = "linux-nvidia"))]
+    {
+        use crate::transcode::{NvencH264EncoderSession, RawVideoFrameRef};
+
+        let format = RawVideoFormat {
+            width: 128,
+            height: 72,
+            frame_rate_num: 24,
+            frame_rate_den: 1,
+            pixel_format: RawVideoPixelFormat::Bgra,
+        };
+        let bgra = vec![0_u8; format.width as usize * format.height as usize * 4];
+        let scale = crate::packet::TimeScale {
+            units_per_second: 24,
+        };
+        NvencH264EncoderSession::new(format, 500_000)
+            .and_then(|mut session| {
+                session.encode(&[RawVideoFrameRef {
+                    pts: crate::packet::TimePoint { units: 0, scale },
+                    dts: crate::packet::TimePoint { units: 0, scale },
+                    duration: crate::packet::TimeDelta { units: 1, scale },
+                    bytes: &bgra,
+                    keyframe: true,
+                }])
+            })
+            .map_err(|error| EncoderWarmupError {
+                reason: format!("NVENC H.264 warmup failed: {error}"),
+            })?;
+    }
+    Ok(())
 }
 
 fn warm_vaapi_hevc_encoder() -> Result<(), EncoderWarmupError> {
@@ -1075,6 +1109,14 @@ fn native_encoder_profiles() -> Vec<EncoderProfile> {
     #[cfg(not(target_os = "macos"))]
     {
         let mut profiles = Vec::new();
+        if linux_nvenc_h264_encoder_available() {
+            profiles.push(EncoderProfile {
+                kind: HardwareKind::Nvenc,
+                video_encoder: "chroma-nvenc-h264".to_string(),
+                codec: VideoOutputCodec::H264,
+                hwaccel: Some("nvenc".to_string()),
+            });
+        }
         if linux_vaapi_h264_encoder_available() {
             profiles.push(EncoderProfile {
                 kind: HardwareKind::Vaapi,
@@ -1112,11 +1154,7 @@ fn video_backend_matrix() -> Vec<EncoderBackend> {
             executable_video_backend(HardwareKind::Cpu, VideoOutputCodec::H264, "chroma-cpu-h264"),
         ],
         "linux" => vec![
-            planned_video_backend(
-                HardwareKind::Nvenc,
-                VideoOutputCodec::H264,
-                "chroma-nvenc-h264",
-            ),
+            linux_nvenc_h264_video_backend(),
             planned_video_backend(
                 HardwareKind::Nvenc,
                 VideoOutputCodec::Hevc,
@@ -1151,6 +1189,60 @@ fn video_backend_matrix() -> Vec<EncoderBackend> {
             "chroma-cpu-h264",
         )],
     }
+}
+
+fn linux_nvenc_h264_video_backend() -> EncoderBackend {
+    if linux_nvenc_h264_encoder_available() {
+        executable_video_backend(
+            HardwareKind::Nvenc,
+            VideoOutputCodec::H264,
+            "chroma-nvenc-h264",
+        )
+    } else {
+        planned_video_backend(
+            HardwareKind::Nvenc,
+            VideoOutputCodec::H264,
+            "chroma-nvenc-h264",
+        )
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "linux-nvidia"))]
+fn linux_nvenc_h264_encoder_available() -> bool {
+    use std::sync::OnceLock;
+
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        use crate::transcode::{NvencH264EncoderSession, RawVideoFrameRef};
+
+        let format = RawVideoFormat {
+            width: 128,
+            height: 72,
+            frame_rate_num: 24,
+            frame_rate_den: 1,
+            pixel_format: RawVideoPixelFormat::Bgra,
+        };
+        let bgra = vec![0_u8; format.width as usize * format.height as usize * 4];
+        let scale = crate::packet::TimeScale {
+            units_per_second: 24,
+        };
+        NvencH264EncoderSession::new(format, 500_000)
+            .and_then(|mut session| {
+                session.encode(&[RawVideoFrameRef {
+                    pts: crate::packet::TimePoint { units: 0, scale },
+                    dts: crate::packet::TimePoint { units: 0, scale },
+                    duration: crate::packet::TimeDelta { units: 1, scale },
+                    bytes: &bgra,
+                    keyframe: true,
+                }])
+            })
+            .is_ok()
+    })
+}
+
+#[cfg(not(all(target_os = "linux", feature = "linux-nvidia")))]
+fn linux_nvenc_h264_encoder_available() -> bool {
+    false
 }
 
 fn vaapi_h264_video_backend() -> EncoderBackend {
@@ -1377,6 +1469,10 @@ mod tests {
             probe.profile.kind,
             if cfg!(target_os = "macos") {
                 HardwareKind::VideoToolbox
+            } else if linux_nvenc_h264_encoder_available() {
+                HardwareKind::Nvenc
+            } else if linux_vaapi_h264_encoder_available() {
+                HardwareKind::Vaapi
             } else {
                 HardwareKind::Cpu
             }
@@ -1387,9 +1483,16 @@ mod tests {
                 profile.kind == HardwareKind::Cpu && profile.codec == VideoOutputCodec::H264
             }));
             assert!(probe.failure_notes.is_empty());
-        } else {
+        } else if probe.profile.kind == HardwareKind::Cpu {
             assert!(probe.alternatives.is_empty());
             assert_eq!(probe.failure_notes.len(), probe.considered_encoders.len());
+        } else {
+            assert!(
+                probe
+                    .alternatives
+                    .iter()
+                    .any(|profile| profile.kind == HardwareKind::Cpu)
+            );
         }
     }
 

@@ -128,7 +128,7 @@ jobs:
           - os: macos-latest
             features: ""
           - os: ubuntu-latest
-            features: "--features linux-vaapi"
+            features: "--features linux-vaapi,linux-nvidia"
           - os: windows-latest
             features: ""
     steps:
