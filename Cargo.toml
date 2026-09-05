@@ -83,3 +83,9 @@ objc2-video-toolbox = "0.3.2"
 # binaries buildable and runnable on hosts without graphics development files.
 libloading = "0.8.9"
 nuxodecs = { version = "0.1.2", optional = true, default-features = false, features = ["h265", "vaapi"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62.2", features = [
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+] }

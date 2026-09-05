@@ -16,6 +16,9 @@ use crate::transcode::{encode_h264_videotoolbox_bgra_frame, encode_hevc_videotoo
 #[cfg(target_os = "linux")]
 mod vaapi;
 
+#[cfg(target_os = "windows")]
+mod windows_mf;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 /// Result of probing the host for encoding capabilities.
@@ -892,8 +895,7 @@ fn video_decode_unavailable_reason(os: &str, kind: HardwareKind, codec: VideoCod
     } else if kind == HardwareKind::Nvdec && os == "linux" {
         "NVIDIA decode device was not detected under /dev/nvidiactl".to_string()
     } else if os == "windows" {
-        "Windows hardware decode runtime probing is modeled but not executable in this build"
-            .to_string()
+        windows_hardware_decode_unavailable_reason(kind, codec)
     } else {
         "native video decode backend is planned but not executable in this build".to_string()
     }
@@ -925,11 +927,7 @@ fn video_decode_backend_state(os: &str, kind: HardwareKind, codec: VideoCodec) -
             CapabilityState::Detected
         }
         ("windows", HardwareKind::D3d11Va | HardwareKind::D3d12Va | HardwareKind::Dxva2) => {
-            if windows_directx_decode_runtime_present() {
-                CapabilityState::Detected
-            } else {
-                CapabilityState::Modeled
-            }
+            windows_media_foundation_decode_state(codec)
         }
         ("windows", HardwareKind::Qsv | HardwareKind::Amf | HardwareKind::Nvdec) => {
             if windows_vendor_decode_runtime_present(kind) {
@@ -1006,13 +1004,34 @@ fn linux_nvidia_decode_device_present() -> bool {
 }
 
 #[cfg(target_os = "windows")]
-fn windows_directx_decode_runtime_present() -> bool {
-    true
+fn windows_media_foundation_decode_state(codec: VideoCodec) -> CapabilityState {
+    if windows_mf::probe().decoder_opened(codec) {
+        CapabilityState::Opened
+    } else {
+        CapabilityState::Modeled
+    }
 }
 
 #[cfg(not(target_os = "windows"))]
-fn windows_directx_decode_runtime_present() -> bool {
-    false
+fn windows_media_foundation_decode_state(_codec: VideoCodec) -> CapabilityState {
+    CapabilityState::Modeled
+}
+
+#[cfg(target_os = "windows")]
+fn windows_hardware_decode_unavailable_reason(kind: HardwareKind, codec: VideoCodec) -> String {
+    let probe = windows_mf::probe();
+    if probe.decoder_opened(codec) {
+        format!(
+            "Media Foundation opened a hardware {codec:?} decoder for the {kind:?} path, but decoded-frame submission is not executable in this build"
+        )
+    } else {
+        probe.decoder_failure(codec).to_string()
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn windows_hardware_decode_unavailable_reason(_kind: HardwareKind, _codec: VideoCodec) -> String {
+    "Windows Media Foundation probing is available only in Windows builds".to_string()
 }
 
 #[cfg(target_os = "windows")]
@@ -1536,7 +1555,7 @@ mod tests {
                 && !backend.available
                 && matches!(
                     backend.state,
-                    CapabilityState::Modeled | CapabilityState::Detected
+                    CapabilityState::Modeled | CapabilityState::Detected | CapabilityState::Opened
                 )
                 && backend
                     .native_surface_formats
@@ -1569,7 +1588,7 @@ mod tests {
                 && !backend.available
                 && matches!(
                     backend.state,
-                    CapabilityState::Modeled | CapabilityState::Detected
+                    CapabilityState::Modeled | CapabilityState::Detected | CapabilityState::Opened
                 )
                 && backend
                     .native_surface_formats

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Replaced placeholder Windows DirectX decode detection with real Media Foundation hardware-MFT
+  enumeration and activation probes for H.264 and HEVC decode/encode transforms.
 - Added a retained portable DTS Core decoder from a pinned `oxideav-dts` revision, with DTS-HD
   core extraction, checked channel ordering, continuous sample-clock timing, DTS-to-AAC fMP4
   routing, and real-media latency validation.
