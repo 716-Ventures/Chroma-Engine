@@ -28,7 +28,8 @@ use crate::{
     transcode::{
         AudioDecodeCodec, BgraDecoderSession, H264EncoderSession, RawVideoFormat, RawVideoFrameRef,
         RawVideoPixelFormat, VideoCodec, build_audio_decode_input, build_video_decode_input,
-        decode_truehd_to_interleaved_i16, encode_aac_from_interleaved_i16,
+        decode_dts_to_interleaved_i16, decode_truehd_to_interleaved_i16,
+        encode_aac_from_interleaved_i16,
     },
 };
 
@@ -892,7 +893,10 @@ fn select_matroska_audio_track<'a>(
 }
 
 fn matroska_audio_track_executable(track: &MatroskaTrack) -> bool {
-    matches!(track.codec.as_str(), "aac" | "ac3" | "eac3" | "truehd")
+    matches!(
+        track.codec.as_str(),
+        "aac" | "ac3" | "eac3" | "dts" | "truehd"
+    )
 }
 
 fn video_codec_from_label(codec: &str) -> Result<VideoCodec> {
@@ -1122,29 +1126,38 @@ fn matroska_audio_segment(
     bitrate: u32,
 ) -> Result<AudioSegment> {
     match track.codec.as_str() {
-        "dts" => bail!(
-            "DTS audio track {} requires a native decoder capability that is not currently executable",
-            track.index
-        ),
-        "truehd" => transcode_truehd_audio_segment(manifest, payload, bitrate),
+        "dts" => {
+            transcode_compressed_audio_segment(AudioDecodeCodec::Dts, manifest, payload, bitrate)
+        }
+        "truehd" => {
+            transcode_compressed_audio_segment(AudioDecodeCodec::TrueHd, manifest, payload, bitrate)
+        }
         "aac" | "ac3" | "eac3" => copy_matroska_audio_segment(track, manifest, payload),
         other => bail!("selected audio track codec {other} is not supported by native fMP4 output"),
     }
 }
 
-fn transcode_truehd_audio_segment(
+fn transcode_compressed_audio_segment(
+    codec: AudioDecodeCodec,
     manifest: ExtractedChunk,
     payload: Vec<u8>,
     bitrate: u32,
 ) -> Result<AudioSegment> {
     let input = build_audio_decode_input(
-        AudioDecodeCodec::TrueHd,
+        codec,
         chunk_time_scale(&manifest),
         &manifest.samples,
         &payload,
-        true,
+        codec == AudioDecodeCodec::TrueHd,
     )?;
-    let decoded = decode_truehd_to_interleaved_i16(&input)?;
+    let decoded = match codec {
+        AudioDecodeCodec::TrueHd => decode_truehd_to_interleaved_i16(&input)?,
+        AudioDecodeCodec::Dts => decode_dts_to_interleaved_i16(&input)?,
+    };
+    let codec_label = match codec {
+        AudioDecodeCodec::TrueHd => "TrueHD",
+        AudioDecodeCodec::Dts => "DTS",
+    };
     let output_scale = decoded.format.sample_rate;
     let window_start = rescale_units(
         manifest.chunk.start.units,
@@ -1177,22 +1190,22 @@ fn transcode_truehd_audio_segment(
         let take_frames = usize::try_from(overlap_end.saturating_sub(overlap_start))?;
         let sample_start = skip_frames
             .checked_mul(channels)
-            .ok_or_else(|| anyhow::anyhow!("TrueHD PCM crop offset overflowed"))?;
+            .ok_or_else(|| anyhow::anyhow!("{codec_label} PCM crop offset overflowed"))?;
         let sample_count = take_frames
             .checked_mul(channels)
-            .ok_or_else(|| anyhow::anyhow!("TrueHD PCM crop length overflowed"))?;
+            .ok_or_else(|| anyhow::anyhow!("{codec_label} PCM crop length overflowed"))?;
         let sample_end = sample_start
             .checked_add(sample_count)
-            .ok_or_else(|| anyhow::anyhow!("TrueHD PCM crop range overflowed"))?;
+            .ok_or_else(|| anyhow::anyhow!("{codec_label} PCM crop range overflowed"))?;
         pcm.extend_from_slice(
-            frame
-                .samples
-                .get(sample_start..sample_end)
-                .ok_or_else(|| anyhow::anyhow!("TrueHD PCM frame was shorter than declared"))?,
+            frame.samples.get(sample_start..sample_end).ok_or_else(|| {
+                anyhow::anyhow!("{codec_label} PCM frame was shorter than declared")
+            })?,
         );
     }
-    let first_sample = first_sample
-        .ok_or_else(|| anyhow::anyhow!("TrueHD decoder emitted no PCM in the segment window"))?;
+    let first_sample = first_sample.ok_or_else(|| {
+        anyhow::anyhow!("{codec_label} decoder emitted no PCM in the segment window")
+    })?;
     let mut encoded = encode_aac_from_interleaved_i16(decoded.format, &pcm, bitrate)?;
     for (index, frame) in encoded.frames.iter_mut().enumerate() {
         frame.timing.start_sample = frame.timing.start_sample.saturating_add(first_sample);
@@ -1357,8 +1370,8 @@ mod tests {
         let (track_id, track) =
             select_matroska_audio_track(&tracks, None).expect("selected audio track");
 
-        assert_eq!(track_id, "a1");
-        assert_eq!(track.codec, "truehd");
+        assert_eq!(track_id, "a0");
+        assert_eq!(track.codec, "dts");
         let (explicit_id, explicit) =
             select_matroska_audio_track(&tracks, Some("a0")).expect("explicit audio track");
         assert_eq!(explicit_id, "a0");
@@ -1391,14 +1404,91 @@ mod tests {
             }],
         };
 
-        let segment = transcode_truehd_audio_segment(manifest, payload, 384_000)
-            .expect("transcode TrueHD fixture");
+        let segment = transcode_compressed_audio_segment(
+            AudioDecodeCodec::TrueHd,
+            manifest,
+            payload,
+            384_000,
+        )
+        .expect("transcode TrueHD fixture");
 
         assert_eq!(segment.codec, "aac");
         assert!(segment.encoded_frame_count > 0);
         assert_eq!(segment.fragment.samples.len(), segment.encoded_frame_count);
         assert!(!segment.fragment.payload.is_empty());
         assert_eq!(segment.first_pts.unwrap().as_millis(), 500);
+        assert!(matches!(segment.sample_entry, Fmp4SampleEntry::Aac { .. }));
+    }
+
+    #[test]
+    fn transcodes_dts_core_to_clocked_aac_fragment() {
+        let config = oxideav_dts::EncoderConfig::new(48_000, 2).expect("DTS encoder config");
+        let mut encoder = oxideav_dts::CoreEncoder::new(config).expect("DTS encoder");
+        let left = vec![0.0_f64; 4_096];
+        let right = vec![0.0_f64; 4_096];
+        let mut encoded = encoder.push(&[&left, &right]).expect("encode DTS");
+        encoded.extend(encoder.flush());
+        assert!(!encoded.is_empty());
+
+        let scale = TimeScale {
+            units_per_second: 48_000,
+        };
+        let source_start = 24_000_u64;
+        let mut payload = Vec::new();
+        let samples = encoded
+            .iter()
+            .enumerate()
+            .map(|(index, frame)| {
+                let payload_offset = payload.len() as u64;
+                payload.extend_from_slice(frame);
+                let pts = TimePoint {
+                    units: source_start + (index as u64 * 512),
+                    scale,
+                };
+                ChunkSample {
+                    index: index as u32,
+                    payload_offset,
+                    byte_count: frame.len() as u32,
+                    pts,
+                    dts: pts,
+                    duration: TimeDelta { units: 512, scale },
+                    keyframe: true,
+                }
+            })
+            .collect::<Vec<_>>();
+        let duration = (samples.len() as u64) * 512;
+        let manifest = ExtractedChunk {
+            track_id: "a0".to_string(),
+            chunk: NativeChunk {
+                index: 0,
+                start: TimePoint {
+                    units: source_start,
+                    scale,
+                },
+                duration: TimeDelta {
+                    units: duration,
+                    scale,
+                },
+                packet_range: PacketRange {
+                    start: 0,
+                    end: samples.len() as u32,
+                },
+                key_aligned: true,
+            },
+            packet_count: samples.len() as u32,
+            byte_count: payload.len() as u64,
+            samples,
+        };
+
+        let segment =
+            transcode_compressed_audio_segment(AudioDecodeCodec::Dts, manifest, payload, 192_000)
+                .expect("transcode DTS Core");
+
+        assert_eq!(segment.codec, "aac");
+        assert!(segment.encoded_frame_count > 0);
+        assert_eq!(segment.fragment.samples.len(), segment.encoded_frame_count);
+        assert!(!segment.fragment.payload.is_empty());
+        assert_eq!(segment.first_pts.expect("first PTS").units, source_start);
         assert!(matches!(segment.sample_entry, Fmp4SampleEntry::Aac { .. }));
     }
 

@@ -482,7 +482,8 @@ fn audio_can_copy_for_target(family: CodecFamily, target: PlaybackTarget) -> boo
 }
 
 fn audio_can_transcode_for_target(family: CodecFamily, target: PlaybackTarget) -> bool {
-    target != PlaybackTarget::NativeChroma && family == CodecFamily::TrueHd
+    target != PlaybackTarget::NativeChroma
+        && matches!(family, CodecFamily::TrueHd | CodecFamily::Dts)
 }
 
 fn subtitle_can_copy_for_target(family: CodecFamily, target: PlaybackTarget) -> bool {
@@ -641,7 +642,7 @@ mod tests {
     }
 
     #[test]
-    fn primary_audio_prefers_executable_bridge_over_unsupported_default() {
+    fn primary_audio_keeps_executable_default_dts_bridge() {
         let probe = probe_with_tracks(vec![
             track("v0", TrackKind::Video, CodecFamily::H264),
             default_track("a0", TrackKind::Audio, CodecFamily::Dts),
@@ -657,14 +658,14 @@ mod tests {
 
         assert_eq!(
             plan.selected_tracks,
-            vec!["v0".to_string(), "a1".to_string()]
+            vec!["v0".to_string(), "a0".to_string()]
         );
         let decode = plan
             .stages
             .iter()
             .find(|stage| stage.id == "decode0")
             .expect("decode stage");
-        assert_eq!(decode.track_ids, vec!["a1".to_string()]);
+        assert_eq!(decode.track_ids, vec!["a0".to_string()]);
     }
 
     #[test]

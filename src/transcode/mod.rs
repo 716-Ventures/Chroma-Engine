@@ -16,9 +16,9 @@ mod yuv;
 pub use audio_clock::{AudioClockConfig, AudioFrameTiming, AudioSampleClock};
 pub use audio_decode::{
     AudioDecodeCodec, AudioDecodeError, AudioDecodeInput, CompressedAudioPacket,
-    DecodedPcmAudioFrame, DecodedPcmAudioOutput, DtsAudioBridgeProbe, DtsAudioPacketProbe,
-    TrueHdAudioDecoderSession, build_audio_decode_input, decode_truehd_to_interleaved_i16,
-    probe_dts_audio_bridge,
+    DecodedPcmAudioFrame, DecodedPcmAudioOutput, DtsAudioBridgeProbe, DtsAudioDecoderSession,
+    DtsAudioPacketProbe, TrueHdAudioDecoderSession, build_audio_decode_input,
+    decode_dts_to_interleaved_i16, decode_truehd_to_interleaved_i16, probe_dts_audio_bridge,
 };
 pub use audio_encode::{
     AacEncoderSession, AudioEncodeError, AudioToolboxAacEncoderSession, CpuAacEncoderSession,

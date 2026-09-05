@@ -765,7 +765,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn initialized_context_is_opened_but_not_claimed_executable() {
+    fn initialized_context_reports_build_specific_backend_state() {
         let probe = VaapiDecodeProbe {
             h264: Some(VaapiCodecDevice {
                 path: PathBuf::from("/dev/dri/renderD128"),
@@ -781,6 +781,12 @@ mod tests {
 
         assert!(probe.supports(VideoCodec::H264));
         assert!(!probe.supports(VideoCodec::Hevc));
+        #[cfg(feature = "linux-vaapi")]
+        assert_eq!(
+            probe.unavailable_reason(VideoCodec::H264),
+            "VA-API initialized a H264 VLD context on /dev/dri/renderD128 (Test VA driver), but the executable decoder could not be selected"
+        );
+        #[cfg(not(feature = "linux-vaapi"))]
         assert_eq!(
             probe.unavailable_reason(VideoCodec::H264),
             "VA-API initialized a H264 VLD context and mapped a NV12 surface on /dev/dri/renderD128 (Test VA driver), but packet decode is not executable in this build"

@@ -244,7 +244,7 @@ pub fn plan_hls_transcode(
                     "audio-decode0",
                     TranscodeStageKind::AudioDecode,
                     vec![track.id.clone()],
-                    "portable TrueHD decode can feed the target-native audio bridge",
+                    native_audio_decode_reason(track.codec.family),
                 ));
             } else {
                 let missing = format!("audioDecode:{}", capability_label(track.codec.family));
@@ -378,7 +378,15 @@ fn native_video_decode_reason(family: CodecFamily) -> &'static str {
 }
 
 fn native_audio_decode_ready(family: CodecFamily) -> bool {
-    family == CodecFamily::TrueHd
+    matches!(family, CodecFamily::TrueHd | CodecFamily::Dts)
+}
+
+fn native_audio_decode_reason(family: CodecFamily) -> &'static str {
+    match family {
+        CodecFamily::TrueHd => "portable TrueHD decode can feed the target-native audio bridge",
+        CodecFamily::Dts => "portable DTS Core decode can feed the target-native audio bridge",
+        _ => "portable audio decode can feed the target-native audio bridge",
+    }
 }
 
 fn audio_can_copy_for_hls(track: &MediaTrack, target: PlaybackTarget) -> bool {
@@ -424,7 +432,7 @@ fn audio_transcode_codec(target: PlaybackTarget, _family: CodecFamily) -> AudioC
 
 fn audio_transcode_channels(track: &MediaTrack, codec: AudioCodec) -> u32 {
     match codec {
-        AudioCodec::Aac if track.codec.family == CodecFamily::TrueHd => {
+        AudioCodec::Aac if matches!(track.codec.family, CodecFamily::TrueHd | CodecFamily::Dts) => {
             audio_channels(track).min(6)
         }
         AudioCodec::Aac => audio_channels(track).min(2),
@@ -667,26 +675,23 @@ mod tests {
     }
 
     #[test]
-    fn dts_audio_requires_missing_native_decoder_capability() {
+    fn dts_audio_uses_portable_decode_and_aac_encode() {
         let probe = probe_with_tracks(vec![
             video_track("v0", CodecFamily::H264, 1_920, 1_080, 8_000_000, None),
-            audio_track("a0", CodecFamily::Dts, true, 8, 48_000, Some(1_536_000)),
+            audio_track("a0", CodecFamily::Dts, true, 6, 48_000, Some(1_536_000)),
         ]);
 
         let plan = plan_hls_transcode(&probe, request(PlaybackTarget::AppleNative, false, None));
 
-        assert!(!plan.engine_executable);
+        assert!(plan.engine_executable);
+        assert!(plan.missing_capabilities.is_empty());
         let audio = plan.output.audio.as_ref().unwrap();
         assert_eq!(audio.codec, AudioCodec::Aac);
-        assert_eq!(audio.channels, 2);
-        assert!(
-            plan.missing_capabilities
-                .iter()
-                .any(|capability| capability == "audioDecode:dts")
-        );
+        assert_eq!(audio.channels, 6);
         assert!(plan.stages.iter().any(|stage| {
             stage.kind == TranscodeStageKind::AudioDecode
-                && stage.status == TranscodeStageStatus::NativeMissing
+                && stage.status == TranscodeStageStatus::NativeReady
+                && stage.reason.contains("portable DTS Core")
         }));
     }
 
@@ -728,7 +733,7 @@ mod tests {
     }
 
     #[test]
-    fn primary_audio_prefers_executable_truehd_over_unsupported_default() {
+    fn primary_audio_keeps_executable_default_dts() {
         let probe = probe_with_tracks(vec![
             video_track("v0", CodecFamily::H264, 1_920, 1_080, 8_000_000, None),
             audio_track("a0", CodecFamily::Dts, true, 6, 48_000, Some(1_536_000)),
@@ -737,7 +742,7 @@ mod tests {
 
         let plan = plan_hls_transcode(&probe, request(PlaybackTarget::Browser, false, None));
 
-        assert_eq!(plan.selected_audio_track_id.as_deref(), Some("a1"));
+        assert_eq!(plan.selected_audio_track_id.as_deref(), Some("a0"));
         assert!(plan.engine_executable);
         assert_eq!(plan.output.audio.as_ref().unwrap().codec, AudioCodec::Aac);
     }
@@ -757,12 +762,8 @@ mod tests {
 
         assert_eq!(plan.selected_audio_track_id.as_deref(), Some("a0"));
         assert_eq!(plan.output.audio.as_ref().unwrap().codec, AudioCodec::Aac);
-        assert!(!plan.engine_executable);
-        assert!(
-            plan.missing_capabilities
-                .iter()
-                .any(|capability| capability == "audioDecode:dts")
-        );
+        assert!(plan.engine_executable);
+        assert!(plan.missing_capabilities.is_empty());
     }
 
     fn request(

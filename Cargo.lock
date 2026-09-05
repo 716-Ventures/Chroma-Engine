@@ -311,6 +311,7 @@ dependencies = [
  "openh264",
  "oxideav-ac3",
  "oxideav-core",
+ "oxideav-dts",
  "proptest",
  "rust_h265",
  "rusty_aac",
@@ -1204,6 +1205,11 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.20",
 ]
+
+[[package]]
+name = "oxideav-dts"
+version = "0.0.1"
+source = "git+https://github.com/OxideAV/oxideav-dts.git?rev=951b4221969b742b1b330149106931f8be416d47#951b4221969b742b1b330149106931f8be416d47"
 
 [[package]]
 name = "pin-project-lite"

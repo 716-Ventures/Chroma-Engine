@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added a retained portable DTS Core decoder from a pinned `oxideav-dts` revision, with DTS-HD
+  core extraction, checked channel ordering, continuous sample-clock timing, DTS-to-AAC fMP4
+  routing, and real-media latency validation.
 - Added retained, safe-Rust AC-3 and E-AC-3 encoders with continuous sample clocks, checked PCM
   input, dac3/dec3 extraction, partial-frame flushing, and executable platform warmups.
 - Added an opt-in, release-enabled Linux VA-API H.264 decoder using retained stateless packet
@@ -36,7 +39,8 @@
 - Replaced eager whole-file Matroska transcode indexes with cue-derived plans and bounded
   per-segment packet windows, and normalized packet-copy composition offsets before fMP4 muxing.
 - Unified audio selection across playback planning, transcode planning, and Matroska execution so
-  copyable tracks remain preferred and portable TrueHD bridges outrank unsupported DTS defaults.
+  copyable tracks remain preferred and portable TrueHD/DTS bridges remain executable when no
+  copyable alternate exists.
 - Added native Ubuntu ARM64 and Windows ARM64 CI checks, portable-codec tests, and release builds.
 - Added retained VideoToolbox H.264/HEVC decoder and H.264 encoder sessions plus retained
   AudioToolbox AAC converter sessions, with explicit batch counters and discontinuity resets.

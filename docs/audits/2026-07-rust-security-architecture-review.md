@@ -3,7 +3,7 @@
 > Historical review: this document describes revision `362324a`. The September 2026 remediation
 > replaced file-sized heap storage with a clone-or-retained-handle file-backed source view, enforced
 > parser limits and signed timing, corrected capability states and callback accounting, removed
-> the rejected DTS decoder, added stateful playback/transcode sessions, centralized immutable
+> the then-rejected DTS decoder, added stateful playback/transcode sessions, centralized immutable
 > output publication, expanded multi-platform CI/fuzz/release gates, and eliminated the `block`
 > future-incompatibility warning. Keep the findings below as rationale and audit history rather
 > than as a description of the current tree.
@@ -130,6 +130,11 @@ Acceptance tests:
 - Contract tests assert every selectable backend has a callable implementation and successful warmup path.
 
 ### CE-004: Rejected DTS implementation is still in production
+
+Resolution (2026-09): The old vendored implementation remains removed. DTS was reintroduced from
+upstream commit `951b422` only after decoder-only and end-to-end real-media benchmarks demonstrated
+sub-realtime operation, with retained state, explicit six-channel bounds, tests, dependency policy,
+and licensing notices. The historical finding and remediation below describe the superseded code.
 
 Locations: `Cargo.toml:28-29`, `vendor/oxideav-dts-0.0.1`, `src/transcode/audio_decode.rs:239-330`, `src/transcode/segment.rs:699-760`, `src/lib.rs:68-89`
 

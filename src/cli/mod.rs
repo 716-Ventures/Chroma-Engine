@@ -22,11 +22,11 @@ use crate::probe::probe_media_source;
 use crate::session::{AudioSelection, PlaybackConstraints, PlaybackTarget, plan_playback};
 use crate::source::MappedMediaFile;
 use crate::transcode::{
-    AudioDecodeCodec, HlsTranscodeRequest, NativeFmp4TranscodeOptions, NativeFmp4TranscodeSession,
-    NativeFmp4VideoMode, RawVideoFormat, RawVideoPixelFormat, VideoCodec, build_audio_decode_input,
-    build_video_decode_input, plan_hls_transcode, probe_dts_audio_bridge,
-    write_native_fmp4_transcode_init, write_native_fmp4_transcode_segment,
-    write_native_fmp4_transcode_start,
+    AudioDecodeCodec, CpuEac3EncoderSession, DtsAudioDecoderSession, HlsTranscodeRequest,
+    NativeFmp4TranscodeOptions, NativeFmp4TranscodeSession, NativeFmp4VideoMode, RawVideoFormat,
+    RawVideoPixelFormat, VideoCodec, build_audio_decode_input, build_video_decode_input,
+    plan_hls_transcode, probe_dts_audio_bridge, write_native_fmp4_transcode_init,
+    write_native_fmp4_transcode_segment, write_native_fmp4_transcode_start,
 };
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
@@ -1206,18 +1206,31 @@ fn decode_matroska_audio_chunk(
         true,
     )?;
     let probe = probe_dts_audio_bridge(&decode_input)?;
-    if !probe_only {
-        bail!("DTS decode is currently unsupported; use --probe-only for DTS packet inspection");
-    }
+    let decoded = (!probe_only)
+        .then(|| DtsAudioDecoderSession::new().decode(&decode_input))
+        .transpose()?;
+    let decoded_pcm_frame_count = decoded.as_ref().map_or(0, |output| output.frames.len());
+    let decoded_samples = decoded.as_ref().map_or(0, |output| {
+        output
+            .frames
+            .iter()
+            .map(|frame| frame.samples.len() as u64)
+            .sum()
+    });
 
     Ok(DecodeAudioChunkOutput {
         track_id,
         chunk_index: manifest.chunk.index,
         codec: AudioDecodeCodec::Dts,
-        decoder: "dts-core-probe".to_string(),
+        decoder: if probe_only {
+            "dts-core-probe"
+        } else {
+            "oxideav-dts-core"
+        }
+        .to_string(),
         packet_count: probe.packet_count,
         dts_core_frame_count: probe.dts_core_frame_count,
-        decoded_pcm_frame_count: 0,
+        decoded_pcm_frame_count,
         sample_rate: probe.pcm_format.sample_rate,
         channels: probe.pcm_format.channels,
         time_scale,
@@ -1225,8 +1238,8 @@ fn decode_matroska_audio_chunk(
         last_pts: probe.last_pts,
         stable_format: probe.stable_format,
         pcm_frames_per_channel: probe.pcm_frame_count,
-        decoded_samples: 0,
-        decoded_bytes: 0,
+        decoded_samples,
+        decoded_bytes: decoded_samples.saturating_mul(2),
         probe_only,
     })
 }
@@ -1236,7 +1249,7 @@ fn bridge_audio_chunk(
     requested_track_id: Option<&str>,
     chunk_index: u32,
     target_ms: u64,
-    _bitrate: u32,
+    bitrate: u32,
 ) -> Result<BridgeAudioChunkOutput> {
     if !looks_like_ebml(bytes) {
         bail!("bridge-audio-chunk currently supports Matroska/WebM DTS packet tables");
@@ -1265,8 +1278,53 @@ fn bridge_audio_chunk(
         &payload,
         true,
     )?;
-    let _probe = probe_dts_audio_bridge(&decode_input)?;
-    bail!("DTS audio bridge is unsupported until Chroma Engine has a measured native DTS decoder")
+    let probe = probe_dts_audio_bridge(&decode_input)?;
+    let decoded = DtsAudioDecoderSession::new().decode(&decode_input)?;
+    let mut encoder = CpuEac3EncoderSession::new(decoded.format, bitrate)?;
+    let mut encoded_frame_count = 0_usize;
+    let mut encoded_bytes = 0_u64;
+    for frame in &decoded.frames {
+        let encoded = encoder.encode(&frame.samples)?;
+        encoded_frame_count += encoded.frames.len();
+        encoded_bytes = encoded_bytes.saturating_add(
+            encoded
+                .frames
+                .iter()
+                .map(|frame| frame.payload.len() as u64)
+                .sum(),
+        );
+    }
+    let flushed = encoder.finish()?;
+    encoded_frame_count += flushed.frames.len();
+    encoded_bytes = encoded_bytes.saturating_add(
+        flushed
+            .frames
+            .iter()
+            .map(|frame| frame.payload.len() as u64)
+            .sum(),
+    );
+    let decoded_samples = decoded
+        .frames
+        .iter()
+        .map(|frame| frame.samples.len() as u64)
+        .sum();
+    Ok(BridgeAudioChunkOutput {
+        track_id,
+        chunk_index: manifest.chunk.index,
+        source_codec: AudioDecodeCodec::Dts,
+        decoder: "oxideav-dts-core".to_string(),
+        encoder: "chroma-cpu-eac3".to_string(),
+        packet_count: probe.packet_count,
+        decoded_pcm_frame_count: decoded.frames.len(),
+        encoded_frame_count,
+        sample_rate: decoded.format.sample_rate,
+        channels: decoded.format.channels,
+        bitrate,
+        decoded_samples,
+        encoded_bytes,
+        first_pts: decoded.frames.first().map(|frame| frame.timing.pts),
+        last_pts: decoded.frames.last().map(|frame| frame.timing.pts),
+    })
 }
 
 fn decode_mp4_chunk(
