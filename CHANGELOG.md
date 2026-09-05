@@ -5,6 +5,9 @@
 - Added retained Linux Intel Quick Sync H.264/HEVC decode and Main encode sessions through the
   runtime-loaded iHD/i965 VA-API driver. QSV selection now requires an Intel vendor render node and
   real codec probes, remains distinct from generic VA-API, and adds no oneVPL link dependency.
+- Added checked NVDEC HEVC Main10 output by vendoring the audited MIT-licensed bridge, selecting
+  NVIDIA P016 surfaces for high-bit-depth streams, preserving MSB-aligned 16-bit planes through
+  CUDA readback, and converting them to BGRA with explicit geometry validation.
 
 - Added retained Windows hardware H.264 decoding through Media Foundation and D3D11, including
   a hardware-only transform, NV12 texture staging readback, checked padded-plane conversion to
@@ -18,10 +21,9 @@
   libraries, with checked BGRA-to-I420 conversion, AVCC/hvcC output, timing preservation, real
   encode capability smoke probes, and automatic fallback when NVIDIA hardware or drivers are
   unavailable.
-- Added retained Linux NVIDIA NVDEC H.264 and HEVC Main decoding with runtime codec-capability
+- Added retained Linux NVIDIA NVDEC H.264 and HEVC Main/Main10 decoding with runtime codec-capability
   queries, length-prefixed-to-Annex-B packet conversion, decode-order-safe timing, checked
-  I420-to-BGRA output, and portable fallback. Main10 remains on VA-API or the CPU decoder until the
-  NVIDIA runtime exposes a checked P010 host-output path.
+  planar 8/10-bit-to-BGRA output, and portable fallback.
 - Replaced placeholder Windows DirectX decode detection with real Media Foundation hardware-MFT
   enumeration and activation probes for H.264 and HEVC decode/encode transforms.
 - Added a retained portable DTS Core decoder from a pinned `oxideav-dts` revision, with DTS-HD

@@ -1199,7 +1199,7 @@ fn linux_nvidia_decode_device_present() -> bool {
 fn linux_nvdec_decode_supported(codec: VideoCodec) -> bool {
     use std::sync::OnceLock;
 
-    static SUPPORT: OnceLock<(bool, bool)> = OnceLock::new();
+    static SUPPORT: OnceLock<(bool, bool, bool)> = OnceLock::new();
     let support = SUPPORT.get_or_init(|| {
         let query = || {
             let cuda = oxideav_nvidia::Cuda::init().ok()?;
@@ -1222,13 +1222,20 @@ fn linux_nvdec_decode_supported(codec: VideoCodec) -> bool {
             )
             .ok()
             .is_some_and(|caps| caps.is_supported != 0);
-            Some((h264, hevc))
+            let hevc_main10 = oxideav_nvidia::nvdec_caps(
+                oxideav_nvidia::CudaVideoCodec::Hevc,
+                oxideav_nvidia::sys::CUDA_VIDEO_CHROMA_FORMAT_420,
+                10,
+            )
+            .ok()
+            .is_some_and(|caps| caps.is_supported != 0);
+            Some((h264, hevc, hevc_main10))
         };
-        query().unwrap_or((false, false))
+        query().unwrap_or((false, false, false))
     });
     match codec {
         VideoCodec::H264 => support.0,
-        VideoCodec::Hevc => support.1,
+        VideoCodec::Hevc => support.1 || support.2,
         VideoCodec::Av1 => false,
     }
 }
@@ -1246,7 +1253,7 @@ fn linux_nvdec_decode_unavailable_reason(codec: VideoCodec) -> String {
         return "NVIDIA decode device was not detected under /dev/nvidiactl".to_string();
     }
     if !linux_nvdec_decode_supported(codec) {
-        return format!("NVDEC does not report 8-bit YUV420 {codec:?} decode support");
+        return format!("NVDEC does not report supported YUV420 {codec:?} decode capability");
     }
     "NVDEC decoder is unavailable".to_string()
 }

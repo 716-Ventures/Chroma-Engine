@@ -1,0 +1,15 @@
+[package]
+name = "oxideav-nvidia"
+version = "0.0.3"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT"
+repository = "https://github.com/OxideAV/oxideav-nvidia"
+description = "Locally patched runtime-loaded NVIDIA NVDEC bridge for Chroma Engine"
+
+[dependencies]
+oxideav-core = "0.1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libloading = "0.8"
+

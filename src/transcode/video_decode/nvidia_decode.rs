@@ -24,6 +24,7 @@ struct NvdecDecoderCore {
     output_format: RawVideoFormat,
     codec: VideoCodec,
     decoder_name: &'static str,
+    ten_bit: bool,
     decoder: Box<dyn oxideav_core::Decoder>,
     nalu_length_size: u8,
     parameter_sets: Option<Vec<u8>>,
@@ -95,6 +96,7 @@ impl NvdecH264BgraDecoderSession {
                 "chroma-nvdec-h264-decoder",
                 config.nalu_length_size,
                 parameter_sets,
+                false,
             )?,
         })
     }
@@ -126,14 +128,17 @@ impl NvdecHevcBgraDecoderSession {
                     reason: error.to_string(),
                 }
             })?;
-        if crate::codec::pixel_format::pixel_format_from_hevc_decoder_config(decoder_config)
-            .as_deref()
-            != Some("yuv420-8bit")
-        {
-            return Err(VideoDecodeError::BackendUnavailable {
-                reason: "NVDEC HEVC currently supports 8-bit YUV420 input".to_string(),
-            });
-        }
+        let pixel_format =
+            crate::codec::pixel_format::pixel_format_from_hevc_decoder_config(decoder_config);
+        let ten_bit = match pixel_format.as_deref() {
+            Some("yuv420-8bit") => false,
+            Some("yuv420-10bit") => true,
+            _ => {
+                return Err(VideoDecodeError::BackendUnavailable {
+                    reason: "NVDEC HEVC supports 8-bit or 10-bit YUV420 input".to_string(),
+                });
+            }
+        };
         if !(32..=34).all(|nal_type| {
             config
                 .arrays
@@ -152,6 +157,7 @@ impl NvdecHevcBgraDecoderSession {
                 "chroma-nvdec-hevc-decoder",
                 config.nalu_length_size,
                 parameter_sets,
+                ten_bit,
             )?,
         })
     }
@@ -177,6 +183,7 @@ impl NvdecDecoderCore {
         decoder_name: &'static str,
         nalu_length_size: u8,
         parameter_sets: Vec<u8>,
+        ten_bit: bool,
     ) -> Result<Self, VideoDecodeError> {
         let mut parameters = CodecParameters::video(CodecId::new(match codec {
             VideoCodec::H264 => "h264",
@@ -185,7 +192,11 @@ impl NvdecDecoderCore {
         }));
         parameters.width = Some(output_format.width);
         parameters.height = Some(output_format.height);
-        parameters.pixel_format = Some(PixelFormat::Yuv420P);
+        parameters.pixel_format = Some(if ten_bit {
+            PixelFormat::Yuv420P10Le
+        } else {
+            PixelFormat::Yuv420P
+        });
         let decoder = match codec {
             VideoCodec::H264 => oxideav_nvidia::H264NvDecoder::make(&parameters),
             VideoCodec::Hevc => oxideav_nvidia::HevcNvDecoder::make(&parameters),
@@ -196,6 +207,7 @@ impl NvdecDecoderCore {
             output_format,
             codec,
             decoder_name,
+            ten_bit,
             decoder,
             nalu_length_size,
             parameter_sets: Some(parameter_sets),
@@ -312,7 +324,12 @@ impl NvdecDecoderCore {
                     .ok_or_else(|| VideoDecodeError::BackendFailed {
                         reason: format!("NVDEC returned unknown timestamp token {token}"),
                     })?;
-            frames.push(copy_i420_to_bgra(decoded, self.output_format, timing)?);
+            frames.push(copy_planar_420_to_bgra(
+                decoded,
+                self.output_format,
+                timing,
+                self.ten_bit,
+            )?);
         }
     }
 }
@@ -326,10 +343,11 @@ fn packet_timing(packet: &CompressedVideoPacket<'_>) -> CpuDecodeTiming {
     }
 }
 
-fn copy_i420_to_bgra(
+fn copy_planar_420_to_bgra(
     frame: VideoFrame,
     format: RawVideoFormat,
     timing: CpuDecodeTiming,
+    ten_bit: bool,
 ) -> Result<DecodedVideoFrame, VideoDecodeError> {
     if frame.planes.len() < 3 {
         return Err(VideoDecodeError::BackendFailed {
@@ -346,16 +364,45 @@ fn copy_i420_to_bgra(
     let y = &frame.planes[0];
     let u = &frame.planes[1];
     let v = &frame.planes[2];
-    validate_plane("Y", y.stride, width, height, y.data.len())?;
-    validate_plane("U", u.stride, chroma_width, chroma_height, u.data.len())?;
-    validate_plane("V", v.stride, chroma_width, chroma_height, v.data.len())?;
+    let bytes_per_sample = if ten_bit { 2 } else { 1 };
+    validate_plane(
+        "Y",
+        y.stride,
+        width * bytes_per_sample,
+        height,
+        y.data.len(),
+    )?;
+    validate_plane(
+        "U",
+        u.stride,
+        chroma_width * bytes_per_sample,
+        chroma_height,
+        u.data.len(),
+    )?;
+    validate_plane(
+        "V",
+        v.stride,
+        chroma_width * bytes_per_sample,
+        chroma_height,
+        v.data.len(),
+    )?;
     let mut pixels = vec![0_u8; width * height * 4];
     for row in 0..height {
         for column in 0..width {
+            let y_offset = row * y.stride + column * bytes_per_sample;
+            let u_offset = (row / 2) * u.stride + (column / 2) * bytes_per_sample;
+            let v_offset = (row / 2) * v.stride + (column / 2) * bytes_per_sample;
+            let sample = |plane: &[u8], offset: usize| {
+                if ten_bit {
+                    (u16::from_le_bytes([plane[offset], plane[offset + 1]]) >> 8) as u8
+                } else {
+                    plane[offset]
+                }
+            };
             let components = super::limited_yuv_to_bgra(
-                y.data[row * y.stride + column],
-                u.data[(row / 2) * u.stride + column / 2],
-                v.data[(row / 2) * v.stride + column / 2],
+                sample(&y.data, y_offset),
+                sample(&u.data, u_offset),
+                sample(&v.data, v_offset),
             );
             let offset = (row * width + column) * 4;
             pixels[offset..offset + 4].copy_from_slice(&components);
@@ -443,7 +490,7 @@ mod tests {
         let scale = crate::packet::TimeScale {
             units_per_second: 24,
         };
-        let decoded = copy_i420_to_bgra(
+        let decoded = copy_planar_420_to_bgra(
             frame,
             format,
             CpuDecodeTiming {
@@ -452,6 +499,7 @@ mod tests {
                 duration: crate::packet::TimeDelta { units: 1, scale },
                 keyframe: true,
             },
+            false,
         )
         .expect("convert I420");
 
@@ -462,5 +510,49 @@ mod tests {
     fn rejects_short_i420_plane() {
         let error = validate_plane("Y", 2, 2, 2, 3).expect_err("short plane");
         assert!(error.to_string().contains("too short"));
+    }
+
+    #[test]
+    fn converts_planar_p016_black_to_bgra() {
+        let format = RawVideoFormat {
+            width: 2,
+            height: 2,
+            frame_rate_num: 24,
+            frame_rate_den: 1,
+            pixel_format: super::super::RawVideoPixelFormat::Bgra,
+        };
+        let frame = VideoFrame {
+            pts: Some(1),
+            planes: vec![
+                VideoPlane {
+                    stride: 4,
+                    data: [0x00, 0x10].repeat(4),
+                },
+                VideoPlane {
+                    stride: 2,
+                    data: vec![0x00, 0x80],
+                },
+                VideoPlane {
+                    stride: 2,
+                    data: vec![0x00, 0x80],
+                },
+            ],
+        };
+        let scale = crate::packet::TimeScale {
+            units_per_second: 24,
+        };
+        let decoded = copy_planar_420_to_bgra(
+            frame,
+            format,
+            CpuDecodeTiming {
+                pts: crate::packet::TimePoint { units: 0, scale },
+                dts: crate::packet::TimePoint { units: 0, scale },
+                duration: crate::packet::TimeDelta { units: 1, scale },
+                keyframe: true,
+            },
+            true,
+        )
+        .expect("convert P016");
+        assert_eq!(decoded.pixels, [0, 0, 0, 255].repeat(4));
     }
 }

@@ -26,6 +26,9 @@ OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWA
 
 ## oxideav-nvidia
 
+Chroma Engine vendors and modifies oxideav-nvidia v0.0.3 to preserve NVDEC P016/Main10 output.
+The original source is available at <https://github.com/OxideAV/oxideav-nvidia>.
+
 MIT License
 
 Copyright (c) 2026 Karpelès Lab Inc.
