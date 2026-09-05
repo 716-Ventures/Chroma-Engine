@@ -21,4 +21,4 @@ CI runs the complete check, Clippy, test, documentation, and release-build gates
 
 Hardware capability states stay deliberately conservative: `modeled` and `detected` backends cannot be selected. Only executable or verified implementations may enter a runtime plan.
 
-Linux VA-API probing loads `libva.so.2` and `libva-drm.so.2` at runtime, opens each DRM render node, and checks H.264/HEVC profiles for the VLD decode entrypoint. It does not require libva headers or a link-time libva dependency. A missing runtime, inaccessible device, or unsupported profile leaves the portable CPU path intact and reports a diagnostic through `decoder-probe`.
+Linux VA-API probing loads `libva.so.2` and `libva-drm.so.2` at runtime, opens each DRM render node, checks H.264/HEVC profiles for the VLD decode entrypoint, and creates a small codec config, surface, and decode context. It does not require libva headers or a link-time libva dependency. A missing runtime, inaccessible device, unsupported profile, or allocation failure leaves the portable CPU path intact and reports a diagnostic through `decoder-probe`.
