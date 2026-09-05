@@ -4,6 +4,12 @@ use thiserror::Error;
 use crate::packet::{TimeDelta, TimePoint, TimeScale};
 use crate::transcode::VideoCodec;
 
+#[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
+mod vaapi_encode;
+
+#[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
+pub use vaapi_encode::VaapiH264EncoderSession;
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 /// Raw video frame format accepted by native video encoders.
@@ -219,6 +225,9 @@ pub enum H264EncoderSession {
     VideoToolbox(VideoToolboxH264EncoderSession),
     /// Portable OpenH264 software encoder.
     Cpu(Box<CpuH264EncoderSession>),
+    /// Linux VA-API H.264 encoder selected when a compatible render node is available.
+    #[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
+    Vaapi(Box<VaapiH264EncoderSession>),
 }
 
 impl H264EncoderSession {
@@ -227,6 +236,10 @@ impl H264EncoderSession {
         #[cfg(target_os = "macos")]
         if let Ok(session) = VideoToolboxH264EncoderSession::new(format, bitrate) {
             return Ok(Self::VideoToolbox(session));
+        }
+        #[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
+        if let Ok(session) = VaapiH264EncoderSession::new(format, bitrate) {
+            return Ok(Self::Vaapi(Box::new(session)));
         }
         CpuH264EncoderSession::new(format, bitrate).map(|session| Self::Cpu(Box::new(session)))
     }
@@ -239,6 +252,8 @@ impl H264EncoderSession {
         match self {
             Self::VideoToolbox(session) => session.encode(frames),
             Self::Cpu(session) => session.encode(frames),
+            #[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
+            Self::Vaapi(session) => session.encode(frames),
         }
     }
 
@@ -247,6 +262,8 @@ impl H264EncoderSession {
         match self {
             Self::VideoToolbox(session) => session.encoded_batches(),
             Self::Cpu(session) => session.encoded_batches(),
+            #[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
+            Self::Vaapi(session) => session.encoded_batches(),
         }
     }
 
@@ -255,6 +272,8 @@ impl H264EncoderSession {
         match self {
             Self::VideoToolbox(_) => "chroma-videotoolbox-h264",
             Self::Cpu(_) => "chroma-cpu-h264",
+            #[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
+            Self::Vaapi(_) => "chroma-vaapi-h264",
         }
     }
 }

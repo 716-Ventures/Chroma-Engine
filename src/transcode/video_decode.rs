@@ -9,7 +9,7 @@ use crate::{
 use super::yuv::limited_yuv_to_bgra;
 
 #[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
-mod vaapi_decode;
+pub(in crate::transcode) mod vaapi_decode;
 
 #[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
 pub use vaapi_decode::{VaapiH264BgraDecoderSession, VaapiHevcBgraDecoderSession};

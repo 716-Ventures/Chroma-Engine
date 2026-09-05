@@ -409,7 +409,7 @@ fn copy_frame(
 }
 
 #[derive(Debug)]
-struct VaapiCpuFrame {
+pub(in crate::transcode) struct VaapiCpuFrame {
     allocation: NonNull<u8>,
     allocation_layout: Layout,
     resolution: Resolution,
@@ -419,7 +419,10 @@ struct VaapiCpuFrame {
 }
 
 impl VaapiCpuFrame {
-    fn new(resolution: Resolution, decoded_format: DecodedFormat) -> Result<Self, String> {
+    pub(in crate::transcode) fn new(
+        resolution: Resolution,
+        decoded_format: DecodedFormat,
+    ) -> Result<Self, String> {
         let bytes_per_sample = match decoded_format {
             DecodedFormat::NV12 => 1,
             DecodedFormat::I010 => 2,
@@ -462,6 +465,83 @@ impl VaapiCpuFrame {
             uv_offset,
         })
     }
+
+    pub(in crate::transcode) fn frame_layout(&self) -> nuxodecs::FrameLayout {
+        nuxodecs::FrameLayout {
+            format: (self.fourcc(), 0),
+            size: self.resolution,
+            planes: vec![
+                nuxodecs::PlaneLayout {
+                    buffer_index: 0,
+                    offset: 0,
+                    stride: self.stride,
+                },
+                nuxodecs::PlaneLayout {
+                    buffer_index: 0,
+                    offset: self.uv_offset,
+                    stride: self.stride,
+                },
+            ],
+        }
+    }
+
+    pub(in crate::transcode) fn copy_bgra_to_nv12(&mut self, bgra: &[u8]) -> Result<(), String> {
+        if self.decoded_format != DecodedFormat::NV12 {
+            return Err("BGRA upload currently requires an NV12 VA-API surface".to_string());
+        }
+        let width = self.resolution.width as usize;
+        let height = self.resolution.height as usize;
+        let expected = width
+            .checked_mul(height)
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or("BGRA input size overflowed")?;
+        if bgra.len() != expected {
+            return Err(format!(
+                "BGRA input has {} bytes, expected {expected}",
+                bgra.len()
+            ));
+        }
+        // SAFETY: the allocation is exclusively borrowed and both plane ranges are in bounds.
+        let bytes = unsafe {
+            std::slice::from_raw_parts_mut(self.allocation.as_ptr(), self.allocation_layout.size())
+        };
+        for row in 0..height {
+            for column in 0..width {
+                let source = (row * width + column) * 4;
+                let b = i32::from(bgra[source]);
+                let g = i32::from(bgra[source + 1]);
+                let r = i32::from(bgra[source + 2]);
+                bytes[row * self.stride + column] =
+                    (((47 * r + 157 * g + 16 * b + 128) >> 8) + 16).clamp(0, 255) as u8;
+            }
+        }
+        for row in (0..height).step_by(2) {
+            for column in (0..width).step_by(2) {
+                let mut r = 0_i32;
+                let mut g = 0_i32;
+                let mut b = 0_i32;
+                let mut count = 0_i32;
+                for y in row..(row + 2).min(height) {
+                    for x in column..(column + 2).min(width) {
+                        let source = (y * width + x) * 4;
+                        b += i32::from(bgra[source]);
+                        g += i32::from(bgra[source + 1]);
+                        r += i32::from(bgra[source + 2]);
+                        count += 1;
+                    }
+                }
+                r /= count;
+                g /= count;
+                b /= count;
+                let destination = self.uv_offset + (row / 2) * self.stride + column;
+                bytes[destination] =
+                    (((-26 * r - 87 * g + 112 * b + 128) >> 8) + 128).clamp(0, 255) as u8;
+                bytes[destination + 1] =
+                    (((112 * r - 102 * g - 10 * b + 128) >> 8) + 128).clamp(0, 255) as u8;
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Drop for VaapiCpuFrame {
@@ -478,7 +558,7 @@ unsafe impl Send for VaapiCpuFrame {}
 unsafe impl Sync for VaapiCpuFrame {}
 
 #[derive(Debug)]
-struct VaapiUserPtrDescriptor {
+pub(in crate::transcode) struct VaapiUserPtrDescriptor {
     allocation_size: usize,
     resolution: Resolution,
     decoded_format: DecodedFormat,
@@ -633,6 +713,21 @@ mod tests {
         assert_eq!(frame.fourcc(), Fourcc::from(b"P010"));
         assert_eq!(frame.get_plane_pitch(), vec![3840, 3840]);
         assert_eq!(frame.get_plane_size(), vec![4_147_200, 2_073_600]);
+    }
+
+    #[test]
+    fn bgra_upload_produces_limited_range_nv12() {
+        let mut black = VaapiCpuFrame::new(Resolution::from((2, 2)), DecodedFormat::NV12).unwrap();
+        black.copy_bgra_to_nv12(&[0; 16]).unwrap();
+        let mapping = black.map().unwrap();
+        let planes = mapping.get();
+        assert_eq!(&planes[0][..2], &[16, 16]);
+        assert_eq!(&planes[1][..2], &[128, 128]);
+
+        let mut white = VaapiCpuFrame::new(Resolution::from((2, 2)), DecodedFormat::NV12).unwrap();
+        white.copy_bgra_to_nv12(&[255; 16]).unwrap();
+        let mapping = white.map().unwrap();
+        assert_eq!(&mapping.get()[0][..2], &[235, 235]);
     }
 
     #[test]

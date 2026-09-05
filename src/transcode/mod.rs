@@ -48,6 +48,8 @@ pub use video_decode::{
 };
 #[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
 pub use video_decode::{VaapiH264BgraDecoderSession, VaapiHevcBgraDecoderSession};
+#[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
+pub use video_encode::VaapiH264EncoderSession;
 pub use video_encode::{
     CpuH264EncoderSession, EncodedVideoFrame, EncodedVideoOutput, EncodedVideoStream,
     H264EncoderSession, RawVideoFormat, RawVideoFrameRef, RawVideoPixelFormat, VideoEncodeError,

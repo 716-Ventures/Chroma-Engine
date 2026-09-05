@@ -74,6 +74,8 @@ pub use session::{
     PlaybackPlan, PlaybackTarget, StageKind, StageMode, TransportKind, TransportPlan,
     plan_multi_audio_outputs, plan_playback,
 };
+#[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
+pub use transcode::VaapiH264EncoderSession;
 pub use transcode::{
     AacEncoderSession, AudioClockConfig, AudioCodec, AudioDecodeCodec, AudioDecodeError,
     AudioDecodeInput, AudioEncodeError, AudioFrameTiming, AudioOp, AudioSampleClock,

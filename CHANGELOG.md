@@ -7,6 +7,9 @@
   OpenH264 fallback when libva or a suitable DRM render node is unavailable.
 - Extended the retained Linux VA-API decoder to HEVC Main/Main10 with direct P010 surfaces and the
   same safe-Rust fallback used by portable and NAS deployments.
+- Added retained Linux VA-API H.264 encoding from the BGRA pipeline boundary, including checked
+  NV12 upload, Annex-B-to-AVCC conversion, avcC extraction, runtime smoke probing, and OpenH264
+  fallback.
 - Extended the runtime-loaded Linux VA-API probe through synchronized NV12/P010 image derivation,
   plane-layout validation, CPU buffer mapping, and balanced image cleanup without link-time GPU
   dependencies.
