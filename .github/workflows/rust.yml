@@ -223,6 +223,24 @@ jobs:
           Compress-Archive -Path dist/chroma-engine -DestinationPath "dist/$archive"
           $hash = (Get-FileHash "dist/$archive" -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  $archive" | Out-File "dist/$archive.sha256" -Encoding ascii
+      - name: Verify Unix release checksum
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          checksum="chroma-engine-${RUNNER_OS}-${RUNNER_ARCH}.tar.gz.sha256"
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            shasum -a 256 -c "dist/$checksum"
+          else
+            sha256sum -c "dist/$checksum"
+          fi
+      - name: Verify Windows release checksum
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $archive = "chroma-engine-$env:RUNNER_OS-$env:RUNNER_ARCH.zip"
+          $expected = (Get-Content "dist/$archive.sha256").Split()[0]
+          $actual = (Get-FileHash "dist/$archive" -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw "release archive checksum verification failed" }
       - name: Upload portable release bundle
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -262,8 +280,12 @@ jobs:
         run: cargo check --locked --all-targets --all-features
       - name: Test portable CPU codec
         run: cargo test --locked --all-features cpu_h264
-      - name: Build release binary
-        run: cargo build --locked --release --bin chroma-engine
+      - name: Install cargo-auditable
+        run: cargo install cargo-auditable --locked --version 0.7.5
+      - name: Build auditable release binary
+        env:
+          RUSTFLAGS: -A linker-messages
+        run: cargo auditable build --locked --release --bin chroma-engine
       - name: Prepare ARM64 release bundle
         shell: bash
         run: |
@@ -310,6 +332,18 @@ jobs:
           Compress-Archive -Path dist/chroma-engine -DestinationPath "dist/$archive"
           $hash = (Get-FileHash "dist/$archive" -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  $archive" | Out-File "dist/$archive.sha256" -Encoding ascii
+      - name: Verify Linux ARM64 release checksum
+        if: runner.os == 'Linux'
+        shell: bash
+        run: sha256sum -c "dist/chroma-engine-${RUNNER_OS}-${RUNNER_ARCH}.tar.gz.sha256"
+      - name: Verify Windows ARM64 release checksum
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $archive = "chroma-engine-$env:RUNNER_OS-$env:RUNNER_ARCH.zip"
+          $expected = (Get-Content "dist/$archive.sha256").Split()[0]
+          $actual = (Get-FileHash "dist/$archive" -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw "release archive checksum verification failed" }
       - name: Upload ARM64 release bundle
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:

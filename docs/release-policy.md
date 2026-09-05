@@ -46,9 +46,10 @@ executable. The checksum is for the exact `.tar.gz` or `.zip` archive uploaded b
 
 The CI `release-build` job uses `cargo auditable build --locked --release --bin chroma-engine` on
 macOS, Linux, and Windows, then smoke-tests and archives a self-contained runtime bundle with a
-SHA-256 checksum. Dedicated native ARM64 jobs compile all targets, test the portable codec, bundle
-dav1d, smoke-test the packaged executable, and upload checksummed archives on Ubuntu and Windows;
-Linux ARM64 is the baseline for ARM-based NAS deployments.
+SHA-256 checksum. Dedicated native ARM64 jobs compile all targets, test the portable codec, build
+with the same cargo-auditable metadata, bundle dav1d, smoke-test the packaged executable, verify
+its checksum, and upload the archive on Ubuntu and Windows; Linux ARM64 is the baseline for
+ARM-based NAS deployments.
 
 The Apple video boundary uses the maintained `objc2` framework crates and `block2`; the legacy
 `block 0.1.6` graph and its local compatibility patch are absent. Keep
