@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added retained, safe-Rust AC-3 and E-AC-3 encoders with continuous sample clocks, checked PCM
+  input, dac3/dec3 extraction, partial-frame flushing, and executable platform warmups.
 - Added an opt-in, release-enabled Linux VA-API H.264 decoder using retained stateless packet
   submission, page-aligned NV12 user-pointer surfaces, synchronized BGRA output, and automatic
   OpenH264 fallback when libva or a suitable DRM render node is unavailable.

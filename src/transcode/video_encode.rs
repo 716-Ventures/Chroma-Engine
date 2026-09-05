@@ -1469,6 +1469,7 @@ fn build_avc_decoder_config(parameter_sets: &[Vec<u8>], nal_length_size: i32) ->
     Some(out)
 }
 
+#[cfg(any(target_os = "macos", all(target_os = "linux", feature = "linux-vaapi")))]
 fn build_hevc_decoder_config(parameter_sets: &[Vec<u8>], nal_length_size: i32) -> Option<Vec<u8>> {
     let mut arrays: Vec<(u8, Vec<&[u8]>)> = Vec::new();
     let mut sps = None;

@@ -25,6 +25,212 @@ pub struct EncodedAudioOutput {
     pub frames: Vec<EncodedAudioFrame>,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum DolbyCodec {
+    Ac3,
+    Eac3,
+}
+
+struct DolbyEncoderSession {
+    format: PcmAudioFormat,
+    bitrate: u32,
+    codec: DolbyCodec,
+    encoded_batches: u64,
+    clock: AudioSampleClock,
+    decoder_config: Option<Vec<u8>>,
+    encoder: Box<dyn oxideav_core::Encoder>,
+}
+
+impl std::fmt::Debug for DolbyEncoderSession {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DolbyEncoderSession")
+            .field("format", &self.format)
+            .field("bitrate", &self.bitrate)
+            .field("codec", &self.codec)
+            .field("encoded_batches", &self.encoded_batches)
+            .field("next_sample", &self.clock.next_sample())
+            .finish_non_exhaustive()
+    }
+}
+
+impl DolbyEncoderSession {
+    fn new(
+        format: PcmAudioFormat,
+        bitrate: u32,
+        codec: DolbyCodec,
+    ) -> Result<Self, AudioEncodeError> {
+        validate_dolby_config(format, bitrate)?;
+        let channels =
+            u16::try_from(format.channels).map_err(|_| AudioEncodeError::InvalidInput {
+                reason: format!("unsupported Dolby channel count {}", format.channels),
+            })?;
+        let codec_id = match codec {
+            DolbyCodec::Ac3 => "ac3",
+            DolbyCodec::Eac3 => "eac3",
+        };
+        let mut params = oxideav_core::CodecParameters::audio(oxideav_core::CodecId::new(codec_id));
+        params.sample_rate = Some(format.sample_rate);
+        params.channels = Some(channels);
+        params.channel_layout = Some(oxideav_core::ChannelLayout::from_count(channels));
+        params.sample_format = Some(oxideav_core::SampleFormat::S16);
+        params.bit_rate = Some(u64::from(bitrate));
+        let encoder = match codec {
+            DolbyCodec::Ac3 => oxideav_ac3::encoder::make_encoder(&params),
+            DolbyCodec::Eac3 => oxideav_ac3::eac3::make_encoder(&params),
+        }
+        .map_err(|error| AudioEncodeError::BackendUnavailable {
+            reason: format!("portable {codec_id} encoder initialization failed: {error}"),
+        })?;
+        Ok(Self {
+            format,
+            bitrate,
+            codec,
+            encoded_batches: 0,
+            clock: AudioSampleClock::new(AudioClockConfig {
+                sample_rate: format.sample_rate,
+                discontinuity_threshold_ms: 100,
+            }),
+            decoder_config: None,
+            encoder,
+        })
+    }
+
+    fn encode(&mut self, pcm: &[i16]) -> Result<EncodedAudioOutput, AudioEncodeError> {
+        validate_pcm(self.format, pcm, self.bitrate)?;
+        let sample_count = pcm.len() / self.format.channels as usize;
+        let sample_count =
+            u32::try_from(sample_count).map_err(|_| AudioEncodeError::InvalidInput {
+                reason: "PCM batch contains more than u32::MAX samples per channel".to_string(),
+            })?;
+        let mut bytes = Vec::with_capacity(pcm.len().saturating_mul(2));
+        for sample in pcm {
+            bytes.extend_from_slice(&sample.to_le_bytes());
+        }
+        self.encoder
+            .send_frame(&oxideav_core::Frame::Audio(oxideav_core::AudioFrame {
+                samples: sample_count,
+                pts: None,
+                data: vec![bytes],
+            }))
+            .map_err(dolby_encode_error("PCM submission"))?;
+
+        self.encoded_batches = self.encoded_batches.saturating_add(1);
+        self.drain_packets()
+    }
+
+    fn finish(&mut self) -> Result<EncodedAudioOutput, AudioEncodeError> {
+        self.encoder.flush().map_err(dolby_encode_error("flush"))?;
+        self.drain_packets()
+    }
+
+    fn drain_packets(&mut self) -> Result<EncodedAudioOutput, AudioEncodeError> {
+        let mut frames = Vec::new();
+        loop {
+            match self.encoder.receive_packet() {
+                Ok(packet) => {
+                    let frame_samples = u32::try_from(packet.duration.unwrap_or(1_536))
+                        .unwrap_or(1_536)
+                        .max(1);
+                    if self.decoder_config.is_none() {
+                        self.decoder_config = match self.codec {
+                            DolbyCodec::Ac3 => {
+                                crate::codec::ac3::parse_ac3_specific_box(&packet.data)
+                                    .ok()
+                                    .map(|config| config.dac3_payload().to_vec())
+                            }
+                            DolbyCodec::Eac3 => {
+                                crate::codec::ac3::parse_eac3_specific_box(&packet.data)
+                                    .ok()
+                                    .map(|config| config.dec3_payload())
+                            }
+                        };
+                    }
+                    frames.push(frame_from_payload(
+                        &mut self.clock,
+                        packet.data,
+                        frame_samples,
+                    ));
+                }
+                Err(oxideav_core::Error::NeedMore) => break,
+                Err(error) => return Err(dolby_encode_error("packet receive")(error)),
+            }
+        }
+        Ok(EncodedAudioOutput {
+            stream: EncodedAudioStream {
+                codec: match self.codec {
+                    DolbyCodec::Ac3 => AudioCodec::Ac3,
+                    DolbyCodec::Eac3 => AudioCodec::Eac3,
+                },
+                sample_rate: self.format.sample_rate,
+                channels: self.format.channels,
+                decoder_config: self.decoder_config.clone(),
+            },
+            frames,
+        })
+    }
+}
+
+fn dolby_encode_error(
+    operation: &'static str,
+) -> impl FnOnce(oxideav_core::Error) -> AudioEncodeError {
+    move |error| AudioEncodeError::BackendFailed {
+        reason: format!("portable Dolby {operation} failed: {error}"),
+    }
+}
+
+/// Retained portable AC-3 encoder for interleaved signed 16-bit PCM.
+#[derive(Debug)]
+pub struct CpuAc3EncoderSession(DolbyEncoderSession);
+
+impl CpuAc3EncoderSession {
+    /// Creates a portable AC-3 encoder for one to six channels.
+    pub fn new(format: PcmAudioFormat, bitrate: u32) -> Result<Self, AudioEncodeError> {
+        DolbyEncoderSession::new(format, bitrate, DolbyCodec::Ac3).map(Self)
+    }
+
+    /// Encodes one PCM batch while retaining codec and sample-clock state.
+    pub fn encode(&mut self, pcm: &[i16]) -> Result<EncodedAudioOutput, AudioEncodeError> {
+        self.0.encode(pcm)
+    }
+
+    /// Flushes a zero-padded partial syncframe and returns all remaining output.
+    pub fn finish(&mut self) -> Result<EncodedAudioOutput, AudioEncodeError> {
+        self.0.finish()
+    }
+
+    /// Returns the number of PCM batches submitted to this session.
+    pub fn encoded_batches(&self) -> u64 {
+        self.0.encoded_batches
+    }
+}
+
+/// Retained portable E-AC-3 encoder for interleaved signed 16-bit PCM.
+#[derive(Debug)]
+pub struct CpuEac3EncoderSession(DolbyEncoderSession);
+
+impl CpuEac3EncoderSession {
+    /// Creates a portable E-AC-3 encoder for one to six channels.
+    pub fn new(format: PcmAudioFormat, bitrate: u32) -> Result<Self, AudioEncodeError> {
+        DolbyEncoderSession::new(format, bitrate, DolbyCodec::Eac3).map(Self)
+    }
+
+    /// Encodes one PCM batch while retaining codec and sample-clock state.
+    pub fn encode(&mut self, pcm: &[i16]) -> Result<EncodedAudioOutput, AudioEncodeError> {
+        self.0.encode(pcm)
+    }
+
+    /// Flushes a zero-padded partial syncframe and returns all remaining output.
+    pub fn finish(&mut self) -> Result<EncodedAudioOutput, AudioEncodeError> {
+        self.0.finish()
+    }
+
+    /// Returns the number of PCM batches submitted to this session.
+    pub fn encoded_batches(&self) -> u64 {
+        self.0.encoded_batches
+    }
+}
+
 /// Portable, retained AAC-LC encoder facade backed by safe scalar Rust code.
 pub struct CpuAacEncoderSession {
     format: PcmAudioFormat,
@@ -208,6 +414,45 @@ pub fn encode_aac_cpu_from_interleaved_i16(
     bitrate: u32,
 ) -> Result<EncodedAudioOutput, AudioEncodeError> {
     CpuAacEncoderSession::new(format, bitrate)?.encode(pcm)
+}
+
+/// Encodes interleaved signed 16-bit PCM with the portable AC-3 backend.
+pub fn encode_ac3_cpu_from_interleaved_i16(
+    format: PcmAudioFormat,
+    pcm: &[i16],
+    bitrate: u32,
+) -> Result<EncodedAudioOutput, AudioEncodeError> {
+    CpuAc3EncoderSession::new(format, bitrate)?.encode(pcm)
+}
+
+/// Encodes interleaved signed 16-bit PCM with the portable E-AC-3 backend.
+pub fn encode_eac3_cpu_from_interleaved_i16(
+    format: PcmAudioFormat,
+    pcm: &[i16],
+    bitrate: u32,
+) -> Result<EncodedAudioOutput, AudioEncodeError> {
+    CpuEac3EncoderSession::new(format, bitrate)?.encode(pcm)
+}
+
+fn validate_dolby_config(format: PcmAudioFormat, bitrate: u32) -> Result<(), AudioEncodeError> {
+    validate_pcm_config(format, bitrate)?;
+    if !matches!(format.sample_rate, 32_000 | 44_100 | 48_000) {
+        return Err(AudioEncodeError::InvalidInput {
+            reason: format!(
+                "AC-3/E-AC-3 encode supports 32000, 44100, or 48000 Hz, got {}",
+                format.sample_rate
+            ),
+        });
+    }
+    if !(1..=6).contains(&format.channels) {
+        return Err(AudioEncodeError::InvalidInput {
+            reason: format!(
+                "AC-3/E-AC-3 encode supports one to six channels, got {}",
+                format.channels
+            ),
+        });
+    }
+    Ok(())
 }
 
 fn validate_cpu_aac_config(format: PcmAudioFormat, bitrate: u32) -> Result<(), AudioEncodeError> {
@@ -569,6 +814,54 @@ fn platform_encode_aac_with_retained_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn portable_ac3_encodes_parseable_syncframe() {
+        let format = PcmAudioFormat {
+            sample_rate: 48_000,
+            channels: 2,
+        };
+        let pcm = vec![0_i16; 1_536 * 2];
+        let encoded = encode_ac3_cpu_from_interleaved_i16(format, &pcm, 192_000).unwrap();
+
+        assert_eq!(encoded.stream.codec, AudioCodec::Ac3);
+        assert_eq!(encoded.frames.len(), 1);
+        assert_eq!(encoded.frames[0].timing.sample_count, 1_536);
+        assert!(crate::codec::ac3::parse_ac3_specific_box(&encoded.frames[0].payload).is_ok());
+        assert!(encoded.stream.decoder_config.is_some());
+    }
+
+    #[test]
+    fn portable_eac3_encodes_parseable_syncframe() {
+        let format = PcmAudioFormat {
+            sample_rate: 48_000,
+            channels: 2,
+        };
+        let pcm = vec![0_i16; 1_536 * 2];
+        let encoded = encode_eac3_cpu_from_interleaved_i16(format, &pcm, 192_000).unwrap();
+
+        assert_eq!(encoded.stream.codec, AudioCodec::Eac3);
+        assert_eq!(encoded.frames.len(), 1);
+        assert_eq!(encoded.frames[0].timing.sample_count, 1_536);
+        assert!(crate::codec::ac3::parse_eac3_specific_box(&encoded.frames[0].payload).is_ok());
+        assert!(encoded.stream.decoder_config.is_some());
+    }
+
+    #[test]
+    fn portable_eac3_finish_flushes_partial_syncframe() {
+        let format = PcmAudioFormat {
+            sample_rate: 48_000,
+            channels: 2,
+        };
+        let mut session = CpuEac3EncoderSession::new(format, 192_000).unwrap();
+        let pending = session.encode(&vec![0_i16; 512 * 2]).unwrap();
+        assert!(pending.frames.is_empty());
+
+        let flushed = session.finish().unwrap();
+        assert_eq!(flushed.frames.len(), 1);
+        assert_eq!(flushed.frames[0].timing.sample_count, 1_536);
+        assert!(flushed.stream.decoder_config.is_some());
+    }
     use crate::transcode::AudioClockConfig;
 
     #[test]

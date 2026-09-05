@@ -309,6 +309,8 @@ dependencies = [
  "objc2-core-video",
  "objc2-video-toolbox",
  "openh264",
+ "oxideav-ac3",
+ "oxideav-core",
  "proptest",
  "rust_h265",
  "rusty_aac",
@@ -1181,6 +1183,26 @@ dependencies = [
  "cc",
  "nasm-rs",
  "walkdir",
+]
+
+[[package]]
+name = "oxideav-ac3"
+version = "0.0.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "efb5f931133bf47e30ed9d809ae1cc6b2c95f5643a73b39fc75fffc0329184be"
+dependencies = [
+ "oxideav-core",
+]
+
+[[package]]
+name = "oxideav-core"
+version = "0.1.35"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f8d0295ab8f6482bb51419d9a89adcf145fa1e654b34d2566046134aed5c424"
+dependencies = [
+ "bytemuck",
+ "serde_json",
+ "thiserror 2.0.20",
 ]
 
 [[package]]

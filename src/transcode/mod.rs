@@ -22,8 +22,9 @@ pub use audio_decode::{
 };
 pub use audio_encode::{
     AacEncoderSession, AudioEncodeError, AudioToolboxAacEncoderSession, CpuAacEncoderSession,
-    EncodedAudioOutput, PcmAudioFormat, encode_aac_cpu_from_interleaved_i16,
-    encode_aac_from_interleaved_i16,
+    CpuAc3EncoderSession, CpuEac3EncoderSession, EncodedAudioOutput, PcmAudioFormat,
+    encode_aac_cpu_from_interleaved_i16, encode_aac_from_interleaved_i16,
+    encode_ac3_cpu_from_interleaved_i16, encode_eac3_cpu_from_interleaved_i16,
 };
 pub use execution_plan::{
     HlsTranscodeRequest, TranscodeExecutionPlan, TranscodeOutputAudio, TranscodeOutputPlan,

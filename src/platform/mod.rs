@@ -5,7 +5,8 @@ use crate::{
     error::EngineErrorCode,
     transcode::{
         AudioCodec, PcmAudioFormat, RawVideoFormat, RawVideoPixelFormat, VideoCodec,
-        encode_aac_cpu_from_interleaved_i16, encode_h264_cpu_bgra_frames,
+        encode_aac_cpu_from_interleaved_i16, encode_ac3_cpu_from_interleaved_i16,
+        encode_eac3_cpu_from_interleaved_i16, encode_h264_cpu_bgra_frames,
     },
 };
 
@@ -362,6 +363,8 @@ fn run_warmup_task(task: &EncoderWarmupTask) -> Result<(), EncoderWarmupError> {
         (EncoderWarmupKind::Video, "chroma-vaapi-hevc", "hevc") => warm_vaapi_hevc_encoder(),
         (EncoderWarmupKind::Audio, "chroma-audiotoolbox-aac", "aac") => warm_aac_encoder(),
         (EncoderWarmupKind::Audio, "chroma-cpu-aac", "aac") => warm_cpu_aac_encoder(),
+        (EncoderWarmupKind::Audio, "chroma-cpu-ac3", "ac3") => warm_cpu_ac3_encoder(),
+        (EncoderWarmupKind::Audio, "chroma-cpu-eac3", "eac3") => warm_cpu_eac3_encoder(),
         _ => Ok(()),
     }
 }
@@ -529,6 +532,34 @@ fn warm_cpu_aac_encoder() -> Result<(), EncoderWarmupError> {
     encode_aac_cpu_from_interleaved_i16(format, &pcm, 128_000).map_err(|error| {
         EncoderWarmupError {
             reason: format!("CPU AAC warmup failed: {error}"),
+        }
+    })?;
+    Ok(())
+}
+
+fn warm_cpu_ac3_encoder() -> Result<(), EncoderWarmupError> {
+    let format = PcmAudioFormat {
+        sample_rate: 48_000,
+        channels: 2,
+    };
+    let pcm = vec![0_i16; 1_536 * format.channels as usize];
+    encode_ac3_cpu_from_interleaved_i16(format, &pcm, 192_000).map_err(|error| {
+        EncoderWarmupError {
+            reason: format!("CPU AC-3 warmup failed: {error}"),
+        }
+    })?;
+    Ok(())
+}
+
+fn warm_cpu_eac3_encoder() -> Result<(), EncoderWarmupError> {
+    let format = PcmAudioFormat {
+        sample_rate: 48_000,
+        channels: 2,
+    };
+    let pcm = vec![0_i16; 1_536 * format.channels as usize];
+    encode_eac3_cpu_from_interleaved_i16(format, &pcm, 192_000).map_err(|error| {
+        EncoderWarmupError {
+            reason: format!("CPU E-AC-3 warmup failed: {error}"),
         }
     })?;
     Ok(())
@@ -1221,8 +1252,8 @@ fn audio_backend_matrix() -> Vec<AudioEncoderBackend> {
     }
     backends.push(executable_audio_backend(AudioCodec::Aac, "chroma-cpu-aac"));
     backends.extend([
-        planned_audio_backend(AudioCodec::Ac3, "chroma-ac3-copy"),
-        planned_audio_backend(AudioCodec::Eac3, "chroma-eac3-copy"),
+        executable_audio_backend(AudioCodec::Ac3, "chroma-cpu-ac3"),
+        executable_audio_backend(AudioCodec::Eac3, "chroma-cpu-eac3"),
     ]);
     backends
 }
@@ -1233,17 +1264,6 @@ fn executable_audio_backend(codec: AudioCodec, encoder: &str) -> AudioEncoderBac
         encoder: encoder.to_string(),
         available: true,
         unavailable_reason: None,
-    }
-}
-
-fn planned_audio_backend(codec: AudioCodec, encoder: &str) -> AudioEncoderBackend {
-    AudioEncoderBackend {
-        codec,
-        encoder: encoder.to_string(),
-        available: false,
-        unavailable_reason: Some(
-            "native audio encode backend is planned but not executable in this build".to_string(),
-        ),
     }
 }
 
@@ -1382,13 +1402,15 @@ mod tests {
         );
         assert!(plan.audio_backends.iter().any(|backend| {
             backend.codec == AudioCodec::Ac3
-                && backend.encoder == "chroma-ac3-copy"
-                && !backend.available
+                && backend.encoder == "chroma-cpu-ac3"
+                && backend.available
+                && backend.unavailable_reason.is_none()
         }));
         assert!(plan.audio_backends.iter().any(|backend| {
             backend.codec == AudioCodec::Eac3
-                && backend.encoder == "chroma-eac3-copy"
-                && !backend.available
+                && backend.encoder == "chroma-cpu-eac3"
+                && backend.available
+                && backend.unavailable_reason.is_none()
         }));
     }
 
@@ -1608,11 +1630,24 @@ mod tests {
 
         assert_eq!(has_aac_warmup, cfg!(target_os = "macos"));
         assert!(has_cpu_aac_warmup);
+        assert!(plan.warmup_tasks.iter().any(|task| {
+            task.kind == EncoderWarmupKind::Audio
+                && task.codec == "ac3"
+                && task.encoder == "chroma-cpu-ac3"
+        }));
+        assert!(plan.warmup_tasks.iter().any(|task| {
+            task.kind == EncoderWarmupKind::Audio
+                && task.codec == "eac3"
+                && task.encoder == "chroma-cpu-eac3"
+        }));
         assert!(plan.warmup_tasks.iter().all(|task| {
             task.kind != EncoderWarmupKind::Audio
                 || matches!(
                     task.encoder.as_str(),
-                    "chroma-audiotoolbox-aac" | "chroma-cpu-aac"
+                    "chroma-audiotoolbox-aac"
+                        | "chroma-cpu-aac"
+                        | "chroma-cpu-ac3"
+                        | "chroma-cpu-eac3"
                 )
         }));
     }
