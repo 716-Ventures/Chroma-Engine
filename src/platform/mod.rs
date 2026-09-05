@@ -211,6 +211,8 @@ pub enum HardwareKind {
     D3d12Va,
     /// Windows DirectX Video Acceleration 2.
     Dxva2,
+    /// Windows Media Foundation native encoder.
+    MediaFoundation,
     /// CPU encoder fallback.
     Cpu,
 }
@@ -366,6 +368,12 @@ fn run_warmup_task(task: &EncoderWarmupTask) -> Result<(), EncoderWarmupError> {
         (EncoderWarmupKind::Video, "chroma-vaapi-hevc", "hevc") => warm_vaapi_hevc_encoder(),
         (EncoderWarmupKind::Video, "chroma-nvenc-h264", "h264") => warm_nvenc_h264_encoder(),
         (EncoderWarmupKind::Video, "chroma-nvenc-hevc", "hevc") => warm_nvenc_hevc_encoder(),
+        (EncoderWarmupKind::Video, encoder, "h264") if encoder.starts_with("chroma-windows-") => {
+            warm_windows_video_encoder(VideoOutputCodec::H264)
+        }
+        (EncoderWarmupKind::Video, encoder, "hevc") if encoder.starts_with("chroma-windows-") => {
+            warm_windows_video_encoder(VideoOutputCodec::Hevc)
+        }
         (EncoderWarmupKind::Audio, "chroma-audiotoolbox-aac", "aac") => warm_aac_encoder(),
         (EncoderWarmupKind::Audio, "chroma-cpu-aac", "aac") => warm_cpu_aac_encoder(),
         (EncoderWarmupKind::Audio, "chroma-cpu-ac3", "ac3") => warm_cpu_ac3_encoder(),
@@ -431,6 +439,40 @@ fn warm_nvenc_hevc_encoder() -> Result<(), EncoderWarmupError> {
                 reason: format!("NVENC HEVC warmup failed: {error}"),
             })?;
     }
+    Ok(())
+}
+
+fn warm_windows_video_encoder(codec: VideoOutputCodec) -> Result<(), EncoderWarmupError> {
+    #[cfg(target_os = "windows")]
+    {
+        use crate::transcode::{
+            RawVideoFrameRef, WindowsH264EncoderSession, WindowsHevcEncoderSession,
+        };
+
+        let format = windows_probe_video_format();
+        let bgra = vec![0_u8; format.width as usize * format.height as usize * 4];
+        let scale = crate::packet::TimeScale {
+            units_per_second: 24,
+        };
+        let frame = RawVideoFrameRef {
+            pts: crate::packet::TimePoint { units: 0, scale },
+            dts: crate::packet::TimePoint { units: 0, scale },
+            duration: crate::packet::TimeDelta { units: 1, scale },
+            bytes: &bgra,
+            keyframe: true,
+        };
+        let result = match codec {
+            VideoOutputCodec::H264 => WindowsH264EncoderSession::new(format, 500_000)
+                .and_then(|mut session| session.encode(&[frame])),
+            VideoOutputCodec::Hevc => WindowsHevcEncoderSession::new(format, 500_000)
+                .and_then(|mut session| session.encode(&[frame])),
+        };
+        result.map_err(|error| EncoderWarmupError {
+            reason: format!("Windows {codec:?} encoder warmup failed: {error}"),
+        })?;
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = codec;
     Ok(())
 }
 
@@ -1199,6 +1241,12 @@ fn native_encoder_profiles() -> Vec<EncoderProfile> {
     #[cfg(not(target_os = "macos"))]
     {
         let mut profiles = Vec::new();
+        if let Some(profile) = windows_encoder_profile(VideoOutputCodec::H264) {
+            profiles.push(profile);
+        }
+        if let Some(profile) = windows_encoder_profile(VideoOutputCodec::Hevc) {
+            profiles.push(profile);
+        }
         if linux_nvenc_h264_encoder_available() {
             profiles.push(EncoderProfile {
                 kind: HardwareKind::Nvenc,
@@ -1261,18 +1309,36 @@ fn video_backend_matrix() -> Vec<EncoderBackend> {
             executable_video_backend(HardwareKind::Cpu, VideoOutputCodec::H264, "chroma-cpu-h264"),
         ],
         "windows" => vec![
-            planned_video_backend(
+            windows_candidate_video_backend(
                 HardwareKind::Nvenc,
                 VideoOutputCodec::H264,
-                "chroma-nvenc-h264",
+                "chroma-windows-nvenc-h264",
             ),
-            planned_video_backend(
+            windows_candidate_video_backend(
                 HardwareKind::Nvenc,
                 VideoOutputCodec::Hevc,
-                "chroma-nvenc-hevc",
+                "chroma-windows-nvenc-hevc",
             ),
-            planned_video_backend(HardwareKind::Qsv, VideoOutputCodec::H264, "chroma-qsv-h264"),
-            planned_video_backend(HardwareKind::Qsv, VideoOutputCodec::Hevc, "chroma-qsv-hevc"),
+            windows_candidate_video_backend(
+                HardwareKind::Qsv,
+                VideoOutputCodec::H264,
+                "chroma-windows-qsv-h264",
+            ),
+            windows_candidate_video_backend(
+                HardwareKind::Qsv,
+                VideoOutputCodec::Hevc,
+                "chroma-windows-qsv-hevc",
+            ),
+            windows_candidate_video_backend(
+                HardwareKind::MediaFoundation,
+                VideoOutputCodec::H264,
+                "chroma-windows-mf-h264",
+            ),
+            windows_candidate_video_backend(
+                HardwareKind::MediaFoundation,
+                VideoOutputCodec::Hevc,
+                "chroma-windows-mf-hevc",
+            ),
             planned_video_backend(HardwareKind::Amf, VideoOutputCodec::H264, "chroma-amf-h264"),
             planned_video_backend(HardwareKind::Amf, VideoOutputCodec::Hevc, "chroma-amf-hevc"),
             executable_video_backend(HardwareKind::Cpu, VideoOutputCodec::H264, "chroma-cpu-h264"),
@@ -1396,6 +1462,103 @@ fn linux_nvenc_h264_encoder_available() -> bool {
 #[cfg(not(all(target_os = "linux", feature = "linux-nvidia")))]
 fn linux_nvenc_hevc_encoder_available() -> bool {
     false
+}
+
+#[cfg(target_os = "windows")]
+fn windows_probe_video_format() -> RawVideoFormat {
+    RawVideoFormat {
+        width: 128,
+        height: 72,
+        frame_rate_num: 24,
+        frame_rate_den: 1,
+        pixel_format: RawVideoPixelFormat::Bgra,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_encoder_profile(codec: VideoOutputCodec) -> Option<EncoderProfile> {
+    use std::sync::OnceLock;
+
+    static H264: OnceLock<Option<(HardwareKind, &'static str)>> = OnceLock::new();
+    static HEVC: OnceLock<Option<(HardwareKind, &'static str)>> = OnceLock::new();
+    let slot = match codec {
+        VideoOutputCodec::H264 => &H264,
+        VideoOutputCodec::Hevc => &HEVC,
+    };
+    let selected = slot.get_or_init(|| probe_windows_encoder(codec));
+    selected.map(|(kind, name)| EncoderProfile {
+        kind,
+        video_encoder: name.to_string(),
+        codec,
+        hwaccel: Some(
+            match kind {
+                HardwareKind::Nvenc => "nvenc",
+                HardwareKind::Qsv => "qsv",
+                HardwareKind::MediaFoundation => "mediafoundation",
+                _ => "windows",
+            }
+            .to_string(),
+        ),
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn probe_windows_encoder(codec: VideoOutputCodec) -> Option<(HardwareKind, &'static str)> {
+    use crate::transcode::{
+        RawVideoFrameRef, WindowsH264EncoderSession, WindowsHevcEncoderSession,
+    };
+
+    let format = windows_probe_video_format();
+    let bgra = vec![0_u8; format.width as usize * format.height as usize * 4];
+    let scale = crate::packet::TimeScale {
+        units_per_second: 24,
+    };
+    let frame = RawVideoFrameRef {
+        pts: crate::packet::TimePoint { units: 0, scale },
+        dts: crate::packet::TimePoint { units: 0, scale },
+        duration: crate::packet::TimeDelta { units: 1, scale },
+        bytes: &bgra,
+        keyframe: true,
+    };
+    let name = match codec {
+        VideoOutputCodec::H264 => {
+            let mut session = WindowsH264EncoderSession::new(format, 500_000).ok()?;
+            session.encode(&[frame]).ok()?;
+            session.backend_name()
+        }
+        VideoOutputCodec::Hevc => {
+            let mut session = WindowsHevcEncoderSession::new(format, 500_000).ok()?;
+            session.encode(&[frame]).ok()?;
+            session.backend_name()
+        }
+    };
+    let kind = if name.contains("nvenc") {
+        HardwareKind::Nvenc
+    } else if name.contains("qsv") {
+        HardwareKind::Qsv
+    } else {
+        HardwareKind::MediaFoundation
+    };
+    Some((kind, name))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn windows_encoder_profile(_codec: VideoOutputCodec) -> Option<EncoderProfile> {
+    None
+}
+
+fn windows_candidate_video_backend(
+    kind: HardwareKind,
+    codec: VideoOutputCodec,
+    name: &str,
+) -> EncoderBackend {
+    if windows_encoder_profile(codec)
+        .is_some_and(|profile| profile.kind == kind && profile.video_encoder == name)
+    {
+        executable_video_backend(kind, codec, name)
+    } else {
+        planned_video_backend(kind, codec, name)
+    }
 }
 
 fn vaapi_h264_video_backend() -> EncoderBackend {

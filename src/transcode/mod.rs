@@ -63,6 +63,8 @@ pub use video_encode::{
 pub use video_encode::{NvencH264EncoderSession, NvencHevcEncoderSession};
 #[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
 pub use video_encode::{VaapiH264EncoderSession, VaapiHevcEncoderSession};
+#[cfg(target_os = "windows")]
+pub use video_encode::{WindowsH264EncoderSession, WindowsHevcEncoderSession};
 pub use yuv::{convert_nv12_to_bgra, convert_p010_to_bgra};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

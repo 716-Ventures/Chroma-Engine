@@ -87,6 +87,8 @@ nuxodecs = { version = "0.1.2", optional = true, default-features = false, featu
 oxideav-nvidia = { version = "0.0.3", optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
+mediaway-common = "=0.1.4"
+mediaway-encoder = { version = "=0.1.4", default-features = false, features = ["video"] }
 windows = { version = "0.62.2", features = [
     "Win32_Media_MediaFoundation",
     "Win32_System_Com",

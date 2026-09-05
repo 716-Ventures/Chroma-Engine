@@ -10,6 +10,9 @@ mod vaapi_encode;
 #[cfg(all(target_os = "linux", feature = "linux-nvidia"))]
 mod nvidia_encode;
 
+#[cfg(target_os = "windows")]
+mod windows_encode;
+
 #[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
 pub use vaapi_encode::VaapiH264EncoderSession;
 #[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
@@ -17,6 +20,8 @@ pub use vaapi_encode::VaapiHevcEncoderSession;
 
 #[cfg(all(target_os = "linux", feature = "linux-nvidia"))]
 pub use nvidia_encode::{NvencH264EncoderSession, NvencHevcEncoderSession};
+#[cfg(target_os = "windows")]
+pub use windows_encode::{WindowsH264EncoderSession, WindowsHevcEncoderSession};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -239,6 +244,9 @@ pub enum H264EncoderSession {
     /// Linux NVIDIA NVENC H.264 encoder selected when a compatible CUDA device is available.
     #[cfg(all(target_os = "linux", feature = "linux-nvidia"))]
     Nvenc(Box<NvencH264EncoderSession>),
+    /// Native Windows encoder selected from NVENC, Quick Sync, and Media Foundation.
+    #[cfg(target_os = "windows")]
+    Windows(Box<WindowsH264EncoderSession>),
 }
 
 impl H264EncoderSession {
@@ -247,6 +255,10 @@ impl H264EncoderSession {
         #[cfg(target_os = "macos")]
         if let Ok(session) = VideoToolboxH264EncoderSession::new(format, bitrate) {
             return Ok(Self::VideoToolbox(session));
+        }
+        #[cfg(target_os = "windows")]
+        if let Ok(session) = WindowsH264EncoderSession::new(format, bitrate) {
+            return Ok(Self::Windows(Box::new(session)));
         }
         #[cfg(all(target_os = "linux", feature = "linux-nvidia"))]
         if let Ok(session) = NvencH264EncoderSession::new(format, bitrate) {
@@ -271,6 +283,8 @@ impl H264EncoderSession {
             Self::Vaapi(session) => session.encode(frames),
             #[cfg(all(target_os = "linux", feature = "linux-nvidia"))]
             Self::Nvenc(session) => session.encode(frames),
+            #[cfg(target_os = "windows")]
+            Self::Windows(session) => session.encode(frames),
         }
     }
 
@@ -283,6 +297,8 @@ impl H264EncoderSession {
             Self::Vaapi(session) => session.encoded_batches(),
             #[cfg(all(target_os = "linux", feature = "linux-nvidia"))]
             Self::Nvenc(session) => session.encoded_batches(),
+            #[cfg(target_os = "windows")]
+            Self::Windows(session) => session.encoded_batches(),
         }
     }
 
@@ -295,6 +311,8 @@ impl H264EncoderSession {
             Self::Vaapi(_) => "chroma-vaapi-h264",
             #[cfg(all(target_os = "linux", feature = "linux-nvidia"))]
             Self::Nvenc(_) => "chroma-nvenc-h264",
+            #[cfg(target_os = "windows")]
+            Self::Windows(session) => session.backend_name(),
         }
     }
 }
@@ -1491,7 +1509,8 @@ fn build_avc_decoder_config(parameter_sets: &[Vec<u8>], nal_length_size: i32) ->
 #[cfg(any(
     target_os = "macos",
     all(target_os = "linux", feature = "linux-vaapi"),
-    all(target_os = "linux", feature = "linux-nvidia")
+    all(target_os = "linux", feature = "linux-nvidia"),
+    target_os = "windows"
 ))]
 fn build_hevc_decoder_config(parameter_sets: &[Vec<u8>], nal_length_size: i32) -> Option<Vec<u8>> {
     let mut arrays: Vec<(u8, Vec<&[u8]>)> = Vec::new();
