@@ -37,8 +37,6 @@ pub use segment::{
     NativeFmp4TranscodeStartOutput, NativeFmp4VideoMode, write_native_fmp4_transcode_init,
     write_native_fmp4_transcode_segment, write_native_fmp4_transcode_start,
 };
-#[cfg(target_os = "windows")]
-pub use video_decode::WindowsH264BgraDecoderSession;
 pub use video_decode::{
     BgraDecoderSession, CompressedVideoPacket, CpuAv1BgraDecoderSession, CpuH264BgraDecoderSession,
     CpuHevcBgraDecoderSession, DecodedVideoFrame, DecodedVideoOutput, DecodedVideoStream,
@@ -56,6 +54,8 @@ pub use video_decode::{
     QsvH264BgraDecoderSession, QsvHevcBgraDecoderSession, VaapiH264BgraDecoderSession,
     VaapiHevcBgraDecoderSession,
 };
+#[cfg(target_os = "windows")]
+pub use video_decode::{WindowsH264BgraDecoderSession, WindowsHevcBgraDecoderSession};
 pub use video_encode::{
     CpuH264EncoderSession, EncodedVideoFrame, EncodedVideoOutput, EncodedVideoStream,
     H264EncoderSession, RawVideoFormat, RawVideoFrameRef, RawVideoPixelFormat, VideoEncodeError,

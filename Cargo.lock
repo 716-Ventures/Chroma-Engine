@@ -1194,19 +1194,10 @@ dependencies = [
 [[package]]
 name = "mediaway-decoder"
 version = "0.1.4"
-source = "git+https://github.com/nyxways/mediaway.git?rev=ad056ebf139a624a024016727030365eca9cfa08#ad056ebf139a624a024016727030365eca9cfa08"
 dependencies = [
- "cros-libva",
  "iso-bmff",
- "js-sys",
  "mediaway-common",
- "mediaway-sw",
- "smallvec",
  "thiserror 2.0.20",
- "vulkanalia",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
  "windows",
 ]
 

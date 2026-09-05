@@ -25,7 +25,7 @@ pub use vaapi_decode::{
     VaapiHevcBgraDecoderSession,
 };
 #[cfg(target_os = "windows")]
-pub use windows_decode::WindowsH264BgraDecoderSession;
+pub use windows_decode::{WindowsH264BgraDecoderSession, WindowsHevcBgraDecoderSession};
 
 /// Borrowed compressed packet ready to feed a native video decoder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -634,6 +634,9 @@ pub enum BgraDecoderSession {
     /// Windows Media Foundation/D3D11 hardware H.264 decoder with checked NV12 readback.
     #[cfg(target_os = "windows")]
     WindowsH264(Box<WindowsH264BgraDecoderSession>),
+    /// Windows Media Foundation/D3D11 hardware HEVC Main decoder.
+    #[cfg(target_os = "windows")]
+    WindowsHevc(Box<WindowsHevcBgraDecoderSession>),
     /// Portable OpenH264 software decoder.
     CpuH264(Box<CpuH264BgraDecoderSession>),
     /// Portable safe-Rust HEVC software decoder.
@@ -678,6 +681,12 @@ impl BgraDecoderSession {
             && let Ok(session) = WindowsH264BgraDecoderSession::new(output_format, decoder_config)
         {
             return Ok(Self::WindowsH264(Box::new(session)));
+        }
+        #[cfg(target_os = "windows")]
+        if codec == VideoCodec::Hevc
+            && let Ok(session) = WindowsHevcBgraDecoderSession::new(output_format, decoder_config)
+        {
+            return Ok(Self::WindowsHevc(Box::new(session)));
         }
         #[cfg(all(target_os = "linux", feature = "linux-nvidia"))]
         if codec == VideoCodec::H264
@@ -734,6 +743,8 @@ impl BgraDecoderSession {
             Self::VideoToolbox(session) => session.decode(input),
             #[cfg(target_os = "windows")]
             Self::WindowsH264(session) => session.decode(input),
+            #[cfg(target_os = "windows")]
+            Self::WindowsHevc(session) => session.decode(input),
             Self::CpuH264(session) => session.decode(input),
             Self::CpuHevc(session) => session.decode(input),
             Self::CpuAv1(session) => session.decode(input),
@@ -758,6 +769,8 @@ impl BgraDecoderSession {
             Self::VideoToolbox(session) => session.decoded_batches(),
             #[cfg(target_os = "windows")]
             Self::WindowsH264(session) => session.decoded_batches(),
+            #[cfg(target_os = "windows")]
+            Self::WindowsHevc(session) => session.decoded_batches(),
             Self::CpuH264(session) => session.decoded_batches(),
             Self::CpuHevc(session) => session.decoded_batches(),
             Self::CpuAv1(session) => session.decoded_batches(),
@@ -786,6 +799,8 @@ impl BgraDecoderSession {
             },
             #[cfg(target_os = "windows")]
             Self::WindowsH264(_) => "chroma-d3d11va-h264-decoder",
+            #[cfg(target_os = "windows")]
+            Self::WindowsHevc(_) => "chroma-d3d11va-hevc-decoder",
             Self::CpuH264(_) => "chroma-cpu-h264-decoder",
             Self::CpuHevc(_) => "chroma-cpu-hevc-decoder",
             Self::CpuAv1(_) => "chroma-dav1d-av1-decoder",

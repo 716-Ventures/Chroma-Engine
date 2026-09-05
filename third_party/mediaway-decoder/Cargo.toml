@@ -1,0 +1,30 @@
+[package]
+name = "mediaway-decoder"
+version = "0.1.4"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT"
+repository = "https://github.com/nyxways/mediaway"
+description = "Locally patched Mediaway Windows hardware video decoder for Chroma Engine"
+
+[dependencies]
+mediaway-common = { version = "=0.1.4", git = "https://github.com/nyxways/mediaway.git", rev = "ad056ebf139a624a024016727030365eca9cfa08" }
+iso-bmff = { version = "=0.1.1", git = "https://github.com/nyxways/mediaway.git", rev = "ad056ebf139a624a024016727030365eca9cfa08" }
+thiserror = "2"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_Threading",
+    "Win32_Security",
+    "Win32_Media_MediaFoundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+] }
+
+[features]
+default = ["video"]
+video = []

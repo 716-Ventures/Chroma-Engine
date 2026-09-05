@@ -36,12 +36,19 @@ use super::{
 /// boundary.
 pub struct WindowsH264BgraDecoderSession {
     output_format: RawVideoFormat,
+    codec: VideoCodec,
+    hevc_nalu_length_size: Option<u8>,
     device: ID3D11Device,
     context: ID3D11DeviceContext,
     decoder: WindowsVideoDecoder,
     pending: Vec<PendingTiming>,
     next_token: i64,
     decoded_batches: u64,
+}
+
+/// Retained Windows Media Foundation/D3D11 hardware HEVC Main decoder.
+pub struct WindowsHevcBgraDecoderSession {
+    inner: WindowsH264BgraDecoderSession,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -71,14 +78,25 @@ impl WindowsH264BgraDecoderSession {
         output_format: RawVideoFormat,
         decoder_config: &[u8],
     ) -> Result<Self, VideoDecodeError> {
+        Self::new_for_codec(VideoCodec::H264, output_format, decoder_config)
+    }
+
+    fn new_for_codec(
+        codec: VideoCodec,
+        output_format: RawVideoFormat,
+        decoder_config: &[u8],
+    ) -> Result<Self, VideoDecodeError> {
         validate_decoded_video_format(output_format)?;
         if decoder_config.is_empty() {
             return Err(VideoDecodeError::MissingDecoderConfig);
         }
         let (device, context) = create_video_device()?;
-        let decoder = open_decoder(&device, output_format, decoder_config)?;
+        let (decoder, hevc_nalu_length_size) =
+            open_decoder(&device, codec, output_format, decoder_config)?;
         Ok(Self {
             output_format,
+            codec,
+            hevc_nalu_length_size,
             device,
             context,
             decoder,
@@ -93,7 +111,7 @@ impl WindowsH264BgraDecoderSession {
         &mut self,
         input: &VideoDecodeInput<'_>,
     ) -> Result<DecodedVideoOutput, VideoDecodeError> {
-        if input.codec != VideoCodec::H264 {
+        if input.codec != self.codec {
             return Err(VideoDecodeError::UnsupportedCodec);
         }
         if input.time_scale.units_per_second == 0 {
@@ -110,7 +128,13 @@ impl WindowsH264BgraDecoderSession {
                     .ok_or_else(|| VideoDecodeError::BackendFailed {
                         reason: "Windows decoder timestamp token space was exhausted".to_string(),
                     })?;
-            let mediaway_packet = to_mediaway_packet(packet, input.time_scale, token)?;
+            let mediaway_packet = to_mediaway_packet(
+                packet,
+                input.time_scale,
+                token,
+                self.codec,
+                self.hevc_nalu_length_size,
+            )?;
             self.decoder
                 .push_packet(&mediaway_packet)
                 .map_err(map_decoder_error("packet submission"))?;
@@ -129,7 +153,8 @@ impl WindowsH264BgraDecoderSession {
             if !self.pending.is_empty() {
                 return Err(VideoDecodeError::BackendFailed {
                     reason: format!(
-                        "Windows H.264 decoder drained with {} unmatched timing record(s)",
+                        "Windows {:?} decoder drained with {} unmatched timing record(s)",
+                        self.codec,
                         self.pending.len()
                     ),
                 });
@@ -140,8 +165,13 @@ impl WindowsH264BgraDecoderSession {
         Ok(DecodedVideoOutput {
             stream: DecodedVideoStream {
                 format: self.output_format,
-                source_codec: VideoCodec::H264,
-                decoder: "chroma-d3d11va-h264-decoder".to_string(),
+                source_codec: self.codec,
+                decoder: match self.codec {
+                    VideoCodec::H264 => "chroma-d3d11va-h264-decoder",
+                    VideoCodec::Hevc => "chroma-d3d11va-hevc-decoder",
+                    VideoCodec::Av1 => return Err(VideoDecodeError::UnsupportedCodec),
+                }
+                .to_string(),
             },
             frames,
         })
@@ -209,6 +239,52 @@ impl WindowsH264BgraDecoderSession {
     }
 }
 
+impl std::fmt::Debug for WindowsHevcBgraDecoderSession {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("WindowsHevcBgraDecoderSession")
+            .field("inner", &self.inner)
+            .finish()
+    }
+}
+
+impl WindowsHevcBgraDecoderSession {
+    /// Creates a D3D11-backed hardware HEVC Main decoder.
+    pub fn new(
+        output_format: RawVideoFormat,
+        decoder_config: &[u8],
+    ) -> Result<Self, VideoDecodeError> {
+        if crate::codec::pixel_format::pixel_format_from_hevc_decoder_config(decoder_config)
+            .as_deref()
+            != Some("yuv420-8bit")
+        {
+            return Err(VideoDecodeError::BackendUnavailable {
+                reason: "Windows D3D11 HEVC currently supports Main 8-bit YUV420 input".to_string(),
+            });
+        }
+        Ok(Self {
+            inner: WindowsH264BgraDecoderSession::new_for_codec(
+                VideoCodec::Hevc,
+                output_format,
+                decoder_config,
+            )?,
+        })
+    }
+
+    /// Decodes one ordered HEVC packet batch without recreating the native session.
+    pub fn decode(
+        &mut self,
+        input: &VideoDecodeInput<'_>,
+    ) -> Result<DecodedVideoOutput, VideoDecodeError> {
+        self.inner.decode(input)
+    }
+
+    /// Returns the number of accepted packet batches.
+    pub fn decoded_batches(&self) -> u64 {
+        self.inner.decoded_batches()
+    }
+}
+
 fn create_video_device() -> Result<(ID3D11Device, ID3D11DeviceContext), VideoDecodeError> {
     let mut device = None;
     let mut context = None;
@@ -239,33 +315,61 @@ fn create_video_device() -> Result<(ID3D11Device, ID3D11DeviceContext), VideoDec
 
 fn open_decoder(
     device: &ID3D11Device,
+    codec: VideoCodec,
     format: RawVideoFormat,
     decoder_config: &[u8],
-) -> Result<WindowsVideoDecoder, VideoDecodeError> {
+) -> Result<(WindowsVideoDecoder, Option<u8>), VideoDecodeError> {
     let device_handle = NativeHandle::new(Interface::as_raw(device) as usize).ok_or_else(|| {
         VideoDecodeError::BackendUnavailable {
             reason: "D3D11 returned a null device handle".to_string(),
         }
     })?;
+    let (codec_kind, extra_data, hevc_nalu_length_size) = match codec {
+        VideoCodec::H264 => (CodecKind::H264, decoder_config.to_vec(), None),
+        VideoCodec::Hevc => {
+            let config =
+                crate::codec::hevc::parse_hevc_decoder_config(decoder_config).map_err(|error| {
+                    VideoDecodeError::InvalidDecoderConfig {
+                        reason: error.to_string(),
+                    }
+                })?;
+            let parameter_sets = crate::codec::hevc::hevc_parameter_sets_to_annex_b(&config);
+            if parameter_sets.is_empty() {
+                return Err(VideoDecodeError::InvalidDecoderConfig {
+                    reason: "HEVC decoder configuration does not contain VPS/SPS/PPS".to_string(),
+                });
+            }
+            (
+                CodecKind::Hevc,
+                parameter_sets,
+                Some(config.nalu_length_size),
+            )
+        }
+        VideoCodec::Av1 => return Err(VideoDecodeError::UnsupportedCodec),
+    };
     let config = VideoDecoderConfig {
-        codec: CodecKind::H264,
+        codec: codec_kind,
         width: format.width,
         height: format.height,
         time_base: Rational::new(u64::from(format.frame_rate_den), format.frame_rate_num),
         pixel_format: PixelFormat::Nv12,
         output: VideoOutputPreference::ZeroCopyGpu,
         gpu_device: Some(GpuDeviceHandle::DirectX11(device_handle)),
-        extra_data: Bytes::copy_from_slice(decoder_config),
+        extra_data: Bytes::from(extra_data),
     };
-    WindowsVideoDecoder::open(&config).map_err(|error| VideoDecodeError::BackendUnavailable {
-        reason: format!("Windows hardware H.264 decoder initialization failed: {error}"),
-    })
+    WindowsVideoDecoder::open(&config)
+        .map(|decoder| (decoder, hevc_nalu_length_size))
+        .map_err(|error| VideoDecodeError::BackendUnavailable {
+            reason: format!("Windows hardware {codec:?} decoder initialization failed: {error}"),
+        })
 }
 
 fn to_mediaway_packet(
     packet: &CompressedVideoPacket<'_>,
     expected_scale: crate::packet::TimeScale,
     token: i64,
+    codec: VideoCodec,
+    hevc_nalu_length_size: Option<u8>,
 ) -> Result<Packet, VideoDecodeError> {
     if packet.pts.scale != expected_scale
         || packet.dts.scale != expected_scale
@@ -275,6 +379,16 @@ fn to_mediaway_packet(
             reason: "packet timestamp scale does not match decode input".to_string(),
         });
     }
+    let payload = match (codec, hevc_nalu_length_size) {
+        (VideoCodec::Hevc, Some(nalu_length_size)) => {
+            crate::codec::hevc::hevc_sample_to_annex_b(packet.bytes, nalu_length_size).map_err(
+                |error| VideoDecodeError::InvalidInput {
+                    reason: format!("invalid HEVC packet: {error}"),
+                },
+            )?
+        }
+        _ => packet.bytes.to_vec(),
+    };
     Ok(Packet {
         stream_id: 0,
         pts: token,
@@ -282,7 +396,7 @@ fn to_mediaway_packet(
         duration: 1,
         is_keyframe: packet.keyframe,
         is_discard: false,
-        payload: Bytes::copy_from_slice(packet.bytes),
+        payload: Bytes::from(payload),
     })
 }
 
@@ -423,7 +537,7 @@ fn map_decoder_error(
     operation: &'static str,
 ) -> impl FnOnce(mediaway_decoder::DecodeError) -> VideoDecodeError {
     move |error| VideoDecodeError::BackendFailed {
-        reason: format!("Windows H.264 decoder {operation} failed: {error}"),
+        reason: format!("Windows hardware decoder {operation} failed: {error}"),
     }
 }
 
@@ -444,7 +558,7 @@ mod tests {
             keyframe: true,
             bytes: &[1, 2, 3],
         };
-        let converted = to_mediaway_packet(&packet, scale, 27).unwrap();
+        let converted = to_mediaway_packet(&packet, scale, 27, VideoCodec::H264, None).unwrap();
         assert_eq!(converted.pts, 27);
         assert_eq!(converted.dts, 27);
         assert_eq!(converted.duration, 1);

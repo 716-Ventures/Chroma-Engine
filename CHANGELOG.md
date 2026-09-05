@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Added retained Windows HEVC Main hardware decoding through the existing Media Foundation/D3D11
+  path. Chroma converts hvcC parameter sets and length-prefixed samples to Annex B, reads back
+  NV12 textures with checked row pitches, and advertises the backend only after a generated HEVC
+  frame completes encode, hardware decode, and BGRA conversion. The narrowly patched decoder
+  facade is vendored to preserve Rust 1.90 support.
 - Added retained Linux Intel Quick Sync H.264/HEVC decode and Main encode sessions through the
   runtime-loaded iHD/i965 VA-API driver. QSV selection now requires an Intel vendor render node and
   real codec probes, remains distinct from generic VA-API, and adds no oneVPL link dependency.
