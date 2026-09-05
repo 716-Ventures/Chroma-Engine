@@ -4,12 +4,13 @@
 
 Chroma Engine uses the same status terms in documentation and runtime DTOs:
 
-- `designed`: the engine has a model and roadmap entry, but no executable implementation in the current build.
+- `modeled`: the engine has a model and roadmap entry, but no executable implementation or local runtime signal in the current build.
 - `detected`: host hardware or runtime presence was detected, but Chroma Engine has not wired an executable backend for it.
-- `available`: Chroma Engine can open or initialize the backend, but the codec/profile has not completed a warmup smoke probe.
+- `opened`: Chroma Engine opened the backend/device and found the codec/profile, but has not wired or completed a decode/encode smoke probe.
+- `executable`: Chroma Engine has an implementation that can run for the codec/profile.
 - `verified`: Chroma Engine completed a real warmup or smoke probe for the codec/profile on the current host.
 
-Planning may only select `available` or `verified` backends. Linux and Windows hardware paths are currently designed/modeled, not executable. The OpenH264 CPU H.264 decode and encode backends are executable on all supported operating systems and are reported separately from hardware capability.
+Planning may only select `executable` or `verified` backends. Linux VA-API device/profile probing can reach `opened`, but Linux and Windows hardware paths are not executable yet. The OpenH264 CPU H.264 decode and encode backends are executable on all supported operating systems and are reported separately from hardware capability.
 
 ## Schema Compatibility
 

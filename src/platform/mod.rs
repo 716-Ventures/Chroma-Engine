@@ -10,6 +10,9 @@ use crate::{
     },
 };
 
+#[cfg(target_os = "linux")]
+mod vaapi;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 /// Result of probing the host for encoding capabilities.
@@ -780,8 +783,11 @@ fn video_decode_unavailable_reason(os: &str, kind: HardwareKind, codec: VideoCod
     }
     if kind == HardwareKind::VideoToolbox {
         format!("VideoToolbox hardware decode support was not reported for {codec:?}")
-    } else if matches!(kind, HardwareKind::Vaapi | HardwareKind::Qsv) && os == "linux" {
-        "Linux hardware decode device was not detected under /dev/dri".to_string()
+    } else if kind == HardwareKind::Vaapi && os == "linux" {
+        linux_vaapi_decode_unavailable_reason(codec)
+    } else if kind == HardwareKind::Qsv && os == "linux" {
+        "Linux Quick Sync decode is detected through DRM but is not executable in this build"
+            .to_string()
     } else if kind == HardwareKind::Nvdec && os == "linux" {
         "NVIDIA decode device was not detected under /dev/nvidiactl".to_string()
     } else if os == "windows" {
@@ -800,6 +806,9 @@ fn video_decode_backend_state(os: &str, kind: HardwareKind, codec: VideoCodec) -
         (_, HardwareKind::Cpu) => CapabilityState::Executable,
         ("macos", HardwareKind::VideoToolbox) if video_toolbox_decode_supported(codec) => {
             CapabilityState::Executable
+        }
+        ("linux", HardwareKind::Vaapi) if linux_vaapi_decode_supported(codec) => {
+            CapabilityState::Opened
         }
         ("linux", HardwareKind::Vaapi | HardwareKind::Qsv) if linux_dri_decode_device_present() => {
             CapabilityState::Detected
@@ -851,6 +860,26 @@ fn linux_dri_decode_device_present() -> bool {
         .into_iter()
         .flat_map(|entries| entries.flatten())
         .any(|entry| entry.file_name().to_string_lossy().starts_with("renderD"))
+}
+
+#[cfg(target_os = "linux")]
+fn linux_vaapi_decode_supported(codec: VideoCodec) -> bool {
+    vaapi::decode_probe().supports(codec)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn linux_vaapi_decode_supported(_codec: VideoCodec) -> bool {
+    false
+}
+
+#[cfg(target_os = "linux")]
+fn linux_vaapi_decode_unavailable_reason(codec: VideoCodec) -> String {
+    vaapi::decode_probe().unavailable_reason(codec)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn linux_vaapi_decode_unavailable_reason(_codec: VideoCodec) -> String {
+    "VA-API runtime probing is available only in Linux builds".to_string()
 }
 
 #[cfg(not(target_os = "linux"))]

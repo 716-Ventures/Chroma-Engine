@@ -73,3 +73,8 @@ objc2-core-foundation = "0.3.2"
 objc2-core-media = "0.3.2"
 objc2-core-video = "0.3.2"
 objc2-video-toolbox = "0.3.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# VA-API is optional at runtime. Loading it dynamically keeps Linux/NAS
+# binaries buildable and runnable on hosts without graphics development files.
+libloading = "0.8.9"

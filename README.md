@@ -24,7 +24,7 @@ This crate is intentionally not a general FFmpeg clone. It implements the contai
 
 ## Current Status
 
-The native probe path parses MP4/MOV and Matroska/WebM structure, emits typed tracks, and has integration tests against generated fixtures. macOS VideoToolbox encode/decode probes are executable today. Retained OpenH264 sessions provide H.264 decode and encode, safe Rust provides HEVC Main/Main10 decode, and retained dav1d sessions provide AV1 decode on macOS, Windows, Linux, and Linux-based NAS hosts on both x86-64 and ARM64. Linux and Windows hardware backend contracts are modeled with explicit capability states, but those hardware backends are not executable yet. Source builds need libdav1d 1.3+ discoverable through `pkg-config`; release bundles must include the corresponding native library.
+The native probe path parses MP4/MOV and Matroska/WebM structure, emits typed tracks, and has integration tests against generated fixtures. macOS VideoToolbox encode/decode probes are executable today. Retained OpenH264 sessions provide H.264 decode and encode, safe Rust provides HEVC Main/Main10 decode, and retained dav1d sessions provide AV1 decode on macOS, Windows, Linux, and Linux-based NAS hosts on both x86-64 and ARM64. Linux VA-API probing now opens real DRM render nodes and verifies H.264/HEVC VLD profiles through runtime-loaded libva; decoded-surface execution is still pending, and other Linux plus Windows hardware backends remain modeled. Source builds need libdav1d 1.3+ discoverable through `pkg-config`; release bundles must include the corresponding native library.
 
 Media inputs are held through file-backed views rather than file-sized heap buffers. Clone-capable
 macOS filesystems get a private copy-on-write snapshot; the portable fallback retains the open read
@@ -40,9 +40,10 @@ preferred host integration point.
 
 Capability status terms are:
 
-- `designed`: modeled, not executable.
+- `modeled`: a roadmap/backend model exists, with no local runtime signal.
 - `detected`: hardware/runtime signal found, backend still not executable.
-- `available`: backend can initialize locally.
+- `opened`: the backend/device and required codec profile opened successfully, without an executable codec smoke test.
+- `executable`: an implementation can run for the codec/profile.
 - `verified`: backend completed a real warmup/smoke probe.
 
 The detailed implementation checklist lives in [docs/implementation-checklist.md](docs/implementation-checklist.md). The exact operating-system and architecture coverage is documented in [docs/platform-support.md](docs/platform-support.md). Release and compatibility rules live in [docs/release-policy.md](docs/release-policy.md).

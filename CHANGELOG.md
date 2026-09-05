@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added headerless, runtime-loaded Linux VA-API probing that opens DRM render nodes, reports the
+  driver vendor, and verifies H.264/HEVC VLD profiles without making libva a link-time dependency.
 - Added retained, source-built OpenH264 CPU decode and encode sessions that exchange BGRA frames,
   AVCC samples, and avcC decoder configuration on macOS, Windows, Linux, and Linux-based NAS
   targets.
