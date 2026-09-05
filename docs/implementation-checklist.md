@@ -159,4 +159,11 @@
 - [x] Add side-by-side diagnostics for Chroma Engine vs legacy media path during migration. GenusServer diagnostics now show FFmpeg/ffprobe, Chroma Engine binary/enabled state, analyzer version, analysis ready/stale/failed/missing counts, and active Chroma playback sessions.
 - [x] Switch playback sessions to Chroma Engine. Verified `media_c75bb70a81774a35964021aacb41f675` starts as `directStream`/`hls-fmp4` with `transcodeReasons=["chroma-engine-hls"]`; DTS-in-`mp4a` movie `media_5995bdbc01e74246be61afcf6a986ed6` no longer receives a fake Chroma-native HLS path.
 - [x] Switch offline MKV remux to Rust engine. Chroma Engine `remux-mp4` now writes fragmented MP4 from supported MKV/WebM sources without FFmpeg; GenusServer MKV convert jobs prefer this path and fall back to FFmpeg only when native remux fails and fallback is enabled. Validated with `/Volumes/TVShows/Is It Wrong to Try to Pick Up Girls in a Dungeon!/Season 5/Is.It.Wrong.to.Try.to.Pick.Up.Girls.in.a.Dungeon.S05E10.720p.HEVC.x265-MeGusta.mkv`.
-- [ ] Remove vendored legacy media binaries once Chroma Engine covers the required native paths. Reopened after server testing: GenusServer still requires ffprobe for some MP4 analysis paths and ffmpeg for MKV/movie fallback paths, so vendored binaries must remain until those calls are replaced by Chroma Engine-native probe/transcode coverage.
+
+## Downstream Migration
+
+- [ ] Remove vendored legacy media binaries from GenusServer. This is not remaining Chroma Engine
+  implementation: the engine now supplies native probe, playback, remux, and transcode contracts
+  without spawning FFmpeg. GenusServer still owns ffprobe-shaped probe/cache adapters, its legacy
+  FFmpeg HLS supervisor, packaging scripts, and fallback policy. Those call sites must be migrated
+  and validated in the GenusServer repository before its vendored binaries can be removed.

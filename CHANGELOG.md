@@ -6,6 +6,8 @@
   and Windows ARM64. ARM64 CI now embeds dependency metadata, bundles dav1d, smoke-tests the
   packaged executable, verifies its checksum, and uploads the resulting archive; rustdoc warnings
   are explicitly denied in the platform test matrix.
+- Reclassified removal of GenusServer's vendored FFmpeg/ffprobe binaries as a downstream migration
+  task now that the engine-side probe, playback, remux, and transcode contracts are implemented.
 - Added retained Windows HEVC Main hardware decoding through the existing Media Foundation/D3D11
   path. Chroma converts hvcC parameter sets and length-prefixed samples to Annex B, reads back
   NV12 textures with checked row pitches, and advertises the backend only after a generated HEVC
