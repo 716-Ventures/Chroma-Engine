@@ -9,6 +9,9 @@
   facade is vendored to preserve Rust 1.90 support.
 - Extended that Windows HEVC decoder to Main10 with explicit P010 transform negotiation, native
   texture-format reporting, checked padded-plane readback, and the shared 10-bit-to-BGRA boundary.
+- Removed non-executable Windows AMF, D3D12VA, DXVA2, QSV, and NVDEC decoder aliases plus the
+  modeled AMF encoder candidates. AMD hardware remains covered by the executable hardware-only
+  Media Foundation/D3D11 path, and reserved public enum values are retained for compatibility.
 - Added retained Linux Intel Quick Sync H.264/HEVC decode and Main encode sessions through the
   runtime-loaded iHD/i965 VA-API driver. QSV selection now requires an Intel vendor render node and
   real codec probes, remains distinct from generic VA-API, and adds no oneVPL link dependency.

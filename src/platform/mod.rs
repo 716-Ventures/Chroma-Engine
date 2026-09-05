@@ -852,111 +852,6 @@ fn video_decoder_backend_matrix_for_os(os: &str) -> Vec<VideoDecoderBackend> {
                     VideoDecodeSurfaceFormat::P010,
                 ],
             ),
-            video_decoder_backend(
-                "windows",
-                HardwareKind::D3d12Va,
-                VideoCodec::H264,
-                "chroma-d3d12va-h264-decoder",
-                &[
-                    VideoDecodeSurfaceFormat::D3d12Texture,
-                    VideoDecodeSurfaceFormat::Nv12,
-                ],
-            ),
-            video_decoder_backend(
-                "windows",
-                HardwareKind::D3d12Va,
-                VideoCodec::Hevc,
-                "chroma-d3d12va-hevc-decoder",
-                &[
-                    VideoDecodeSurfaceFormat::D3d12Texture,
-                    VideoDecodeSurfaceFormat::Nv12,
-                    VideoDecodeSurfaceFormat::P010,
-                ],
-            ),
-            video_decoder_backend(
-                "windows",
-                HardwareKind::Dxva2,
-                VideoCodec::H264,
-                "chroma-dxva2-h264-decoder",
-                &[
-                    VideoDecodeSurfaceFormat::Dxva2Surface,
-                    VideoDecodeSurfaceFormat::Nv12,
-                ],
-            ),
-            video_decoder_backend(
-                "windows",
-                HardwareKind::Dxva2,
-                VideoCodec::Hevc,
-                "chroma-dxva2-hevc-decoder",
-                &[
-                    VideoDecodeSurfaceFormat::Dxva2Surface,
-                    VideoDecodeSurfaceFormat::Nv12,
-                    VideoDecodeSurfaceFormat::P010,
-                ],
-            ),
-            video_decoder_backend(
-                "windows",
-                HardwareKind::Qsv,
-                VideoCodec::H264,
-                "chroma-qsv-h264-decoder",
-                &[
-                    VideoDecodeSurfaceFormat::QsvSurface,
-                    VideoDecodeSurfaceFormat::Nv12,
-                ],
-            ),
-            video_decoder_backend(
-                "windows",
-                HardwareKind::Qsv,
-                VideoCodec::Hevc,
-                "chroma-qsv-hevc-decoder",
-                &[
-                    VideoDecodeSurfaceFormat::QsvSurface,
-                    VideoDecodeSurfaceFormat::Nv12,
-                    VideoDecodeSurfaceFormat::P010,
-                ],
-            ),
-            video_decoder_backend(
-                "windows",
-                HardwareKind::Amf,
-                VideoCodec::H264,
-                "chroma-amf-h264-decoder",
-                &[
-                    VideoDecodeSurfaceFormat::AmfSurface,
-                    VideoDecodeSurfaceFormat::Nv12,
-                ],
-            ),
-            video_decoder_backend(
-                "windows",
-                HardwareKind::Amf,
-                VideoCodec::Hevc,
-                "chroma-amf-hevc-decoder",
-                &[
-                    VideoDecodeSurfaceFormat::AmfSurface,
-                    VideoDecodeSurfaceFormat::Nv12,
-                    VideoDecodeSurfaceFormat::P010,
-                ],
-            ),
-            video_decoder_backend(
-                "windows",
-                HardwareKind::Nvdec,
-                VideoCodec::H264,
-                "chroma-nvdec-h264-decoder",
-                &[
-                    VideoDecodeSurfaceFormat::CudaSurface,
-                    VideoDecodeSurfaceFormat::Nv12,
-                ],
-            ),
-            video_decoder_backend(
-                "windows",
-                HardwareKind::Nvdec,
-                VideoCodec::Hevc,
-                "chroma-nvdec-hevc-decoder",
-                &[
-                    VideoDecodeSurfaceFormat::CudaSurface,
-                    VideoDecodeSurfaceFormat::Nv12,
-                    VideoDecodeSurfaceFormat::P010,
-                ],
-            ),
             cpu_h264_decoder_backend("windows"),
             cpu_hevc_decoder_backend("windows"),
             cpu_av1_decoder_backend("windows"),
@@ -1110,16 +1005,7 @@ fn video_decode_backend_state(os: &str, kind: HardwareKind, codec: VideoCodec) -
         {
             CapabilityState::Executable
         }
-        ("windows", HardwareKind::D3d11Va | HardwareKind::D3d12Va | HardwareKind::Dxva2) => {
-            windows_media_foundation_decode_state(codec)
-        }
-        ("windows", HardwareKind::Qsv | HardwareKind::Amf | HardwareKind::Nvdec) => {
-            if windows_vendor_decode_runtime_present(kind) {
-                CapabilityState::Detected
-            } else {
-                CapabilityState::Modeled
-            }
-        }
+        ("windows", HardwareKind::D3d11Va) => windows_media_foundation_decode_state(codec),
         _ => CapabilityState::Modeled,
     }
 }
@@ -1420,16 +1306,6 @@ fn windows_hardware_decode_unavailable_reason(_kind: HardwareKind, _codec: Video
     "Windows Media Foundation probing is available only in Windows builds".to_string()
 }
 
-#[cfg(target_os = "windows")]
-fn windows_vendor_decode_runtime_present(_kind: HardwareKind) -> bool {
-    false
-}
-
-#[cfg(not(target_os = "windows"))]
-fn windows_vendor_decode_runtime_present(_kind: HardwareKind) -> bool {
-    false
-}
-
 fn default_cpu_profile() -> EncoderProfile {
     EncoderProfile {
         kind: HardwareKind::Cpu,
@@ -1575,8 +1451,6 @@ fn video_backend_matrix() -> Vec<EncoderBackend> {
                 VideoOutputCodec::Hevc,
                 "chroma-windows-mf-hevc",
             ),
-            planned_video_backend(HardwareKind::Amf, VideoOutputCodec::H264, "chroma-amf-h264"),
-            planned_video_backend(HardwareKind::Amf, VideoOutputCodec::Hevc, "chroma-amf-hevc"),
             executable_video_backend(HardwareKind::Cpu, VideoOutputCodec::H264, "chroma-cpu-h264"),
         ],
         _ => vec![executable_video_backend(
@@ -2068,8 +1942,6 @@ fn native_candidate_names() -> Vec<String> {
             "nvenc:hevc".to_string(),
             "qsv:h264".to_string(),
             "qsv:hevc".to_string(),
-            "amf:h264".to_string(),
-            "amf:hevc".to_string(),
         ],
         "linux" => vec![
             "nvenc:h264".to_string(),
@@ -2321,7 +2193,7 @@ mod tests {
     }
 
     #[test]
-    fn decoder_backend_matrix_models_windows_hardware_decode_targets() {
+    fn decoder_backend_matrix_reports_only_wired_windows_hardware_decode_targets() {
         let backends = video_decoder_backend_matrix_for_os("windows");
 
         assert!(backends.iter().any(|backend| {
@@ -2349,36 +2221,15 @@ mod tests {
                     .native_surface_formats
                     .contains(&VideoDecodeSurfaceFormat::P010)
         }));
-        assert!(backends.iter().any(|backend| {
-            backend.kind == HardwareKind::D3d12Va
-                && backend.codec == VideoCodec::Hevc
-                && backend
-                    .native_surface_formats
-                    .contains(&VideoDecodeSurfaceFormat::D3d12Texture)
-                && backend
-                    .native_surface_formats
-                    .contains(&VideoDecodeSurfaceFormat::P010)
-        }));
-        assert!(backends.iter().any(|backend| {
-            backend.kind == HardwareKind::Dxva2
-                && backend.codec == VideoCodec::H264
-                && backend
-                    .native_surface_formats
-                    .contains(&VideoDecodeSurfaceFormat::Dxva2Surface)
-        }));
-        assert!(backends.iter().any(|backend| {
-            backend.kind == HardwareKind::Amf
-                && backend.codec == VideoCodec::Hevc
-                && backend
-                    .native_surface_formats
-                    .contains(&VideoDecodeSurfaceFormat::AmfSurface)
-        }));
-        assert!(backends.iter().any(|backend| {
-            backend.kind == HardwareKind::Nvdec
-                && backend.codec == VideoCodec::Hevc
-                && backend
-                    .native_surface_formats
-                    .contains(&VideoDecodeSurfaceFormat::CudaSurface)
+        assert!(backends.iter().all(|backend| {
+            !matches!(
+                backend.kind,
+                HardwareKind::D3d12Va
+                    | HardwareKind::Dxva2
+                    | HardwareKind::Qsv
+                    | HardwareKind::Amf
+                    | HardwareKind::Nvdec
+            )
         }));
     }
 
