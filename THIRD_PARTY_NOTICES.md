@@ -5,7 +5,7 @@
 Chroma Engine uses the source at commit `ad056ebf139a624a024016727030365eca9cfa08`
 (Mediaway v0.1.4).
 The `mediaway-decoder` source is vendored and narrowly modified to expose the existing
-Media Foundation/D3D11 decoder path for HEVC Main as well as H.264 while preserving the
+Media Foundation/D3D11 decoder path for HEVC Main/Main10 as well as H.264 while preserving the
 project's Rust 1.90 minimum supported version.
 
 MIT License

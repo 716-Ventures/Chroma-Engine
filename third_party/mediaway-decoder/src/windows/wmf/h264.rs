@@ -4,7 +4,10 @@
 
 use std::collections::VecDeque;
 
-use crate::{DecodeError, VideoDecoder, VideoDecoderConfig, VideoOutputPreference};
+use crate::{
+    DecodeError, HardwareSurfaceFormat, HardwareVideoFrame, VideoDecoder, VideoDecoderConfig,
+    VideoOutputPreference,
+};
 use iso_bmff::bitstream::avc::{annex_b_sequence_header, parse_avc_decoder_config};
 use mediaway_common::{
     Bytes, GpuBufferHandle, GpuDeviceHandle, NativeHandle, Packet, PixelFormat, StreamInfo,
@@ -13,6 +16,7 @@ use mediaway_common::{
 use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
 use windows::Win32::Media::MediaFoundation::{
     IMFSample, IMFTransform, MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_NOTIFY_END_OF_STREAM,
+    MFVideoFormat_NV12, MFVideoFormat_P010,
 };
 use windows::core::Interface;
 
@@ -34,6 +38,7 @@ struct GpuFrameHold {
     duration: u64,
     width: u32,
     height: u32,
+    format: HardwareSurfaceFormat,
 }
 
 impl GpuFrameHold {
@@ -43,6 +48,9 @@ impl GpuFrameHold {
     /// is somehow null (not expected in practice — a valid `Interface` value is
     /// never backed by a null vtable).
     fn to_video_frame(&self) -> Result<VideoFrame, DecodeError> {
+        if self.format != HardwareSurfaceFormat::Nv12 {
+            return Err(DecodeError::Unsupported);
+        }
         let texture = NativeHandle::new(Interface::as_raw(&self.texture) as usize)
             .ok_or(DecodeError::Backend)?;
         Ok(VideoFrame {
@@ -55,6 +63,20 @@ impl GpuFrameHold {
                 texture,
                 subresource: self.subresource,
             }),
+        })
+    }
+
+    fn to_hardware_frame(&self) -> Result<HardwareVideoFrame, DecodeError> {
+        let texture = NativeHandle::new(Interface::as_raw(&self.texture) as usize)
+            .ok_or(DecodeError::Backend)?;
+        Ok(HardwareVideoFrame {
+            pts: self.pts,
+            duration: self.duration,
+            width: self.width,
+            height: self.height,
+            format: self.format,
+            texture,
+            subresource: self.subresource,
         })
     }
 }
@@ -72,6 +94,7 @@ pub(crate) struct WmfH264Decoder {
     info: StreamInfo,
     time_base_num: u64,
     time_base_den: u32,
+    hardware_surface_format: HardwareSurfaceFormat,
     pending: VecDeque<PendingFrame>,
     /// COM hold for the GPU frame last returned from [`poll_frame`](VideoDecoder::poll_frame).
     released: Option<GpuFrameHold>,
@@ -102,6 +125,7 @@ impl WmfH264Decoder {
             return Err(DecodeError::InvalidInput);
         };
         let input_subtype = video_subtype(config.codec)?;
+        let output_subtype = output_subtype(config.hardware_surface_format);
         let device = dx11::device_from_handle(handle)?;
         let (annex_b_extra_data, nal_length_size) = resolve_annex_b_extra_data(&config.extra_data);
         let (transform, session) = dx11::open_hw_decoder(
@@ -110,6 +134,7 @@ impl WmfH264Decoder {
             config.height,
             &annex_b_extra_data,
             &input_subtype,
+            output_subtype,
         )?;
         let output_buf_size = output_buffer_size(&transform)?;
         Ok(Self {
@@ -117,6 +142,7 @@ impl WmfH264Decoder {
             info: stream_info_from(config),
             time_base_num: config.time_base.num,
             time_base_den: config.time_base.den,
+            hardware_surface_format: config.hardware_surface_format,
             pending: VecDeque::new(),
             released: None,
             flushed: false,
@@ -131,6 +157,9 @@ impl WmfH264Decoder {
     /// system-memory output buffer (see [`super::cpu`] — this is honest CPU decode, not a
     /// GPU→CPU readback, since there is no GPU texture in this path).
     fn open_cpu(config: &VideoDecoderConfig) -> Result<Self, DecodeError> {
+        if config.hardware_surface_format != HardwareSurfaceFormat::Nv12 {
+            return Err(DecodeError::Unsupported);
+        }
         let input_subtype = video_subtype(config.codec)?;
         let transform = open_sw_decoder(&input_subtype)?;
         let (annex_b_extra_data, nal_length_size) = resolve_annex_b_extra_data(&config.extra_data);
@@ -140,6 +169,7 @@ impl WmfH264Decoder {
             config.height,
             &annex_b_extra_data,
             &input_subtype,
+            &MFVideoFormat_NV12,
         )?;
         begin_streaming(&transform)?;
         let output_buf_size = output_buffer_size(&transform)?;
@@ -148,6 +178,7 @@ impl WmfH264Decoder {
             info: stream_info_from(config),
             time_base_num: config.time_base.num,
             time_base_den: config.time_base.den,
+            hardware_surface_format: HardwareSurfaceFormat::Nv12,
             pending: VecDeque::new(),
             released: None,
             flushed: false,
@@ -216,6 +247,7 @@ impl WmfH264Decoder {
             height,
             &annex_b_extra_data,
             &input_subtype,
+            output_subtype(self.hardware_surface_format()),
         )?;
         self.nal_length_size = nal_length_size;
         begin_streaming(&self.transform)?;
@@ -239,6 +271,7 @@ impl WmfH264Decoder {
 
         if self.dx11.is_some() {
             let (texture, subresource) = dx11::texture_from_output_sample(&sample)?;
+            let format = self.hardware_surface_format;
             self.pending.push_back(PendingFrame::Gpu(GpuFrameHold {
                 _sample: sample,
                 texture,
@@ -247,6 +280,7 @@ impl WmfH264Decoder {
                 duration,
                 width,
                 height,
+                format,
             }));
         } else {
             let data = cpu::nv12_bytes_from_output_sample(&sample, width, height)?;
@@ -260,6 +294,37 @@ impl WmfH264Decoder {
             }));
         }
         Ok(())
+    }
+
+    pub(crate) fn poll_hardware_frame(
+        &mut self,
+    ) -> Result<Option<HardwareVideoFrame>, DecodeError> {
+        if self.pending.is_empty() {
+            self.drain_output()?;
+        }
+        let Some(pending) = self.pending.pop_front() else {
+            return Ok(None);
+        };
+        self.recycle_surfaces();
+        match pending {
+            PendingFrame::Gpu(hold) => {
+                let frame = hold.to_hardware_frame()?;
+                self.released = Some(hold);
+                Ok(Some(frame))
+            }
+            PendingFrame::Cpu(_) => Err(DecodeError::Unsupported),
+        }
+    }
+
+    fn hardware_surface_format(&self) -> HardwareSurfaceFormat {
+        self.hardware_surface_format
+    }
+}
+
+const fn output_subtype(format: HardwareSurfaceFormat) -> &'static windows::core::GUID {
+    match format {
+        HardwareSurfaceFormat::Nv12 => &MFVideoFormat_NV12,
+        HardwareSurfaceFormat::P010 => &MFVideoFormat_P010,
     }
 }
 

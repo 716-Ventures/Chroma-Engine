@@ -634,7 +634,7 @@ pub enum BgraDecoderSession {
     /// Windows Media Foundation/D3D11 hardware H.264 decoder with checked NV12 readback.
     #[cfg(target_os = "windows")]
     WindowsH264(Box<WindowsH264BgraDecoderSession>),
-    /// Windows Media Foundation/D3D11 hardware HEVC Main decoder.
+    /// Windows Media Foundation/D3D11 hardware HEVC Main/Main10 decoder.
     #[cfg(target_os = "windows")]
     WindowsHevc(Box<WindowsHevcBgraDecoderSession>),
     /// Portable OpenH264 software decoder.

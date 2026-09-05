@@ -10,7 +10,7 @@ use windows::Win32::Media::MediaFoundation::{
     MF_MT_MPEG_SEQUENCE_HEADER, MF_MT_SUBTYPE, MFCreateMediaType, MFCreateMemoryBuffer,
     MFCreateSample, MFMediaType_Video, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
     MFT_MESSAGE_NOTIFY_END_STREAMING, MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_OUTPUT_DATA_BUFFER,
-    MFVideoFormat_NV12, MFVideoInterlace_Progressive,
+    MFVideoInterlace_Progressive,
 };
 use windows::core::GUID;
 
@@ -28,6 +28,7 @@ pub(super) fn configure_decode_types(
     height: u32,
     extra_data: &Bytes,
     input_subtype: &GUID,
+    output_subtype: &GUID,
 ) -> Result<(), DecodeError> {
     // SAFETY: owned media types; plain attribute setters.
     let in_type = unsafe { MFCreateMediaType() }.map_err(|_| DecodeError::Backend)?;
@@ -62,7 +63,7 @@ pub(super) fn configure_decode_types(
             .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
             .map_err(|_| DecodeError::Backend)?;
         out_type
-            .SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_NV12)
+            .SetGUID(&MF_MT_SUBTYPE, output_subtype)
             .map_err(|_| DecodeError::Backend)?;
         if width > 0 && height > 0 {
             out_type

@@ -849,6 +849,7 @@ fn video_decoder_backend_matrix_for_os(os: &str) -> Vec<VideoDecoderBackend> {
                 &[
                     VideoDecodeSurfaceFormat::D3d11Texture,
                     VideoDecodeSurfaceFormat::Nv12,
+                    VideoDecodeSurfaceFormat::P010,
                 ],
             ),
             video_decoder_backend(
@@ -2344,7 +2345,7 @@ mod tests {
                 && backend
                     .native_surface_formats
                     .contains(&VideoDecodeSurfaceFormat::Nv12)
-                && !backend
+                && backend
                     .native_surface_formats
                     .contains(&VideoDecodeSurfaceFormat::P010)
         }));

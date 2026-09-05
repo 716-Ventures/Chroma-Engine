@@ -11,7 +11,6 @@ use windows::Win32::Media::MediaFoundation::{
     MF_SA_D3D11_AWARE, MF_TRANSFORM_ASYNC, MF_TRANSFORM_ASYNC_UNLOCK, MFCreateDXGIDeviceManager,
     MFMediaType_Video, MFT_CATEGORY_VIDEO_DECODER, MFT_ENUM_FLAG, MFT_ENUM_FLAG_HARDWARE,
     MFT_ENUM_FLAG_SORTANDFILTER, MFT_MESSAGE_SET_D3D_MANAGER, MFT_REGISTER_TYPE_INFO, MFTEnumEx,
-    MFVideoFormat_NV12,
 };
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::core::{GUID, Interface};
@@ -34,6 +33,7 @@ pub(super) fn open_hw_decoder(
     height: u32,
     extra_data: &mediaway_common::Bytes,
     input_subtype: &GUID,
+    output_subtype: &GUID,
 ) -> Result<(IMFTransform, Dx11Session), DecodeError> {
     enable_multithread(&device);
 
@@ -46,7 +46,7 @@ pub(super) fn open_hw_decoder(
     // SAFETY: ResetDevice associates our ID3D11Device with the manager.
     unsafe { manager.ResetDevice(&device, reset_token) }.map_err(|_| DecodeError::Backend)?;
 
-    let transform = activate_hw_decoder(input_subtype)?;
+    let transform = activate_hw_decoder(input_subtype, output_subtype)?;
     ensure_d3d11_aware(&transform)?;
 
     // SAFETY: SET_D3D_MANAGER takes the raw IUnknown of the DXGI manager.
@@ -58,7 +58,14 @@ pub(super) fn open_hw_decoder(
     }
 
     let events = unlock_async_if_needed(&transform)?;
-    configure_decode_types(&transform, width, height, extra_data, input_subtype)?;
+    configure_decode_types(
+        &transform,
+        width,
+        height,
+        extra_data,
+        input_subtype,
+        output_subtype,
+    )?;
     begin_streaming(&transform)?;
 
     let out_info = unsafe { transform.GetOutputStreamInfo(0) }.map_err(|_| DecodeError::Backend)?;
@@ -196,14 +203,17 @@ fn unlock_async_if_needed(
     Ok(Some(event_gen))
 }
 
-fn activate_hw_decoder(input_subtype: &GUID) -> Result<IMFTransform, DecodeError> {
+fn activate_hw_decoder(
+    input_subtype: &GUID,
+    output_subtype: &GUID,
+) -> Result<IMFTransform, DecodeError> {
     let input = MFT_REGISTER_TYPE_INFO {
         guidMajorType: MFMediaType_Video,
         guidSubtype: *input_subtype,
     };
     let output = MFT_REGISTER_TYPE_INFO {
         guidMajorType: MFMediaType_Video,
-        guidSubtype: MFVideoFormat_NV12,
+        guidSubtype: *output_subtype,
     };
     let flags = MFT_ENUM_FLAG(MFT_ENUM_FLAG_HARDWARE.0 | MFT_ENUM_FLAG_SORTANDFILTER.0);
     let mut activates: *mut Option<IMFActivate> = std::ptr::null_mut();

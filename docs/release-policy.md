@@ -10,7 +10,7 @@ Chroma Engine uses the same status terms in documentation and runtime DTOs:
 - `executable`: Chroma Engine has an implementation that can run for the codec/profile.
 - `verified`: Chroma Engine completed a real warmup or smoke probe for the codec/profile on the current host.
 
-Planning may only select `executable` or `verified` backends. Linux builds with `linux-vaapi` report H.264 and HEVC VA-API as executable after the runtime probe opens a matching VLD context; an Intel-identified iHD/i965 render node may additionally advertise the same retained paths as Quick Sync. Release builds enable that feature. Windows reports D3D11VA H.264 or HEVC Main decode as executable only after a generated compressed frame completes hardware decode, texture readback, and BGRA conversion. The portable H.264 and HEVC decoders remain executable on every supported operating system and provide the universal fallback, including HEVC Main10 where the Windows hardware path currently accepts only NV12/Main output.
+Planning may only select `executable` or `verified` backends. Linux builds with `linux-vaapi` report H.264 and HEVC VA-API as executable after the runtime probe opens a matching VLD context; an Intel-identified iHD/i965 render node may additionally advertise the same retained paths as Quick Sync. Release builds enable that feature. Windows reports D3D11VA H.264 or HEVC decode as executable only after a generated compressed frame completes hardware decode, texture readback, and BGRA conversion; HEVC Main10 additionally requires successful P010 negotiation when a Main10 session opens. The portable H.264 and HEVC decoders remain executable on every supported operating system and provide the universal fallback.
 
 ## Schema Compatibility
 

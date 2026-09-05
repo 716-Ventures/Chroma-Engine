@@ -1,11 +1,11 @@
 #![allow(unsafe_code)]
 
 use mediaway_common::{
-    Bytes, CodecKind, GpuBufferHandle, GpuDeviceHandle, NativeHandle, Packet, PixelFormat,
-    Rational, VideoFrame, VideoFrameStorage,
+    Bytes, CodecKind, GpuDeviceHandle, NativeHandle, Packet, PixelFormat, Rational,
 };
 use mediaway_decoder::{
-    VideoDecoder, VideoDecoderConfig, VideoOutputPreference, windows::WindowsVideoDecoder,
+    HardwareSurfaceFormat, HardwareVideoFrame, VideoDecoder, VideoDecoderConfig,
+    VideoOutputPreference, windows::WindowsVideoDecoder,
 };
 use windows::{
     Win32::{
@@ -18,7 +18,7 @@ use windows::{
                 D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING, D3D11CreateDevice,
                 ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
             },
-            Dxgi::Common::DXGI_FORMAT_NV12,
+            Dxgi::Common::{DXGI_FORMAT_NV12, DXGI_FORMAT_P010},
         },
     },
     core::Interface,
@@ -29,6 +29,8 @@ use super::{
     RawVideoFormat, VideoCodec, VideoDecodeError, VideoDecodeInput, validate_decoded_video_format,
 };
 
+const MAX_FRAME_BYTES: usize = 512 * 1024 * 1024;
+
 /// Retained Windows Media Foundation/D3D11 hardware H.264 decoder.
 ///
 /// Media Foundation emits NV12 D3D11 textures. Chroma copies each completed texture to a
@@ -38,6 +40,7 @@ pub struct WindowsH264BgraDecoderSession {
     output_format: RawVideoFormat,
     codec: VideoCodec,
     hevc_nalu_length_size: Option<u8>,
+    surface_format: HardwareSurfaceFormat,
     device: ID3D11Device,
     context: ID3D11DeviceContext,
     decoder: WindowsVideoDecoder,
@@ -46,7 +49,7 @@ pub struct WindowsH264BgraDecoderSession {
     decoded_batches: u64,
 }
 
-/// Retained Windows Media Foundation/D3D11 hardware HEVC Main decoder.
+/// Retained Windows Media Foundation/D3D11 hardware HEVC Main/Main10 decoder.
 pub struct WindowsHevcBgraDecoderSession {
     inner: WindowsH264BgraDecoderSession,
 }
@@ -65,6 +68,7 @@ impl std::fmt::Debug for WindowsH264BgraDecoderSession {
         formatter
             .debug_struct("WindowsH264BgraDecoderSession")
             .field("output_format", &self.output_format)
+            .field("surface_format", &self.surface_format)
             .field("session_created", &true)
             .field("pending_frames", &self.pending.len())
             .field("decoded_batches", &self.decoded_batches)
@@ -87,16 +91,28 @@ impl WindowsH264BgraDecoderSession {
         decoder_config: &[u8],
     ) -> Result<Self, VideoDecodeError> {
         validate_decoded_video_format(output_format)?;
+        let output_bytes = (output_format.width as usize)
+            .checked_mul(output_format.height as usize)
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or_else(|| VideoDecodeError::InvalidOutputFormat {
+                reason: "Windows decoded BGRA byte count overflowed".to_string(),
+            })?;
+        if output_bytes > MAX_FRAME_BYTES {
+            return Err(VideoDecodeError::InvalidOutputFormat {
+                reason: "Windows decoded frame exceeds the 512 MiB safety limit".to_string(),
+            });
+        }
         if decoder_config.is_empty() {
             return Err(VideoDecodeError::MissingDecoderConfig);
         }
         let (device, context) = create_video_device()?;
-        let (decoder, hevc_nalu_length_size) =
+        let (decoder, hevc_nalu_length_size, surface_format) =
             open_decoder(&device, codec, output_format, decoder_config)?;
         Ok(Self {
             output_format,
             codec,
             hevc_nalu_length_size,
+            surface_format,
             device,
             context,
             decoder,
@@ -188,7 +204,7 @@ impl WindowsH264BgraDecoderSession {
     ) -> Result<(), VideoDecodeError> {
         while let Some(frame) = self
             .decoder
-            .poll_frame()
+            .poll_hardware_frame()
             .map_err(map_decoder_error("frame receive"))?
         {
             output.push(self.copy_frame(frame)?);
@@ -196,8 +212,11 @@ impl WindowsH264BgraDecoderSession {
         Ok(())
     }
 
-    fn copy_frame(&mut self, frame: VideoFrame) -> Result<DecodedVideoFrame, VideoDecodeError> {
-        if frame.format != PixelFormat::Nv12
+    fn copy_frame(
+        &mut self,
+        frame: HardwareVideoFrame,
+    ) -> Result<DecodedVideoFrame, VideoDecodeError> {
+        if frame.format != self.surface_format
             || frame.width != self.output_format.width
             || frame.height != self.output_format.height
         {
@@ -208,25 +227,15 @@ impl WindowsH264BgraDecoderSession {
                 ),
             });
         }
-        let (texture, subresource) = match frame.storage {
-            VideoFrameStorage::Gpu(GpuBufferHandle::DirectX11 {
-                texture,
-                subresource,
-            }) => (texture, subresource),
-            _ => {
-                return Err(VideoDecodeError::InvalidOutputFormat {
-                    reason: "Windows hardware decoder returned a non-D3D11 frame".to_string(),
-                });
-            }
-        };
         let timing = take_timing(&mut self.pending, frame.pts)?;
-        let pixels = copy_nv12_texture_to_bgra(
+        let pixels = copy_texture_to_bgra(
             &self.device,
             &self.context,
-            texture,
-            subresource,
+            frame.texture,
+            frame.subresource,
             frame.width,
             frame.height,
+            frame.format,
         )?;
         Ok(DecodedVideoFrame {
             pts: timing.pts,
@@ -249,19 +258,12 @@ impl std::fmt::Debug for WindowsHevcBgraDecoderSession {
 }
 
 impl WindowsHevcBgraDecoderSession {
-    /// Creates a D3D11-backed hardware HEVC Main decoder.
+    /// Creates a D3D11-backed hardware HEVC Main/Main10 decoder.
     pub fn new(
         output_format: RawVideoFormat,
         decoder_config: &[u8],
     ) -> Result<Self, VideoDecodeError> {
-        if crate::codec::pixel_format::pixel_format_from_hevc_decoder_config(decoder_config)
-            .as_deref()
-            != Some("yuv420-8bit")
-        {
-            return Err(VideoDecodeError::BackendUnavailable {
-                reason: "Windows D3D11 HEVC currently supports Main 8-bit YUV420 input".to_string(),
-            });
-        }
+        hevc_surface_format(decoder_config)?;
         Ok(Self {
             inner: WindowsH264BgraDecoderSession::new_for_codec(
                 VideoCodec::Hevc,
@@ -318,14 +320,19 @@ fn open_decoder(
     codec: VideoCodec,
     format: RawVideoFormat,
     decoder_config: &[u8],
-) -> Result<(WindowsVideoDecoder, Option<u8>), VideoDecodeError> {
+) -> Result<(WindowsVideoDecoder, Option<u8>, HardwareSurfaceFormat), VideoDecodeError> {
     let device_handle = NativeHandle::new(Interface::as_raw(device) as usize).ok_or_else(|| {
         VideoDecodeError::BackendUnavailable {
             reason: "D3D11 returned a null device handle".to_string(),
         }
     })?;
-    let (codec_kind, extra_data, hevc_nalu_length_size) = match codec {
-        VideoCodec::H264 => (CodecKind::H264, decoder_config.to_vec(), None),
+    let (codec_kind, extra_data, hevc_nalu_length_size, surface_format) = match codec {
+        VideoCodec::H264 => (
+            CodecKind::H264,
+            decoder_config.to_vec(),
+            None,
+            HardwareSurfaceFormat::Nv12,
+        ),
         VideoCodec::Hevc => {
             let config =
                 crate::codec::hevc::parse_hevc_decoder_config(decoder_config).map_err(|error| {
@@ -343,6 +350,7 @@ fn open_decoder(
                 CodecKind::Hevc,
                 parameter_sets,
                 Some(config.nalu_length_size),
+                hevc_surface_format(decoder_config)?,
             )
         }
         VideoCodec::Av1 => return Err(VideoDecodeError::UnsupportedCodec),
@@ -354,14 +362,27 @@ fn open_decoder(
         time_base: Rational::new(u64::from(format.frame_rate_den), format.frame_rate_num),
         pixel_format: PixelFormat::Nv12,
         output: VideoOutputPreference::ZeroCopyGpu,
+        hardware_surface_format: surface_format,
         gpu_device: Some(GpuDeviceHandle::DirectX11(device_handle)),
         extra_data: Bytes::from(extra_data),
     };
     WindowsVideoDecoder::open(&config)
-        .map(|decoder| (decoder, hevc_nalu_length_size))
+        .map(|decoder| (decoder, hevc_nalu_length_size, surface_format))
         .map_err(|error| VideoDecodeError::BackendUnavailable {
             reason: format!("Windows hardware {codec:?} decoder initialization failed: {error}"),
         })
+}
+
+fn hevc_surface_format(decoder_config: &[u8]) -> Result<HardwareSurfaceFormat, VideoDecodeError> {
+    match crate::codec::pixel_format::pixel_format_from_hevc_decoder_config(decoder_config)
+        .as_deref()
+    {
+        Some("yuv420-8bit") => Ok(HardwareSurfaceFormat::Nv12),
+        Some("yuv420-10bit") => Ok(HardwareSurfaceFormat::P010),
+        _ => Err(VideoDecodeError::BackendUnavailable {
+            reason: "Windows D3D11 HEVC supports Main/Main10 YUV420 input".to_string(),
+        }),
+    }
 }
 
 fn to_mediaway_packet(
@@ -413,13 +434,14 @@ fn take_timing(
     Ok(pending.remove(index))
 }
 
-fn copy_nv12_texture_to_bgra(
+fn copy_texture_to_bgra(
     device: &ID3D11Device,
     context: &ID3D11DeviceContext,
     texture: NativeHandle,
     subresource: u32,
     width: u32,
     height: u32,
+    format: HardwareSurfaceFormat,
 ) -> Result<Vec<u8>, VideoDecodeError> {
     let raw = texture.get() as *mut std::ffi::c_void;
     // SAFETY: Mediaway guarantees the handle is a live ID3D11Texture2D until the next decoder
@@ -442,20 +464,43 @@ fn copy_nv12_texture_to_bgra(
     let mut source_desc = D3D11_TEXTURE2D_DESC::default();
     // SAFETY: source is a live texture and the descriptor output pointer is valid.
     unsafe { source.GetDesc(&raw mut source_desc) };
-    if source_desc.Format != DXGI_FORMAT_NV12
-        || source_desc.Width < width
-        || source_desc.Height < height
+    let dxgi_format = match format {
+        HardwareSurfaceFormat::Nv12 => DXGI_FORMAT_NV12,
+        HardwareSurfaceFormat::P010 => DXGI_FORMAT_P010,
+    };
+    if source_desc.Format != dxgi_format || source_desc.Width < width || source_desc.Height < height
     {
         return Err(VideoDecodeError::InvalidOutputFormat {
             reason: "Windows decoder returned an incompatible D3D11 texture".to_string(),
         });
     }
+    if source_desc.SampleDesc.Count != 1 {
+        return Err(VideoDecodeError::InvalidOutputFormat {
+            reason: "Windows decoder returned a multisampled video texture".to_string(),
+        });
+    }
+    let bytes_per_sample = match format {
+        HardwareSurfaceFormat::Nv12 => 1_usize,
+        HardwareSurfaceFormat::P010 => 2_usize,
+    };
+    let surface_bytes = (source_desc.Width as usize)
+        .checked_mul(bytes_per_sample)
+        .and_then(|row_bytes| row_bytes.checked_mul(source_desc.Height as usize))
+        .and_then(|luma_bytes| luma_bytes.checked_add(luma_bytes.div_ceil(2)))
+        .ok_or_else(|| VideoDecodeError::InvalidOutputFormat {
+            reason: "D3D11 decoded texture byte count overflowed".to_string(),
+        })?;
+    if surface_bytes > MAX_FRAME_BYTES {
+        return Err(VideoDecodeError::InvalidOutputFormat {
+            reason: "D3D11 decoded texture exceeds the 512 MiB safety limit".to_string(),
+        });
+    }
     let staging_desc = D3D11_TEXTURE2D_DESC {
-        Width: width,
-        Height: height,
+        Width: source_desc.Width,
+        Height: source_desc.Height,
         MipLevels: 1,
         ArraySize: 1,
-        Format: DXGI_FORMAT_NV12,
+        Format: dxgi_format,
         SampleDesc: source_desc.SampleDesc,
         Usage: D3D11_USAGE_STAGING,
         BindFlags: 0,
@@ -485,52 +530,78 @@ fn copy_nv12_texture_to_bgra(
         },
     )?;
 
-    let result = mapped_nv12_to_bgra(&mapped, width as usize, height as usize);
+    let result = mapped_texture_to_bgra(
+        &mapped,
+        width as usize,
+        height as usize,
+        source_desc.Height as usize,
+        format,
+    );
     // SAFETY: staging subresource zero was successfully mapped immediately above.
     unsafe { context.Unmap(&staging, 0) };
     result
 }
 
-fn mapped_nv12_to_bgra(
+fn mapped_texture_to_bgra(
     mapped: &D3D11_MAPPED_SUBRESOURCE,
     width: usize,
     height: usize,
+    surface_height: usize,
+    format: HardwareSurfaceFormat,
 ) -> Result<Vec<u8>, VideoDecodeError> {
     let stride = mapped.RowPitch as usize;
-    let chroma_height = height.div_ceil(2);
-    let total_rows =
-        height
-            .checked_add(chroma_height)
-            .ok_or_else(|| VideoDecodeError::InvalidOutputFormat {
-                reason: "D3D11 NV12 row count overflowed".to_string(),
-            })?;
+    let surface_chroma_height = surface_height.div_ceil(2);
+    let total_rows = surface_height
+        .checked_add(surface_chroma_height)
+        .ok_or_else(|| VideoDecodeError::InvalidOutputFormat {
+            reason: "D3D11 video-surface row count overflowed".to_string(),
+        })?;
     let mapped_len =
         stride
             .checked_mul(total_rows)
             .ok_or_else(|| VideoDecodeError::InvalidOutputFormat {
-                reason: "D3D11 NV12 mapped byte count overflowed".to_string(),
+                reason: "D3D11 mapped video-surface byte count overflowed".to_string(),
             })?;
-    if mapped.pData.is_null() || stride < width {
+    let minimum_stride = match format {
+        HardwareSurfaceFormat::Nv12 => width,
+        HardwareSurfaceFormat::P010 => {
+            width
+                .checked_mul(2)
+                .ok_or_else(|| VideoDecodeError::InvalidOutputFormat {
+                    reason: "D3D11 P010 row byte count overflowed".to_string(),
+                })?
+        }
+    };
+    if mapped.pData.is_null() || stride < minimum_stride {
         return Err(VideoDecodeError::InvalidOutputFormat {
-            reason: "D3D11 returned an invalid mapped NV12 layout".to_string(),
+            reason: "D3D11 returned an invalid mapped video-surface layout".to_string(),
         });
     }
-    // SAFETY: D3D11 Map exposes RowPitch bytes for every NV12 luma and chroma row until Unmap.
+    // SAFETY: D3D11 Map exposes RowPitch bytes for every luma and chroma row until Unmap.
     let bytes = unsafe { std::slice::from_raw_parts(mapped.pData.cast::<u8>(), mapped_len) };
-    let uv_start =
-        stride
-            .checked_mul(height)
-            .ok_or_else(|| VideoDecodeError::InvalidOutputFormat {
-                reason: "D3D11 NV12 chroma offset overflowed".to_string(),
-            })?;
-    super::super::yuv::convert_nv12_to_bgra(
-        &bytes[..uv_start],
-        stride,
-        &bytes[uv_start..],
-        stride,
-        width,
-        height,
-    )
+    let uv_start = stride.checked_mul(surface_height).ok_or_else(|| {
+        VideoDecodeError::InvalidOutputFormat {
+            reason: "D3D11 video-surface chroma offset overflowed".to_string(),
+        }
+    })?;
+    match format {
+        HardwareSurfaceFormat::Nv12 => super::super::yuv::convert_nv12_to_bgra(
+            &bytes[..uv_start],
+            stride,
+            &bytes[uv_start..],
+            stride,
+            width,
+            height,
+        ),
+        HardwareSurfaceFormat::P010 => super::super::yuv::convert_p010_to_bgra(
+            &bytes[..uv_start],
+            stride,
+            &bytes[uv_start..],
+            stride,
+            width,
+            height,
+        ),
+    }
 }
 
 fn map_decoder_error(
@@ -578,5 +649,18 @@ mod tests {
             keyframe: false,
         };
         assert_eq!(take_timing(&mut vec![timing], 9).unwrap().pts.units, 2);
+    }
+
+    #[test]
+    fn hevc_main10_selects_p010_surface() {
+        let mut config = [0_u8; 23];
+        config[0] = 1;
+        config[13] = 1;
+        config[14] = 2;
+
+        assert_eq!(
+            hevc_surface_format(&config).unwrap(),
+            HardwareSurfaceFormat::P010
+        );
     }
 }

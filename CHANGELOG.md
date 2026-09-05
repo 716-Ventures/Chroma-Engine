@@ -7,6 +7,8 @@
   NV12 textures with checked row pitches, and advertises the backend only after a generated HEVC
   frame completes encode, hardware decode, and BGRA conversion. The narrowly patched decoder
   facade is vendored to preserve Rust 1.90 support.
+- Extended that Windows HEVC decoder to Main10 with explicit P010 transform negotiation, native
+  texture-format reporting, checked padded-plane readback, and the shared 10-bit-to-BGRA boundary.
 - Added retained Linux Intel Quick Sync H.264/HEVC decode and Main encode sessions through the
   runtime-loaded iHD/i965 VA-API driver. QSV selection now requires an Intel vendor render node and
   real codec probes, remains distinct from generic VA-API, and adds no oneVPL link dependency.

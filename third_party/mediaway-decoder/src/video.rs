@@ -18,6 +18,35 @@ pub enum VideoOutputPreference {
     CpuFramesOk,
 }
 
+/// Native D3D11 output surface requested from the hardware decoder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum HardwareSurfaceFormat {
+    /// 8-bit YUV 4:2:0 semi-planar output.
+    #[default]
+    Nv12,
+    /// 10-bit YUV 4:2:0 semi-planar output with MSB-aligned samples.
+    P010,
+}
+
+/// Borrowed native decoder output description.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HardwareVideoFrame {
+    /// Presentation timestamp in the stream timebase.
+    pub pts: i64,
+    /// Duration in timebase units.
+    pub duration: u64,
+    /// Visible width in pixels.
+    pub width: u32,
+    /// Visible height in pixels.
+    pub height: u32,
+    /// Native texture layout.
+    pub format: HardwareSurfaceFormat,
+    /// D3D11 texture pointer owned by the decoder until its next operation.
+    pub texture: mediaway_common::NativeHandle,
+    /// Texture array slice/subresource returned by Media Foundation.
+    pub subresource: u32,
+}
+
 /// Parameters for opening a video decoder session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VideoDecoderConfig {
@@ -33,6 +62,8 @@ pub struct VideoDecoderConfig {
     pub pixel_format: PixelFormat,
     /// Output path preference (Zero-Copy vs CPU).
     pub output: VideoOutputPreference,
+    /// Native hardware surface format requested from the decoder.
+    pub hardware_surface_format: HardwareSurfaceFormat,
     /// GPU device handle when [`VideoOutputPreference::ZeroCopyGpu`].
     ///
     /// `None` means unset (Zero-Copy open fails). `Some(GpuDeviceHandle::DirectX11(handle))`
@@ -54,6 +85,7 @@ impl VideoDecoderConfig {
             time_base,
             pixel_format: PixelFormat::Nv12,
             output: VideoOutputPreference::ZeroCopyGpu,
+            hardware_surface_format: HardwareSurfaceFormat::Nv12,
             gpu_device: None,
             extra_data: mediaway_common::Bytes::new(),
         }
@@ -69,6 +101,7 @@ impl VideoDecoderConfig {
             time_base,
             pixel_format: PixelFormat::Nv12,
             output: VideoOutputPreference::ZeroCopyGpu,
+            hardware_surface_format: HardwareSurfaceFormat::Nv12,
             gpu_device: None,
             extra_data: mediaway_common::Bytes::new(),
         }
@@ -84,6 +117,7 @@ impl VideoDecoderConfig {
             time_base,
             pixel_format: PixelFormat::Nv12,
             output: VideoOutputPreference::ZeroCopyGpu,
+            hardware_surface_format: HardwareSurfaceFormat::Nv12,
             gpu_device: None,
             extra_data: mediaway_common::Bytes::new(),
         }
@@ -99,6 +133,7 @@ impl VideoDecoderConfig {
             time_base,
             pixel_format: PixelFormat::Nv12,
             output: VideoOutputPreference::ZeroCopyGpu,
+            hardware_surface_format: HardwareSurfaceFormat::Nv12,
             gpu_device: None,
             extra_data: mediaway_common::Bytes::new(),
         }

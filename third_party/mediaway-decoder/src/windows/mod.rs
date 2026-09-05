@@ -3,7 +3,7 @@
 #![cfg_attr(windows, allow(unsafe_code))]
 #![cfg_attr(not(windows), deny(unsafe_code))]
 
-use crate::{DecodeError, VideoDecoder, VideoDecoderConfig};
+use crate::{DecodeError, HardwareVideoFrame, VideoDecoder, VideoDecoderConfig};
 use mediaway_common::{Bytes, Packet, StreamInfo, VideoFrame};
 
 #[cfg(windows)]
@@ -34,6 +34,16 @@ impl WindowsVideoDecoder {
     #[cfg(not(windows))]
     pub fn open(_config: &VideoDecoderConfig) -> Result<Self, DecodeError> {
         Err(DecodeError::Unsupported)
+    }
+
+    /// Pulls a native D3D11 output frame without collapsing P010 into the older
+    /// Mediaway common pixel-format vocabulary.
+    #[cfg(windows)]
+    pub fn poll_hardware_frame(&mut self) -> Result<Option<HardwareVideoFrame>, DecodeError> {
+        self.inner
+            .as_mut()
+            .ok_or(DecodeError::Closed)?
+            .poll_hardware_frame()
     }
 }
 
