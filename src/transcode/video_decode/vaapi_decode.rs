@@ -9,9 +9,12 @@ use std::{
 };
 
 use nuxodecs::{
-    BlockingMode, Fourcc, Resolution,
+    BlockingMode, DecodedFormat, Fourcc, Resolution,
     backend::vaapi::decoder::VaapiBackend,
-    decoder::stateless::{DecodeError, StatelessDecoder, StatelessVideoDecoder, h264::H264},
+    decoder::stateless::{
+        DecodeError, DynStatelessVideoDecoder, StatelessDecoder, StatelessVideoDecoder, h264::H264,
+        h265::H265,
+    },
     decoder::{DecodedHandle, DecoderEvent},
     libva::{
         Display, ExternalBufferDescriptor, MemoryType, Surface, UsageHint,
@@ -29,26 +32,35 @@ use super::{
 const FRAME_ALIGNMENT: usize = 4096;
 const MAX_FRAME_BYTES: usize = 512 * 1024 * 1024;
 
-type Decoder = StatelessDecoder<H264, VaapiBackend<VaapiCpuFrame>>;
-
-/// Retained Linux VA-API H.264 decoder backed by directly readable NV12 memory.
+/// Retained Linux VA-API H.264 decoder backed by directly readable NV12/P010 memory.
 pub struct VaapiH264BgraDecoderSession {
+    core: VaapiDecoderCore,
+}
+
+/// Retained Linux VA-API HEVC decoder backed by directly readable NV12/P010 memory.
+pub struct VaapiHevcBgraDecoderSession {
+    core: VaapiDecoderCore,
+}
+
+struct VaapiDecoderCore {
     output_format: RawVideoFormat,
+    codec: VideoCodec,
+    decoder_name: &'static str,
     decoded_batches: u64,
     nalu_length_size: u8,
     parameter_sets: Option<Vec<u8>>,
     next_token: u64,
     pending_timing: HashMap<u64, CpuDecodeTiming>,
-    decoder: Decoder,
+    decoder: DynStatelessVideoDecoder<VaapiCpuFrame>,
 }
 
 impl std::fmt::Debug for VaapiH264BgraDecoderSession {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("VaapiH264BgraDecoderSession")
-            .field("output_format", &self.output_format)
-            .field("decoded_batches", &self.decoded_batches)
-            .field("pending_frames", &self.pending_timing.len())
+            .field("output_format", &self.core.output_format)
+            .field("decoded_batches", &self.core.decoded_batches)
+            .field("pending_frames", &self.core.pending_timing.len())
             .finish_non_exhaustive()
     }
 }
@@ -76,22 +88,27 @@ impl VaapiH264BgraDecoderSession {
             parameter_sets.extend_from_slice(&[0, 0, 0, 1]);
             parameter_sets.extend_from_slice(parameter_set);
         }
-        let display = Display::open().ok_or_else(|| VideoDecodeError::BackendUnavailable {
-            reason: "libva could not open a DRM render node".to_string(),
-        })?;
-        let decoder = Decoder::new_vaapi(display, BlockingMode::Blocking).map_err(|error| {
-            VideoDecodeError::BackendUnavailable {
-                reason: format!("VA-API H.264 decoder initialization failed: {error}"),
-            }
-        })?;
+        let display = open_display()?;
+        let decoder = StatelessDecoder::<H264, VaapiBackend<VaapiCpuFrame>>::new_vaapi(
+            display,
+            BlockingMode::Blocking,
+        )
+        .map_err(|error| VideoDecodeError::BackendUnavailable {
+            reason: format!("VA-API H.264 decoder initialization failed: {error}"),
+        })?
+        .into_trait_object();
         Ok(Self {
-            output_format,
-            decoded_batches: 0,
-            nalu_length_size: config.nalu_length_size,
-            parameter_sets: Some(parameter_sets),
-            next_token: 1,
-            pending_timing: HashMap::new(),
-            decoder,
+            core: VaapiDecoderCore {
+                output_format,
+                codec: VideoCodec::H264,
+                decoder_name: "chroma-vaapi-h264-decoder",
+                decoded_batches: 0,
+                nalu_length_size: config.nalu_length_size,
+                parameter_sets: Some(parameter_sets),
+                next_token: 1,
+                pending_timing: HashMap::new(),
+                decoder,
+            },
         })
     }
 
@@ -100,7 +117,95 @@ impl VaapiH264BgraDecoderSession {
         &mut self,
         input: &VideoDecodeInput<'_>,
     ) -> Result<DecodedVideoOutput, VideoDecodeError> {
-        if input.codec != VideoCodec::H264 {
+        self.core.decode(input)
+    }
+
+    /// Returns the number of packet batches decoded by this session.
+    pub fn decoded_batches(&self) -> u64 {
+        self.core.decoded_batches
+    }
+}
+
+impl std::fmt::Debug for VaapiHevcBgraDecoderSession {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("VaapiHevcBgraDecoderSession")
+            .field("output_format", &self.core.output_format)
+            .field("decoded_batches", &self.core.decoded_batches)
+            .field("pending_frames", &self.core.pending_timing.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl VaapiHevcBgraDecoderSession {
+    /// Opens the first usable DRM render node and creates a VA-API HEVC decoder.
+    pub fn new(
+        output_format: RawVideoFormat,
+        decoder_config: &[u8],
+    ) -> Result<Self, VideoDecodeError> {
+        validate_decoded_video_format(output_format)?;
+        let config =
+            crate::codec::hevc::parse_hevc_decoder_config(decoder_config).map_err(|error| {
+                VideoDecodeError::InvalidDecoderConfig {
+                    reason: error.to_string(),
+                }
+            })?;
+        let parameter_sets = crate::codec::hevc::hevc_parameter_sets_to_annex_b(&config);
+        if parameter_sets.is_empty() {
+            return Err(VideoDecodeError::InvalidDecoderConfig {
+                reason: "HEVC decoder configuration does not contain VPS/SPS/PPS".to_string(),
+            });
+        }
+        let display = open_display()?;
+        let decoder = StatelessDecoder::<H265, VaapiBackend<VaapiCpuFrame>>::new_vaapi(
+            display,
+            BlockingMode::Blocking,
+        )
+        .map_err(|error| VideoDecodeError::BackendUnavailable {
+            reason: format!("VA-API HEVC decoder initialization failed: {error}"),
+        })?
+        .into_trait_object();
+        Ok(Self {
+            core: VaapiDecoderCore {
+                output_format,
+                codec: VideoCodec::Hevc,
+                decoder_name: "chroma-vaapi-hevc-decoder",
+                decoded_batches: 0,
+                nalu_length_size: config.nalu_length_size,
+                parameter_sets: Some(parameter_sets),
+                next_token: 1,
+                pending_timing: HashMap::new(),
+                decoder,
+            },
+        })
+    }
+
+    /// Decodes one ordered HEVC packet batch without recreating the VA context.
+    pub fn decode(
+        &mut self,
+        input: &VideoDecodeInput<'_>,
+    ) -> Result<DecodedVideoOutput, VideoDecodeError> {
+        self.core.decode(input)
+    }
+
+    /// Returns the number of packet batches decoded by this session.
+    pub fn decoded_batches(&self) -> u64 {
+        self.core.decoded_batches
+    }
+}
+
+fn open_display() -> Result<Arc<Display>, VideoDecodeError> {
+    Display::open().ok_or_else(|| VideoDecodeError::BackendUnavailable {
+        reason: "libva could not open a DRM render node".to_string(),
+    })
+}
+
+impl VaapiDecoderCore {
+    fn decode(
+        &mut self,
+        input: &VideoDecodeInput<'_>,
+    ) -> Result<DecodedVideoOutput, VideoDecodeError> {
+        if input.codec != self.codec {
             return Err(VideoDecodeError::UnsupportedCodec);
         }
         if input.time_scale.units_per_second == 0 {
@@ -122,11 +227,21 @@ impl VaapiH264BgraDecoderSession {
                     .ok_or_else(|| VideoDecodeError::BackendFailed {
                         reason: "VA-API timestamp token space was exhausted".to_string(),
                     })?;
-            let annex_b =
-                crate::codec::h264::avc_sample_to_annex_b(packet.bytes, self.nalu_length_size)
-                    .map_err(|error| VideoDecodeError::InvalidInput {
+            let annex_b = match self.codec {
+                VideoCodec::H264 => {
+                    crate::codec::h264::avc_sample_to_annex_b(packet.bytes, self.nalu_length_size)
+                        .map_err(|error| VideoDecodeError::InvalidInput {
                         reason: format!("invalid AVCC packet: {error}"),
-                    })?;
+                    })?
+                }
+                VideoCodec::Hevc => {
+                    crate::codec::hevc::hevc_sample_to_annex_b(packet.bytes, self.nalu_length_size)
+                        .map_err(|error| VideoDecodeError::InvalidInput {
+                            reason: format!("invalid HEVC packet: {error}"),
+                        })?
+                }
+                VideoCodec::Av1 => return Err(VideoDecodeError::UnsupportedCodec),
+            };
             self.pending_timing.insert(token, packet_timing(packet));
             self.submit_annex_b(token, &annex_b, &mut frames)?;
         }
@@ -147,16 +262,11 @@ impl VaapiH264BgraDecoderSession {
         Ok(DecodedVideoOutput {
             stream: DecodedVideoStream {
                 format: self.output_format,
-                source_codec: VideoCodec::H264,
-                decoder: "chroma-vaapi-h264-decoder".to_string(),
+                source_codec: self.codec,
+                decoder: self.decoder_name.to_string(),
             },
             frames,
         })
-    }
-
-    /// Returns the number of packet batches decoded by this session.
-    pub fn decoded_batches(&self) -> u64 {
-        self.decoded_batches
     }
 
     fn submit_annex_b(
@@ -166,10 +276,14 @@ impl VaapiH264BgraDecoderSession {
         frames: &mut Vec<DecodedVideoFrame>,
     ) -> Result<(), VideoDecodeError> {
         while !bytes.is_empty() {
-            let allocation_resolution =
-                self.decoder.stream_info().map(|info| info.coded_resolution);
-            let mut allocate =
-                || allocation_resolution.and_then(|resolution| VaapiCpuFrame::new(resolution).ok());
+            let allocation = self
+                .decoder
+                .stream_info()
+                .map(|info| (info.coded_resolution, info.format));
+            let mut allocate = || {
+                allocation
+                    .and_then(|(resolution, format)| VaapiCpuFrame::new(resolution, format).ok())
+            };
             match self.decoder.decode(token, bytes, &mut allocate) {
                 Ok(0) => {
                     return Err(VideoDecodeError::BackendFailed {
@@ -258,14 +372,32 @@ fn copy_frame(
         .map()
         .map_err(|reason| VideoDecodeError::BackendFailed { reason })?;
     let planes = mapping.get();
-    let pixels = super::super::yuv::convert_nv12_to_bgra(
-        planes[0],
-        pitches[0],
-        planes[1],
-        pitches[1],
-        format.width as usize,
-        format.height as usize,
-    )?;
+    let pixels = match frame.decoded_format {
+        DecodedFormat::NV12 => super::super::yuv::convert_nv12_to_bgra(
+            planes[0],
+            pitches[0],
+            planes[1],
+            pitches[1],
+            format.width as usize,
+            format.height as usize,
+        )?,
+        DecodedFormat::I010 => super::super::yuv::convert_p010_to_bgra(
+            planes[0],
+            pitches[0],
+            planes[1],
+            pitches[1],
+            format.width as usize,
+            format.height as usize,
+        )?,
+        _ => {
+            return Err(VideoDecodeError::BackendFailed {
+                reason: format!(
+                    "VA-API returned unsupported decoded format {:?}",
+                    frame.decoded_format
+                ),
+            });
+        }
+    };
     Ok(DecodedVideoFrame {
         pts: timing.pts,
         dts: timing.dts,
@@ -281,37 +413,51 @@ struct VaapiCpuFrame {
     allocation: NonNull<u8>,
     allocation_layout: Layout,
     resolution: Resolution,
+    decoded_format: DecodedFormat,
     stride: usize,
     uv_offset: usize,
 }
 
 impl VaapiCpuFrame {
-    fn new(resolution: Resolution) -> Result<Self, String> {
+    fn new(resolution: Resolution, decoded_format: DecodedFormat) -> Result<Self, String> {
+        let bytes_per_sample = match decoded_format {
+            DecodedFormat::NV12 => 1,
+            DecodedFormat::I010 => 2,
+            _ => {
+                return Err(format!(
+                    "unsupported VA-API surface format {decoded_format:?}"
+                ));
+            }
+        };
         let width = align_up(resolution.width as usize, 16)?;
         let height = align_up(resolution.height as usize, 4)?;
-        let stride = align_up(width, 64)?;
+        let row_bytes = width
+            .checked_mul(bytes_per_sample)
+            .ok_or("VA-API surface row byte count overflowed")?;
+        let stride = align_up(row_bytes, 64)?;
         let uv_offset = height
             .checked_mul(stride)
-            .ok_or("NV12 luma size overflowed")?;
+            .ok_or("VA-API luma size overflowed")?;
         let uv_size = height
             .div_ceil(2)
             .checked_mul(stride)
-            .ok_or("NV12 chroma size overflowed")?;
+            .ok_or("VA-API chroma size overflowed")?;
         let allocation_size = uv_offset
             .checked_add(uv_size)
-            .ok_or("NV12 size overflowed")?;
+            .ok_or("VA-API surface size overflowed")?;
         if allocation_size > MAX_FRAME_BYTES {
-            return Err("NV12 frame exceeds the 512 MiB safety limit".to_string());
+            return Err("VA-API frame exceeds the 512 MiB safety limit".to_string());
         }
         let allocation_layout = Layout::from_size_align(allocation_size, FRAME_ALIGNMENT)
-            .map_err(|error| format!("invalid NV12 allocation layout: {error}"))?;
+            .map_err(|error| format!("invalid VA-API allocation layout: {error}"))?;
         // SAFETY: allocation_layout is non-zero and valid. The pointer is retained until Drop.
         let allocation = NonNull::new(unsafe { alloc_zeroed(allocation_layout) })
-            .ok_or_else(|| "NV12 frame allocation failed".to_string())?;
+            .ok_or_else(|| "VA-API frame allocation failed".to_string())?;
         Ok(Self {
             allocation,
             allocation_layout,
             resolution,
+            decoded_format,
             stride,
             uv_offset,
         })
@@ -335,6 +481,7 @@ unsafe impl Sync for VaapiCpuFrame {}
 struct VaapiUserPtrDescriptor {
     allocation_size: usize,
     resolution: Resolution,
+    decoded_format: DecodedFormat,
     stride: usize,
     uv_offset: usize,
     buffers: Vec<*mut u8>,
@@ -346,7 +493,7 @@ impl ExternalBufferDescriptor for VaapiUserPtrDescriptor {
 
     fn va_surface_attribute(&mut self) -> Self::DescriptorAttribute {
         VASurfaceAttribExternalBuffers {
-            pixel_format: u32::from(Fourcc::from(b"NV12")),
+            pixel_format: u32::from(fourcc_for_format(self.decoded_format)),
             width: self.resolution.width,
             height: self.resolution.height,
             data_size: self.allocation_size as u32,
@@ -385,7 +532,7 @@ impl VideoFrame for VaapiCpuFrame {
     type VaapiHandle = Surface<VaapiUserPtrDescriptor>;
 
     fn fourcc(&self) -> Fourcc {
-        Fourcc::from(b"NV12")
+        fourcc_for_format(self.decoded_format)
     }
 
     fn resolution(&self) -> Resolution {
@@ -415,13 +562,14 @@ impl VideoFrame for VaapiCpuFrame {
         let descriptor = VaapiUserPtrDescriptor {
             allocation_size: self.allocation_layout.size(),
             resolution: self.resolution,
+            decoded_format: self.decoded_format,
             stride: self.stride,
             uv_offset: self.uv_offset,
             buffers: vec![self.allocation.as_ptr()],
         };
         let mut surfaces = display
             .create_surfaces(
-                nuxodecs::libva::VA_RT_FORMAT_YUV420,
+                rt_format_for_format(self.decoded_format),
                 Some(u32::from(self.fourcc())),
                 self.resolution.width,
                 self.resolution.height,
@@ -432,6 +580,20 @@ impl VideoFrame for VaapiCpuFrame {
         surfaces
             .pop()
             .ok_or_else(|| "VA-API created no decode surface".to_string())
+    }
+}
+
+fn fourcc_for_format(format: DecodedFormat) -> Fourcc {
+    match format {
+        DecodedFormat::I010 => Fourcc::from(b"P010"),
+        _ => Fourcc::from(b"NV12"),
+    }
+}
+
+fn rt_format_for_format(format: DecodedFormat) -> u32 {
+    match format {
+        DecodedFormat::I010 => nuxodecs::libva::VA_RT_FORMAT_YUV420_10,
+        _ => nuxodecs::libva::VA_RT_FORMAT_YUV420,
     }
 }
 
@@ -448,7 +610,8 @@ mod tests {
 
     #[test]
     fn cpu_backed_nv12_surface_has_aligned_complete_planes() {
-        let frame = VaapiCpuFrame::new(Resolution::from((1919, 1079))).unwrap();
+        let frame =
+            VaapiCpuFrame::new(Resolution::from((1919, 1079)), DecodedFormat::NV12).unwrap();
         assert_eq!(frame.resolution(), Resolution::from((1919, 1079)));
         assert_eq!(frame.get_plane_pitch(), vec![1920, 1920]);
         assert_eq!(frame.get_plane_size(), vec![2_073_600, 1_036_800]);
@@ -464,8 +627,18 @@ mod tests {
     }
 
     #[test]
+    fn cpu_backed_p010_surface_uses_two_bytes_per_component() {
+        let frame =
+            VaapiCpuFrame::new(Resolution::from((1919, 1079)), DecodedFormat::I010).unwrap();
+        assert_eq!(frame.fourcc(), Fourcc::from(b"P010"));
+        assert_eq!(frame.get_plane_pitch(), vec![3840, 3840]);
+        assert_eq!(frame.get_plane_size(), vec![4_147_200, 2_073_600]);
+    }
+
+    #[test]
     fn cpu_backed_nv12_surface_rejects_excessive_dimensions() {
-        let error = VaapiCpuFrame::new(Resolution::from((u32::MAX, u32::MAX))).unwrap_err();
+        let error = VaapiCpuFrame::new(Resolution::from((u32::MAX, u32::MAX)), DecodedFormat::NV12)
+            .unwrap_err();
         assert!(error.contains("overflowed") || error.contains("safety limit"));
     }
 }

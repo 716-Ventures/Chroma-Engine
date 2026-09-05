@@ -811,7 +811,7 @@ fn video_decode_backend_state(os: &str, kind: HardwareKind, codec: VideoCodec) -
         }
         ("linux", HardwareKind::Vaapi)
             if cfg!(feature = "linux-vaapi")
-                && codec == VideoCodec::H264
+                && matches!(codec, VideoCodec::H264 | VideoCodec::Hevc)
                 && linux_vaapi_decode_supported(codec) =>
         {
             CapabilityState::Executable

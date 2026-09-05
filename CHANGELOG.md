@@ -5,6 +5,8 @@
 - Added an opt-in, release-enabled Linux VA-API H.264 decoder using retained stateless packet
   submission, page-aligned NV12 user-pointer surfaces, synchronized BGRA output, and automatic
   OpenH264 fallback when libva or a suitable DRM render node is unavailable.
+- Extended the retained Linux VA-API decoder to HEVC Main/Main10 with direct P010 surfaces and the
+  same safe-Rust fallback used by portable and NAS deployments.
 - Extended the runtime-loaded Linux VA-API probe through synchronized NV12/P010 image derivation,
   plane-layout validation, CPU buffer mapping, and balanced image cleanup without link-time GPU
   dependencies.

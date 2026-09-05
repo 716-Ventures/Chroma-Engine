@@ -153,7 +153,7 @@ impl VaapiDecodeProbe {
             .map_or_else(String::new, |vendor| format!(" ({vendor})"));
         if self.supports(codec) {
             #[cfg(feature = "linux-vaapi")]
-            if codec == VideoCodec::H264 {
+            if matches!(codec, VideoCodec::H264 | VideoCodec::Hevc) {
                 return format!(
                     "VA-API initialized a {codec:?} VLD context on {device}{vendor}, but the executable decoder could not be selected"
                 );

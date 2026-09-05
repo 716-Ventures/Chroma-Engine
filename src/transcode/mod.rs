@@ -36,8 +36,6 @@ pub use segment::{
     NativeFmp4TranscodeStartOutput, NativeFmp4VideoMode, write_native_fmp4_transcode_init,
     write_native_fmp4_transcode_segment, write_native_fmp4_transcode_start,
 };
-#[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
-pub use video_decode::VaapiH264BgraDecoderSession;
 pub use video_decode::{
     BgraDecoderSession, CompressedVideoPacket, CpuAv1BgraDecoderSession, CpuH264BgraDecoderSession,
     CpuHevcBgraDecoderSession, DecodedVideoFrame, DecodedVideoOutput, DecodedVideoStream,
@@ -48,6 +46,8 @@ pub use video_decode::{
     probe_videotoolbox_h264_decoder_session, probe_videotoolbox_hevc_decoder_session,
     validate_decoded_video_format,
 };
+#[cfg(all(target_os = "linux", feature = "linux-vaapi"))]
+pub use video_decode::{VaapiH264BgraDecoderSession, VaapiHevcBgraDecoderSession};
 pub use video_encode::{
     CpuH264EncoderSession, EncodedVideoFrame, EncodedVideoOutput, EncodedVideoStream,
     H264EncoderSession, RawVideoFormat, RawVideoFrameRef, RawVideoPixelFormat, VideoEncodeError,
