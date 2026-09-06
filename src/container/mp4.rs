@@ -1201,8 +1201,11 @@ fn hevc_codec_string(payload: &[u8], sample_entry: &[u8; 4]) -> Option<String> {
     let profile_space = payload[1] >> 6;
     let profile_idc = payload[1] & 0x1f;
     let compatibility = read_u32(&payload[2..6])?;
-    let tier = if payload[12] & 0x80 != 0 { "H" } else { "L" };
-    let level = payload[12] & 0x7f;
+    // ISO/IEC 14496-15 stores general_tier_flag beside general_profile_idc
+    // in byte 1. general_level_idc is the complete byte at offset 12; its
+    // high bit is data, not the tier flag (levels such as 5.1 are 153).
+    let tier = if payload[1] & 0x20 != 0 { "H" } else { "L" };
+    let level = payload[12];
     let space = match profile_space {
         1 => "A",
         2 => "B",
@@ -2299,6 +2302,19 @@ mod tests {
         assert_eq!(config.codec_string.as_deref(), Some("avc1.64001F"));
         assert_eq!(config.nalu_length_size, Some(4));
         assert_eq!(config.description_hex.as_deref(), Some("0164001fffe10000"));
+    }
+
+    #[test]
+    fn formats_hevc_tier_and_full_level_from_hvcc() {
+        let mut config = vec![0_u8; 23];
+        config[1] = 0x22; // Main 10 profile, high tier.
+        config[2..6].copy_from_slice(&0x2000_0000_u32.to_be_bytes());
+        config[12] = 153; // Level 5.1; the high bit must not be discarded.
+
+        assert_eq!(
+            hevc_codec_string(&config, b"hvc1").as_deref(),
+            Some("hvc1.2.4.H153")
+        );
     }
 
     #[test]
