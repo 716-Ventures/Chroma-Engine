@@ -814,8 +814,9 @@ fn transcode_prepared_segment(
     };
     let (video_manifest, video_payload) =
         extract_indexed_chunk(bytes, &prepared.video_track_id, video_packets, video_chunk)?;
-    // Include the preceding audio packet so a packet spanning the video boundary is not
-    // dropped. TrueHD uses the same bounded preroll to locate its preceding major sync.
+    // Decoder-backed audio paths retain bounded preroll for packets spanning the video
+    // boundary. Packet-copy paths instead partition on packet PTS so the same compressed
+    // access unit never appears in two adjacent fMP4 fragments.
     let audio_scan_start_ms = video_start_ms.saturating_sub(1_000);
     let owned_audio_packets;
     let audio_packets = match &prepared.source_index {
@@ -945,25 +946,28 @@ fn extract_indexed_time_range(
     index: u32,
     codec: &str,
 ) -> Result<(ExtractedChunk, Vec<u8>)> {
-    let target_start = packets.partition_point(|packet| {
+    let decode_start = packets.partition_point(|packet| {
         packet
             .pts
             .as_millis()
             .saturating_add(packet.duration.as_millis().max(1))
             <= start_ms
     });
-    if target_start == packets.len() {
+    if decode_start == packets.len() {
         bail!("audio track has no packets for segment {index}");
     }
     let start = match codec {
-        "truehd" => (0..=target_start)
+        "aac" | "ac3" | "eac3" | "flac" | "alac" => {
+            packets.partition_point(|packet| packet.pts.as_millis() < start_ms)
+        }
+        "truehd" => (0..=decode_start)
             .rev()
             .find(|packet_index| packet_contains_truehd_major_sync(bytes, &packets[*packet_index]))
             .unwrap_or(0),
         // A fresh Opus decoder needs the bounded Matroska seek preroll so its
         // prediction and overlap state are warm before samples are cropped.
         "opus" => 0,
-        _ => target_start,
+        _ => decode_start,
     };
     let end = packets.partition_point(|packet| packet.pts.as_millis() < end_ms);
     if end <= start {
@@ -1641,6 +1645,55 @@ fn rescale_units(units: u64, from: TimeScale, to_units_per_second: u32) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn packet_copy_audio_ranges_do_not_repeat_boundary_spanning_packets() {
+        let bytes = [0_u8; 4];
+        let packets = [0_u64, 32, 64, 96]
+            .into_iter()
+            .enumerate()
+            .map(|(index, pts_ms)| PacketRef {
+                source_offset: index as u64,
+                size: 1,
+                pts: TimePoint::millis(pts_ms),
+                dts: TimePoint::millis(pts_ms),
+                duration: TimeDelta::millis(32),
+                keyframe: true,
+            })
+            .collect::<Vec<_>>();
+
+        let (first, _) = extract_indexed_time_range(&bytes, "a0", &packets, 0, 50, 0, "eac3")
+            .expect("first packet-copy range");
+        let (second, _) = extract_indexed_time_range(&bytes, "a0", &packets, 50, 110, 1, "eac3")
+            .expect("second packet-copy range");
+
+        assert_eq!(first.chunk.packet_range, PacketRange { start: 0, end: 2 });
+        assert_eq!(second.chunk.packet_range, PacketRange { start: 2, end: 4 });
+        assert_eq!(first.samples.last().expect("first sample").index, 1);
+        assert_eq!(second.samples.first().expect("second sample").index, 2);
+    }
+
+    #[test]
+    fn decoder_backed_audio_keeps_boundary_preroll_for_cropping() {
+        let bytes = [0_u8; 4];
+        let packets = [0_u64, 32, 64, 96]
+            .into_iter()
+            .enumerate()
+            .map(|(index, pts_ms)| PacketRef {
+                source_offset: index as u64,
+                size: 1,
+                pts: TimePoint::millis(pts_ms),
+                dts: TimePoint::millis(pts_ms),
+                duration: TimeDelta::millis(32),
+                keyframe: true,
+            })
+            .collect::<Vec<_>>();
+
+        let (range, _) = extract_indexed_time_range(&bytes, "a0", &packets, 50, 110, 1, "dts")
+            .expect("decoder-backed range");
+
+        assert_eq!(range.chunk.packet_range, PacketRange { start: 1, end: 4 });
+    }
 
     #[test]
     fn matroska_audio_selection_prefers_executable_alternate() {
