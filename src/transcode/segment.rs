@@ -1134,7 +1134,7 @@ fn select_mp4_audio_track<'a>(
 fn mp4_audio_track_executable(track: &Mp4Track) -> bool {
     matches!(
         track.codec.as_str(),
-        "aac" | "ac3" | "eac3" | "flac" | "alac"
+        "aac" | "ac3" | "eac3" | "flac" | "alac" | "dts"
     )
 }
 
@@ -1659,6 +1659,31 @@ mod tests {
             select_matroska_audio_track(&tracks, Some("a0")).expect("explicit audio track");
         assert_eq!(explicit_id, "a0");
         assert_eq!(explicit.codec, "dts");
+    }
+
+    #[test]
+    fn mp4_dts_audio_is_routed_through_the_native_bridge() {
+        let track = Mp4Track {
+            index: 1,
+            kind: Mp4TrackKind::Audio,
+            codec: "dts".into(),
+            duration_ms: Some(1_000),
+            language: Some("eng".into()),
+            title: None,
+            default: true,
+            forced: false,
+            frame_rate: None,
+            bitrate_bps: Some(1_500_000),
+            dynamic_range: crate::container::mp4::Mp4DynamicRange::Unknown,
+            pixel_format: None,
+            width: None,
+            height: None,
+            channels: Some(6),
+            sample_rate: Some(48_000),
+            atmos: false,
+        };
+
+        assert!(mp4_audio_track_executable(&track));
     }
 
     #[test]
