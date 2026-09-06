@@ -70,6 +70,19 @@ Linux distributors can enable H.264/HEVC VA-API decode and encode with `cargo bu
 That feature needs Clang and libva development headers at build time, but the resulting binary
 loads libva dynamically and still starts on hosts without libva.
 
+Portable Linux and Linux-based NAS bundles can be built for either architecture with BuildKit:
+
+```bash
+docker buildx build --platform linux/amd64 --output type=local,dest=dist/linux-x64 \
+  -f packaging/Dockerfile.linux .
+docker buildx build --platform linux/arm64 --output type=local,dest=dist/linux-arm64 \
+  -f packaging/Dockerfile.linux .
+```
+
+Each output contains `chroma-engine` and its colocated `libdav1d.so.7`; the image build enables the
+dynamically loaded VA-API backend and smoke-tests the self-contained software fallback before
+exporting it.
+
 Quality gates:
 
 ```sh

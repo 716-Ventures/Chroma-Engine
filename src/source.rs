@@ -234,6 +234,8 @@ fn seal_snapshot(snapshot_path: &Path) -> io::Result<()> {
         permissions.set_readonly(true);
         fs::set_permissions(snapshot_path, permissions)?;
     }
+    #[cfg(not(unix))]
+    let _ = snapshot_path;
     Ok(())
 }
 

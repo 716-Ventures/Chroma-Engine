@@ -284,7 +284,13 @@ jobs:
         run: cargo test --locked --all-features cpu_h264
       - name: Install cargo-auditable
         run: cargo install cargo-auditable --locked --version 0.7.5
-      - name: Build auditable release binary
+      - name: Build auditable Linux ARM64 release binary
+        if: runner.os == 'Linux'
+        env:
+          RUSTFLAGS: -A linker-messages
+        run: cargo auditable build --locked --release --features linux-vaapi --bin chroma-engine
+      - name: Build auditable Windows ARM64 release binary
+        if: runner.os == 'Windows'
         env:
           RUSTFLAGS: -A linker-messages
         run: cargo auditable build --locked --release --bin chroma-engine

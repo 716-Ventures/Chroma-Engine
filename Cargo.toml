@@ -67,6 +67,11 @@ codegen-units = 1
 strip = "symbols"
 panic = "abort"
 
+# `truehd` contains very large generated tables. Optimizing that dependency causes rustc to exceed
+# the memory available on common NAS-class ARM builders without improving the surrounding engine.
+[profile.release.package.truehd]
+opt-level = 0
+
 [profile.profiling]
 inherits = "release"
 debug = true

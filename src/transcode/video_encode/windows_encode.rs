@@ -141,7 +141,11 @@ impl WindowsEncoderCore {
         let codec_kind = match codec {
             VideoCodec::H264 => CodecKind::H264,
             VideoCodec::Hevc => CodecKind::Hevc,
-            VideoCodec::Av1 => return Err(VideoEncodeError::UnsupportedCodec),
+            VideoCodec::Av1 => {
+                return Err(VideoEncodeError::BackendUnavailable {
+                    reason: "Windows AV1 encode is not implemented".to_string(),
+                });
+            }
         };
         let mut config = AutoVideoEncodeConfig::new(
             codec_kind,
@@ -384,7 +388,11 @@ fn convert_access_unit(codec: VideoCodec, bytes: &[u8]) -> Result<AccessUnit, Vi
         let nal_type = match codec {
             VideoCodec::H264 => nal[0] & 0x1f,
             VideoCodec::Hevc => (nal[0] >> 1) & 0x3f,
-            VideoCodec::Av1 => return Err(VideoEncodeError::UnsupportedCodec),
+            VideoCodec::Av1 => {
+                return Err(VideoEncodeError::BackendUnavailable {
+                    reason: "Windows AV1 encode is not implemented".to_string(),
+                });
+            }
         };
         let is_parameter_set = match codec {
             VideoCodec::H264 => matches!(nal_type, 7 | 8),

@@ -1493,7 +1493,10 @@ fn linux_nvenc_hevc_video_backend() -> EncoderBackend {
     }
 }
 
-#[cfg(all(target_os = "linux", feature = "linux-nvidia"))]
+#[cfg(all(
+    target_os = "linux",
+    any(feature = "linux-nvidia", feature = "linux-vaapi")
+))]
 fn hardware_probe_video_format() -> RawVideoFormat {
     RawVideoFormat {
         width: 128,
