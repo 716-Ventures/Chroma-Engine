@@ -640,9 +640,10 @@ fn prepare_matroska_transcode(
         .clone()
         .or_else(|| (video_codec == VideoCodec::Av1).then(Vec::new))
         .ok_or_else(|| anyhow::anyhow!("missing Matroska video decoder config"))?;
-    let video_chunks =
+    let video_chunks = normalize_chunk_durations(
         parse_matroska_chunk_plan(bytes, Some(&video_track_id), options.segment_ms.max(1))
-            .ok_or_else(|| anyhow::anyhow!("could not plan selected Matroska video track"))?;
+            .ok_or_else(|| anyhow::anyhow!("could not plan selected Matroska video track"))?,
+    );
     if video_chunks.chunks.is_empty() {
         bail!("selected Matroska video track produced no transcode segments");
     }
@@ -683,9 +684,10 @@ fn prepare_mp4_transcode(
         .ok_or_else(|| anyhow::anyhow!("missing MP4/MOV video packet index"))?;
     let audio_index = parse_mp4_packet_track(bytes, Some(&audio_track_id))
         .ok_or_else(|| anyhow::anyhow!("missing MP4/MOV audio packet index"))?;
-    let video_chunks =
+    let video_chunks = normalize_chunk_durations(
         parse_mp4_chunk_plan(bytes, Some(&video_track_id), options.segment_ms.max(1))
-            .ok_or_else(|| anyhow::anyhow!("could not plan selected MP4/MOV video track"))?;
+            .ok_or_else(|| anyhow::anyhow!("could not plan selected MP4/MOV video track"))?,
+    );
     if video_chunks.chunks.is_empty() {
         bail!("selected MP4/MOV video track produced no transcode segments");
     }
@@ -730,6 +732,16 @@ fn decode_hex(value: &str) -> Option<Vec<u8>> {
             u8::from_str_radix(text, 16).ok()
         })
         .collect()
+}
+
+fn normalize_chunk_durations(mut plan: ChunkPlan) -> ChunkPlan {
+    for index in 0..plan.chunks.len().saturating_sub(1) {
+        let start_ms = plan.chunks[index].start.as_millis();
+        let next_start_ms = plan.chunks[index + 1].start.as_millis();
+        plan.chunks[index].duration =
+            TimeDelta::millis(next_start_ms.saturating_sub(start_ms).max(1));
+    }
+    plan
 }
 
 impl From<&MatroskaTrack> for PreparedVideoTrack {
@@ -1645,6 +1657,42 @@ fn rescale_units(units: u64, from: TimeScale, to_units_per_second: u32) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chunk_durations_reach_the_next_keyframe_boundary() {
+        let plan = ChunkPlan {
+            track_ids: vec!["v0".into()],
+            chunks: vec![
+                NativeChunk {
+                    index: 0,
+                    start: TimePoint::millis(0),
+                    duration: TimeDelta::millis(6_632),
+                    packet_range: PacketRange { start: 0, end: 1 },
+                    key_aligned: true,
+                },
+                NativeChunk {
+                    index: 1,
+                    start: TimePoint::millis(6_673),
+                    duration: TimeDelta::millis(6_549),
+                    packet_range: PacketRange { start: 1, end: 2 },
+                    key_aligned: true,
+                },
+                NativeChunk {
+                    index: 2,
+                    start: TimePoint::millis(13_263),
+                    duration: TimeDelta::millis(5_840),
+                    packet_range: PacketRange { start: 2, end: 3 },
+                    key_aligned: true,
+                },
+            ],
+        };
+
+        let normalized = normalize_chunk_durations(plan);
+
+        assert_eq!(normalized.chunks[0].duration.as_millis(), 6_673);
+        assert_eq!(normalized.chunks[1].duration.as_millis(), 6_590);
+        assert_eq!(normalized.chunks[2].duration.as_millis(), 5_840);
+    }
 
     #[test]
     fn packet_copy_audio_ranges_do_not_repeat_boundary_spanning_packets() {
