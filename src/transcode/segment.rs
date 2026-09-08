@@ -554,6 +554,7 @@ struct NativeVideoCodecStats {
 #[derive(Debug)]
 struct NativeVideoCodecPipeline {
     decoder: BgraDecoderSession,
+    decoder_output_format: RawVideoFormat,
     encoder: H264EncoderSession,
     last_completed_index: Option<u32>,
     stats: NativeVideoCodecStats,
@@ -562,12 +563,14 @@ struct NativeVideoCodecPipeline {
 impl NativeVideoCodecPipeline {
     fn new(prepared: &PreparedTranscode, options: &NativeFmp4TranscodeOptions) -> Result<Self> {
         let (decode_format, encode_format) = video_formats(&prepared.video_track);
+        let decoder_output_format = native_decoder_output_format(decode_format, encode_format);
         Ok(Self {
             decoder: BgraDecoderSession::new(
                 prepared.video_codec,
-                decode_format,
+                decoder_output_format,
                 &prepared.decoder_config,
             )?,
+            decoder_output_format,
             encoder: H264EncoderSession::new(encode_format, options.video_bitrate)?,
             last_completed_index: None,
             stats: NativeVideoCodecStats {
@@ -594,6 +597,7 @@ impl NativeVideoCodecPipeline {
                 let prior = self.stats;
                 let replacement = Self::new(prepared, options)?;
                 self.decoder = replacement.decoder;
+                self.decoder_output_format = replacement.decoder_output_format;
                 self.encoder = replacement.encoder;
                 self.last_completed_index = None;
                 self.stats = NativeVideoCodecStats {
@@ -1249,7 +1253,8 @@ fn transcode_h264_video_segment(
     payload: &[u8],
     codec_pipeline: &mut NativeVideoCodecPipeline,
 ) -> Result<VideoSegment> {
-    let (decode_format, encode_format) = video_formats(track);
+    let (_, encode_format) = video_formats(track);
+    let decode_format = codec_pipeline.decoder_output_format;
     let sample_batches = manifest
         .samples
         .chunks(VIDEO_DECODE_BATCH_PACKETS)
@@ -1332,6 +1337,26 @@ fn transcode_h264_video_segment(
         encoded_frame_count: encoded_frames.len(),
         first_pts: encoded_frames.first().map(|frame| frame.pts),
     })
+}
+
+fn native_decoder_output_format(
+    _decode_format: RawVideoFormat,
+    encode_format: RawVideoFormat,
+) -> RawVideoFormat {
+    // VideoToolbox honors the requested destination pixel-buffer dimensions and
+    // performs this scale while decoding. Avoid materializing and then scaling a
+    // 4K BGRA frame on the CPU before every 1080p encode; that work can starve a
+    // tvOS Simulator running on the same Mac. Portable decoders still emit the
+    // source dimensions and use Chroma's scaler below.
+    #[cfg(target_os = "macos")]
+    {
+        encode_format
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = encode_format;
+        _decode_format
+    }
 }
 
 fn video_formats(track: &PreparedVideoTrack) -> (RawVideoFormat, RawVideoFormat) {
@@ -1973,6 +1998,24 @@ mod tests {
 
         assert!(matches!(scaled, std::borrow::Cow::Borrowed(_)));
         assert_eq!(scaled.as_ref(), pixels);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn videotoolbox_decoder_emits_the_constrained_encode_dimensions() {
+        let source = RawVideoFormat {
+            width: 3_840,
+            height: 2_160,
+            frame_rate_num: 24_000,
+            frame_rate_den: 1_001,
+            pixel_format: RawVideoPixelFormat::Bgra,
+        };
+        let constrained = constrained_h264_format(source);
+
+        assert_eq!(
+            native_decoder_output_format(source, constrained),
+            constrained
+        );
     }
 
     #[test]
