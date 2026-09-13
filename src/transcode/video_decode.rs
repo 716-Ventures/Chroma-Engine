@@ -229,12 +229,21 @@ impl std::fmt::Debug for CpuAv1BgraDecoderSession {
 impl CpuAv1BgraDecoderSession {
     /// Creates a portable AV1 decoder. AV1 packets carry their sequence headers in-band.
     pub fn new(output_format: RawVideoFormat) -> Result<Self, VideoDecodeError> {
+        Self::new_with_threads(output_format, 2)
+    }
+
+    fn new_with_threads(
+        output_format: RawVideoFormat,
+        threads: u32,
+    ) -> Result<Self, VideoDecodeError> {
         validate_decoded_video_format(output_format)?;
         let mut settings = dav1d::Settings::default();
         // Keep streaming latency and retained-session memory bounded. Throughput still
         // benefits from dav1d's internal threading, but pictures cannot accumulate
         // behind an unbounded frame-delay window between HLS packet batches.
         settings.set_max_frame_delay(1);
+        settings.set_n_threads(threads.clamp(1, 64));
+        settings.set_frame_size_limit(8_192 * 4_320);
         let decoder = dav1d::Decoder::with_settings(&settings).map_err(|error| {
             VideoDecodeError::BackendFailed {
                 reason: format!("dav1d decoder initialization failed: {error}"),
@@ -664,11 +673,61 @@ pub enum BgraDecoderSession {
 }
 
 impl BgraDecoderSession {
+    /// Negotiates decode scaling without imposing hardware-only dimensions on a fallback.
+    #[cfg(test)]
+    pub(crate) fn new_scaled(
+        codec: VideoCodec,
+        source_format: RawVideoFormat,
+        preferred_format: RawVideoFormat,
+        decoder_config: &[u8],
+    ) -> Result<(Self, RawVideoFormat), VideoDecodeError> {
+        Self::new_scaled_with_policy(
+            codec,
+            source_format,
+            preferred_format,
+            decoder_config,
+            &crate::ResourcePolicy::default(),
+        )
+    }
+
+    pub(crate) fn new_scaled_with_policy(
+        codec: VideoCodec,
+        source_format: RawVideoFormat,
+        preferred_format: RawVideoFormat,
+        decoder_config: &[u8],
+        policy: &crate::ResourcePolicy,
+    ) -> Result<(Self, RawVideoFormat), VideoDecodeError> {
+        #[cfg(target_os = "macos")]
+        if let Ok(session) =
+            VideoToolboxBgraDecoderSession::new(codec, preferred_format, decoder_config)
+        {
+            return Ok((Self::VideoToolbox(session), preferred_format));
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = preferred_format;
+        Self::new_with_policy(codec, source_format, decoder_config, policy)
+            .map(|session| (session, source_format))
+    }
+
     /// Creates the preferred executable decoder for the current host and codec.
     pub fn new(
         codec: VideoCodec,
         output_format: RawVideoFormat,
         decoder_config: &[u8],
+    ) -> Result<Self, VideoDecodeError> {
+        Self::new_with_policy(
+            codec,
+            output_format,
+            decoder_config,
+            &crate::ResourcePolicy::default(),
+        )
+    }
+
+    fn new_with_policy(
+        codec: VideoCodec,
+        output_format: RawVideoFormat,
+        decoder_config: &[u8],
+        policy: &crate::ResourcePolicy,
     ) -> Result<Self, VideoDecodeError> {
         #[cfg(target_os = "macos")]
         if let Ok(session) =
@@ -724,13 +783,27 @@ impl BgraDecoderSession {
         {
             return Ok(Self::VaapiHevc(Box::new(session)));
         }
+        Self::new_software(codec, output_format, decoder_config, policy)
+    }
+
+    pub(crate) fn new_software(
+        codec: VideoCodec,
+        output_format: RawVideoFormat,
+        decoder_config: &[u8],
+        policy: &crate::ResourcePolicy,
+    ) -> Result<Self, VideoDecodeError> {
+        if !policy.allow_software_video {
+            return Err(VideoDecodeError::BackendFailed { reason: "hardware decoder unavailable and resource policy forbids software video fallback".into() });
+        }
         match codec {
             VideoCodec::H264 => CpuH264BgraDecoderSession::new(output_format, decoder_config)
                 .map(|session| Self::CpuH264(Box::new(session))),
             VideoCodec::Hevc => CpuHevcBgraDecoderSession::new(output_format, decoder_config)
                 .map(|session| Self::CpuHevc(Box::new(session))),
-            VideoCodec::Av1 => CpuAv1BgraDecoderSession::new(output_format)
-                .map(|session| Self::CpuAv1(Box::new(session))),
+            VideoCodec::Av1 => {
+                CpuAv1BgraDecoderSession::new_with_threads(output_format, policy.codec_threads)
+                    .map(|session| Self::CpuAv1(Box::new(session)))
+            }
         }
     }
 
@@ -1442,6 +1515,11 @@ pub fn validate_decoded_video_format(format: RawVideoFormat) -> Result<(), Video
             reason: "decoded video dimensions must be non-zero".to_string(),
         });
     }
+    if u64::from(format.width) * u64::from(format.height) > 8_192 * 4_320 {
+        return Err(VideoDecodeError::InvalidOutputFormat {
+            reason: "decoded video exceeds the supported 8K pixel budget".to_string(),
+        });
+    }
     if format.frame_rate_num == 0 || format.frame_rate_den == 0 {
         return Err(VideoDecodeError::InvalidOutputFormat {
             reason: "decoded video frame rate must be non-zero".to_string(),
@@ -1589,6 +1667,55 @@ fn platform_decode_with_retained_session(
     retained: &VideoToolboxBgraDecoderSession,
     input: &VideoDecodeInput<'_>,
 ) -> Result<DecodedVideoOutput, VideoDecodeError> {
+    let surfaces = platform_decode_surfaces(retained, input)?;
+    let frames = surfaces
+        .into_iter()
+        .map(|frame| {
+            let pixels = copy_bgra_pixel_buffer(&frame.buffer, frame.format)?;
+            Ok(DecodedVideoFrame {
+                pts: frame.pts,
+                dts: frame.dts,
+                duration: frame.duration,
+                format: frame.format,
+                keyframe: frame.keyframe,
+                pixels,
+            })
+        })
+        .collect::<Result<Vec<_>, VideoDecodeError>>()?;
+    Ok(DecodedVideoOutput {
+        stream: DecodedVideoStream {
+            format: retained.output_format,
+            source_codec: input.codec,
+            decoder: match input.codec {
+                VideoCodec::H264 => "chroma-videotoolbox-h264-decoder".into(),
+                VideoCodec::Hevc => "chroma-videotoolbox-hevc-decoder".into(),
+                VideoCodec::Av1 => return Err(VideoDecodeError::UnsupportedCodec),
+            },
+        },
+        frames,
+    })
+}
+
+#[cfg(target_os = "macos")]
+impl VideoToolboxBgraDecoderSession {
+    pub(crate) fn decode_surfaces(
+        &mut self,
+        input: &VideoDecodeInput<'_>,
+    ) -> Result<Vec<super::surface::AppleVideoFrame>, VideoDecodeError> {
+        if input.codec != self.codec {
+            return Err(VideoDecodeError::UnsupportedCodec);
+        }
+        let frames = platform_decode_surfaces(self, input)?;
+        self.decoded_batches = self.decoded_batches.saturating_add(1);
+        Ok(frames)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn platform_decode_surfaces(
+    retained: &VideoToolboxBgraDecoderSession,
+    input: &VideoDecodeInput<'_>,
+) -> Result<Vec<super::surface::AppleVideoFrame>, VideoDecodeError> {
     use std::{
         collections::BTreeMap,
         sync::{Arc, Mutex},
@@ -1621,7 +1748,7 @@ fn platform_decode_with_retained_session(
             })
             .collect::<BTreeMap<_, _>>(),
     );
-    let frames = Arc::new(Mutex::new(Vec::<DecodedVideoFrame>::new()));
+    let frames = Arc::new(Mutex::new(Vec::<super::surface::AppleVideoFrame>::new()));
     let callback_error = Arc::new(Mutex::new(None::<VideoDecodeError>));
     let callback_format = output_format;
 
@@ -1695,29 +1822,47 @@ fn platform_decode_with_retained_session(
                     .get(&DecodeTimestampKey::from(pts_point))
                     .copied()
                     .unwrap_or((pts_point, duration_delta, false));
-                match copy_bgra_pixel_buffer(pixel_buffer, callback_format) {
-                    Ok(pixels) => match out_frames.lock() {
-                        Ok(mut frames) => frames.push(DecodedVideoFrame {
-                            pts: pts_point,
-                            dts: timing.0,
-                            duration: if duration_delta.units == 0 {
-                                timing.1
-                            } else {
-                                duration_delta
-                            },
-                            format: callback_format,
-                            pixels,
-                            keyframe: timing.2,
-                        }),
-                        Err(_) => set_callback_error(
-                            &out_error,
-                            VideoDecodeError::BackendFailed {
-                                reason: "VideoToolbox decoded frame output lock was poisoned"
-                                    .to_string(),
-                            },
-                        ),
-                    },
-                    Err(error) => set_callback_error(&out_error, error),
+                if objc2_core_video::CVPixelBufferGetWidth(pixel_buffer)
+                    != callback_format.width as usize
+                    || objc2_core_video::CVPixelBufferGetHeight(pixel_buffer)
+                        != callback_format.height as usize
+                    || objc2_core_video::CVPixelBufferGetPixelFormatType(pixel_buffer)
+                        != objc2_core_video::kCVPixelFormatType_32BGRA
+                {
+                    set_callback_error(
+                        &out_error,
+                        VideoDecodeError::BackendFailed {
+                            reason: "VideoToolbox returned an unexpected surface format".into(),
+                        },
+                    );
+                    return;
+                }
+                #[allow(unsafe_code)]
+                // SAFETY: The callback owns a valid CVPixelBuffer for this call.
+                // Retaining it creates an independent +1 owner before the callback
+                // ends; no CPU address is borrowed or exposed across threads.
+                let buffer = unsafe {
+                    objc2_core_foundation::CFRetained::retain(std::ptr::NonNull::from(pixel_buffer))
+                };
+                match out_frames.lock() {
+                    Ok(mut frames) => frames.push(super::surface::AppleVideoFrame {
+                        pts: pts_point,
+                        dts: timing.0,
+                        duration: if duration_delta.units == 0 {
+                            timing.1
+                        } else {
+                            duration_delta
+                        },
+                        format: callback_format,
+                        keyframe: timing.2,
+                        buffer,
+                    }),
+                    Err(_) => set_callback_error(
+                        &out_error,
+                        VideoDecodeError::BackendFailed {
+                            reason: "VideoToolbox surface output lock was poisoned".into(),
+                        },
+                    ),
                 }
             },
         );
@@ -1771,18 +1916,7 @@ fn platform_decode_with_retained_session(
         })?;
     frames.sort_by_key(|frame| (frame.pts.units, frame.pts.scale.units_per_second));
 
-    Ok(DecodedVideoOutput {
-        stream: DecodedVideoStream {
-            format: output_format,
-            source_codec: input.codec,
-            decoder: match input.codec {
-                VideoCodec::H264 => "chroma-videotoolbox-h264-decoder".to_string(),
-                VideoCodec::Hevc => "chroma-videotoolbox-hevc-decoder".to_string(),
-                VideoCodec::Av1 => return Err(VideoDecodeError::UnsupportedCodec),
-            },
-        },
-        frames,
-    })
+    Ok(frames)
 }
 
 #[cfg(target_os = "macos")]

@@ -23,19 +23,11 @@ impl OutputTimestampSanitizer {
 }
 
 pub(super) fn packet_to_payload(
-    bytes: &[u8],
+    bytes: &(impl HlsInput + ?Sized),
     packet: &PacketRef,
     kind: &PayloadKind,
 ) -> Result<Vec<u8>> {
-    let start = packet.source_offset as usize;
-    let end = start
-        .checked_add(packet.size as usize)
-        .ok_or_else(|| anyhow!("packet range overflows"))?;
-    if end > bytes.len() {
-        return Err(HlsError::message(
-            "packet range is outside source".to_string(),
-        ));
-    }
+    let payload = packet_bytes(bytes, packet)?;
     match kind {
         PayloadKind::Avc {
             nalu_length_size,
@@ -52,16 +44,13 @@ pub(super) fn packet_to_payload(
                     out.extend_from_slice(pps);
                 }
             }
-            out.extend_from_slice(&h264_sample_to_annex_b(
-                &bytes[start..end],
-                *nalu_length_size,
-            )?);
+            out.extend_from_slice(&h264_sample_to_annex_b(&payload, *nalu_length_size)?);
             Ok(out)
         }
         PayloadKind::Aac { config } => {
             let mut out = Vec::with_capacity(packet.size as usize + 7);
             out.extend_from_slice(&adts_header(packet.size as usize, *config)?);
-            out.extend_from_slice(&bytes[start..end]);
+            out.extend_from_slice(&payload);
             Ok(out)
         }
         PayloadKind::Hevc {
@@ -72,15 +61,10 @@ pub(super) fn packet_to_payload(
             if packet.keyframe {
                 out.extend_from_slice(parameter_sets_annex_b);
             }
-            out.extend_from_slice(&hevc_sample_to_annex_b(
-                &bytes[start..end],
-                *nalu_length_size,
-            )?);
+            out.extend_from_slice(&hevc_sample_to_annex_b(&payload, *nalu_length_size)?);
             Ok(out)
         }
-        PayloadKind::Ac3 | PayloadKind::Eac3 | PayloadKind::RawAudio => {
-            Ok(bytes[start..end].to_vec())
-        }
+        PayloadKind::Ac3 | PayloadKind::Eac3 | PayloadKind::RawAudio => Ok(payload),
     }
 }
 

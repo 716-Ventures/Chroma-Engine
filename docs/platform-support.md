@@ -1,5 +1,19 @@
 # Platform Support
 
+## Cache preflight and qualification status
+
+Generated output requires same-directory hard links with no replacement. Run `chroma-engine cache-probe /path/to/cache` during host setup, or call `chroma_engine::validate_cache_directory`. It creates and removes its own temporary files without replacing existing output. Select a compatible local cache when a NAS share does not support this operation. This check is not a disk-space reservation or durability guarantee.
+
+The [stability audit execution ledger](audits/2026-09-stability-performance-plan.md#execution-ledger) records implementation and qualification separately. Source mappings are removed; retained streaming audio, resource admission, native macOS surfaces, and worker supervision are implemented. Linux/Windows surface optimization, server integration and fleet qualification remain open. A build is not a measured NAS memory guarantee.
+
+For portable fresh-process window measurements, use `python3 scripts/benchmark-session.py --engine PATH_TO_ENGINE --media PATH_TO_MEDIA --start-index 0 100 --count 2 --repeats 5`, choosing valid segment indices. Install psutil for optional sampled worker RSS/CPU/I/O; caches are not evicted. See [resource policy](resource-policy.md) for limits, streaming AAC behavior, HDR handling and host supervision.
+
+## Artifact baselines
+
+The new `Linux-ARCH-glibc236` NAS bundle is built in Debian 12 with generic x86-64/AArch64 CPU targeting, glibc 2.36, Rust 1.90 and runtime-optional VA-API. It is not a musl/static binary and is not compatible with older NAS libc installations by assertion. CI executes the bundle in Debian 12 without GPU libraries/devices, including a tiny generated workload under a 512 MiB container cap. These new jobs still need to execute before distribution. The artifact records its distinct low-build-memory release settings in `BUILD-BASELINE.txt`.
+
+Hosted Ubuntu release bundles retain their runner's libc baseline and must not be substituted for the glibc-2.36 artifact on an older appliance. NVIDIA is enabled in the hosted Linux x64 bundle, not the generic NAS Docker bundle. No 32-bit NAS, musl, or older-glibc support is advertised by this change.
+
 Chroma Engine separates portable container/session code, software codecs, and platform hardware adapters. A successful build does not imply that every transcode stage is executable on that host.
 
 | Target | Build and core tests | Software video codecs | AAC-LC software encode | Hardware video encode/decode | Full native HLS transcode |

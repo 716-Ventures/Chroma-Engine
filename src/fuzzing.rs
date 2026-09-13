@@ -11,6 +11,9 @@ const MAX_FUZZ_SAMPLES: usize = 32;
 /// Exercises untrusted container sniffing and metadata/index parsing.
 pub fn fuzz_containers(bytes: &[u8]) {
     let bytes = bounded(bytes);
+    if crate::container::validate_metadata_budget(bytes, Default::default()).is_err() {
+        return;
+    }
     let _ = crate::container::sniff_container(bytes);
     let _ = crate::container::mp4::parse_basic_metadata(bytes);
     let _ = crate::container::mp4::parse_packet_track(bytes, None);
@@ -33,6 +36,7 @@ pub fn fuzz_codecs(bytes: &[u8]) {
     let _ = crate::codec::h264::avc_sample_to_annex_b(bytes, nalu_length_size);
     let _ = crate::codec::hevc::parse_hevc_decoder_config(bytes);
     let _ = crate::codec::hevc::hevc_sample_to_annex_b(bytes, nalu_length_size);
+    let _ = crate::codec::hevc::sample_vcl_type(bytes, nalu_length_size);
 }
 
 /// Exercises text subtitle parsing and WebVTT segmentation.
@@ -50,6 +54,8 @@ pub fn fuzz_subtitles(bytes: &[u8]) {
 /// Exercises fMP4 fragment construction and byte-level validation.
 pub fn fuzz_fmp4(bytes: &[u8]) {
     let bytes = bounded(bytes);
+    // Validate attacker-controlled boxes too, not only our own valid builder output.
+    let _ = crate::fmp4::validate_media_fragment(bytes);
     if bytes.is_empty() {
         return;
     }

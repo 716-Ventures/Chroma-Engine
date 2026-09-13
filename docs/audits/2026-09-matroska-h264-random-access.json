@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "platform": "macOS-26.6.2-arm64-arm-64bit",
+  "architecture": "arm64",
+  "engineSha256": "ab6336326a79aab8bc5a3a0448bc2a28d567c68bba42c8df3128edac9e95a13a",
+  "mediaBytes": 93551130,
+  "mode": "h264",
+  "cacheState": "uncontrolled",
+  "measurement": "fresh-process contiguous-window wall time",
+  "workerMetrics": "sampled-psutil",
+  "label": "",
+  "resourcePolicy": "default",
+  "runs": [
+    {
+      "startIndex": 70,
+      "count": 2,
+      "repeat": 0,
+      "exitCode": 1,
+      "workerMetrics": {
+        "peakSampledRssBytes": 68026368,
+        "cpuSeconds": 0.216192,
+        "readBytes": null,
+        "writeBytes": null,
+        "sampleIntervalMs": 20,
+        "sampleCount": 162,
+        "osPeakRssBytes": 87375872
+      },
+      "error": "Error: fMP4 media fragment track starts with a non-sync sample\n",
+      "elapsedSeconds": 4.031160333
+    },
+    {
+      "startIndex": 130,
+      "count": 2,
+      "repeat": 0,
+      "exitCode": 1,
+      "workerMetrics": {
+        "peakSampledRssBytes": 85458944,
+        "cpuSeconds": 0.16081099999999998,
+        "readBytes": null,
+        "writeBytes": null,
+        "sampleIntervalMs": 20,
+        "sampleCount": 164,
+        "osPeakRssBytes": 105480192
+      },
+      "error": "Error: fMP4 media fragment track starts with a non-sync sample\n",
+      "elapsedSeconds": 4.066756665999999
+    }
+  ]
+}

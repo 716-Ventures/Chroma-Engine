@@ -477,7 +477,6 @@ dependencies = [
  "mediaway-common",
  "mediaway-decoder",
  "mediaway-encoder",
- "memmap2",
  "nuxodecs",
  "objc2-core-foundation",
  "objc2-core-media",
@@ -1241,15 +1240,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
-name = "memmap2"
-version = "0.9.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d1219ed1b7f229ee7104d281dd01d6802fe28bb6e95d292942c4daacdeb798c0"
-dependencies = [
- "libc",
-]
-
-[[package]]
 name = "minimal-lexical"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1991,8 +1981,6 @@ dependencies = [
 [[package]]
 name = "rusty_aac"
 version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b7ab980ffb66a559565d09dd6727ff2da7d2a39d2e8b6149e48af6908caa99b5"
 
 [[package]]
 name = "safe_arch"

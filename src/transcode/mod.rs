@@ -9,6 +9,7 @@ mod audio_encode;
 mod execution_plan;
 mod scaler;
 mod segment;
+mod surface;
 mod video_decode;
 mod video_encode;
 mod yuv;

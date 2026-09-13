@@ -6,16 +6,19 @@ use std::{
 
 use anyhow::{Result, bail};
 use serde::Serialize;
+mod audio_pipeline;
+mod metrics;
+use audio_pipeline::AudioPipeline;
+use metrics::{StageCounters, StageTimer};
 
-use super::scaler::{constrained_h264_format, scale_bgra};
+#[cfg(test)]
+use super::scaler::scale_bgra;
+use super::scaler::{BgraScaler, constrained_h264_format};
 use crate::{
     codec::ac3::{parse_ac3_specific_box, parse_eac3_specific_box},
     container::{
         ContainerKind,
-        matroska::{
-            MatroskaTrack, MatroskaTrackKind, parse_chunk_plan as parse_matroska_chunk_plan,
-            parse_packet_tracks_in_time_window,
-        },
+        matroska::{MatroskaTrack, MatroskaTrackKind},
         mp4::{
             Mp4Track, Mp4TrackKind, parse_basic_metadata as parse_mp4_metadata,
             parse_chunk_plan as parse_mp4_chunk_plan, parse_codec_config as parse_mp4_codec_config,
@@ -26,14 +29,14 @@ use crate::{
     fmp4::{
         Fmp4SampleEntry, Fmp4Track, Fmp4TrackKind, fragment_track_from_chunk_samples,
         fragment_track_from_encoded_audio_frames, fragment_track_from_encoded_video_frames,
-        init_segment, media_fragment,
+        init_segment,
     },
     output::publish_bytes,
     packet::{
         ChunkPlan, ChunkSample, ExtractedChunk, NativeChunk, PacketRange, PacketRef, TimeDelta,
-        TimePoint, TimeScale, extract_packet_payload, packet_samples_for_range,
+        TimePoint, TimeScale, packet_samples_for_range,
     },
-    source::MappedMediaFile,
+    source::{MappedMediaFile, PacketSource},
     transcode::{
         AudioDecodeCodec, BgraDecoderSession, H264EncoderSession, RawVideoFormat, RawVideoFrameRef,
         RawVideoPixelFormat, VideoCodec, build_audio_decode_input, build_video_decode_input,
@@ -48,6 +51,8 @@ const DEFAULT_VIDEO_BITRATE: u32 = 16_000_000;
 const DEFAULT_AUDIO_BITRATE: u32 = 384_000;
 const DEFAULT_SEGMENT_MS: u64 = 4_000;
 const VIDEO_DECODE_BATCH_PACKETS: usize = 16;
+#[cfg(test)]
+const VIDEO_DECODE_BATCH_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -173,6 +178,28 @@ pub struct NativeFmp4TranscodePlan {
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct NativeFmp4TranscodeSessionStats {
+    /// Positional index/payload bytes read after the initial metadata pass.
+    pub source_bytes_read: u64,
+    /// Positional index/payload read operations after the metadata pass.
+    pub source_read_operations: u64,
+    /// Local clusters scanned for requested packet windows.
+    pub clusters_visited: u64,
+    /// Session open, metadata, index and codec initialization microseconds.
+    pub open_micros: u64,
+    /// Cumulative packet indexing and payload-read microseconds.
+    pub read_micros: u64,
+    /// Cumulative video copy or decode/scale/encode microseconds.
+    pub video_micros: u64,
+    /// Cumulative audio copy or decode/encode microseconds.
+    pub audio_micros: u64,
+    /// Cumulative fragment assembly and validation microseconds.
+    pub mux_micros: u64,
+    /// Cumulative atomic output-publication microseconds.
+    pub publish_micros: u64,
+    /// Selected video decoder, or copy.
+    pub decoder_backend: &'static str,
+    /// Selected video encoder, or copy.
+    pub encoder_backend: &'static str,
     /// Source snapshots created by this session.
     pub source_opens: u64,
     /// Track-selection and cue-plan passes completed at session open.
@@ -191,43 +218,80 @@ pub struct NativeFmp4TranscodeSessionStats {
     pub codec_session_resets: u64,
 }
 
-/// Stateful modern-container-to-fMP4 transcode session retaining one immutable source snapshot.
+/// Stateful modern-container-to-fMP4 session retaining owned metadata and a
+/// validated source handle. Payloads are bounded positional reads, not mappings.
 #[derive(Debug)]
 pub struct NativeFmp4TranscodeSession {
+    metrics: StageCounters,
+    validated_caches: RefCell<std::collections::HashSet<std::path::PathBuf>>,
+    audio_pipeline: RefCell<Option<AudioPipeline>>,
     source: MappedMediaFile,
     options: NativeFmp4TranscodeOptions,
     prepared: PreparedTranscode,
     codec_pipeline: RefCell<Option<NativeVideoCodecPipeline>>,
     segment_requests: AtomicU64,
     source_validations: AtomicU64,
+    control: crate::WorkControl,
 }
 
 impl NativeFmp4TranscodeSession {
     /// Opens and validates a reusable transcode session.
     pub fn open(input: &Path, options: NativeFmp4TranscodeOptions) -> Result<Self> {
-        let source = MappedMediaFile::open(input)?;
+        Self::open_with_control(input, options, crate::WorkControl::default())
+    }
+
+    /// Opens a session sharing the host's cancellation/deadline control.
+    pub fn open_with_control(
+        input: &Path,
+        options: NativeFmp4TranscodeOptions,
+        control: crate::WorkControl,
+    ) -> Result<Self> {
+        Self::open_with_runtime(input, options, control, crate::EngineRuntime::global()?)
+    }
+
+    /// Opens a session in the host's shared admission pool.
+    pub fn open_with_runtime(
+        input: &Path,
+        options: NativeFmp4TranscodeOptions,
+        control: crate::WorkControl,
+        runtime: std::sync::Arc<crate::EngineRuntime>,
+    ) -> Result<Self> {
+        let metrics = StageCounters::default();
+        let timer = StageTimer::new(&metrics.open);
+        control.check()?;
+        let source = MappedMediaFile::open_with_context(input, runtime, control.clone())?;
         let prepared = match sniff_container(source.as_ref()) {
             ContainerKind::Mp4 | ContainerKind::Mov => {
                 prepare_mp4_transcode(source.as_ref(), &options)?
             }
             ContainerKind::Matroska | ContainerKind::Webm => {
-                prepare_matroska_transcode(source.as_ref(), &options)?
+                prepare_matroska_transcode(&source, &options)?
             }
             ContainerKind::Unknown => bail!(
                 "native fMP4 transcode supports only modern MP4/MOV and Matroska/WebM sources"
             ),
         };
+        control.check()?;
         let codec_pipeline = match options.video_mode {
             NativeFmp4VideoMode::Copy => None,
-            NativeFmp4VideoMode::H264 => Some(NativeVideoCodecPipeline::new(&prepared, &options)?),
+            NativeFmp4VideoMode::H264 => Some(NativeVideoCodecPipeline::new_with_policy(
+                &prepared,
+                &options,
+                source.policy().clone(),
+            )?),
         };
+        drop(timer);
         Ok(Self {
+            metrics,
+            validated_caches: RefCell::default(),
+            audio_pipeline: RefCell::new(AudioPipeline::new(&prepared.audio_track)?),
             source,
             options,
             prepared,
             codec_pipeline: RefCell::new(codec_pipeline),
             segment_requests: AtomicU64::new(0),
             source_validations: AtomicU64::new(0),
+            control,
         })
     }
 
@@ -239,6 +303,23 @@ impl NativeFmp4TranscodeSession {
             .map(NativeVideoCodecPipeline::stats)
             .unwrap_or_default();
         NativeFmp4TranscodeSessionStats {
+            source_bytes_read: self.source.io_stats().0,
+            source_read_operations: self.source.io_stats().1,
+            clusters_visited: self.source.io_stats().2,
+            open_micros: self.metrics.open.load(Ordering::Relaxed),
+            read_micros: self.metrics.read.load(Ordering::Relaxed),
+            video_micros: self.metrics.video.load(Ordering::Relaxed),
+            audio_micros: self.metrics.audio.load(Ordering::Relaxed),
+            mux_micros: self.metrics.mux.load(Ordering::Relaxed),
+            publish_micros: self.metrics.publish.load(Ordering::Relaxed),
+            decoder_backend: codec_pipeline
+                .as_ref()
+                .map(|pipeline| pipeline.decoder.backend_name())
+                .unwrap_or("copy"),
+            encoder_backend: codec_pipeline
+                .as_ref()
+                .map(|pipeline| pipeline.encoder.backend_name())
+                .unwrap_or("copy"),
             source_opens: 1,
             index_parses: 1,
             segment_requests: self.segment_requests.load(Ordering::Relaxed),
@@ -260,21 +341,114 @@ impl NativeFmp4TranscodeSession {
         }
     }
 
+    fn validate_output_cache(&self, output: &Path) -> Result<()> {
+        self.control.check()?;
+        let parent = output
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let mut caches = self.validated_caches.borrow_mut();
+        if !caches.contains(parent) {
+            crate::output::validate_cache_directory(parent)?;
+            if caches.len() >= 16 {
+                caches.clear();
+            }
+            caches.insert(parent.to_path_buf());
+        }
+        Ok(())
+    }
+
     fn render(&self, index: u32) -> Result<TranscodedSegment> {
+        self.control.check()?;
         self.segment_requests.fetch_add(1, Ordering::Relaxed);
         self.source.validate_current()?;
         self.source_validations.fetch_add(1, Ordering::Relaxed);
         let mut codec_pipeline = self.codec_pipeline.borrow_mut();
+        if self.options.video_mode == NativeFmp4VideoMode::H264 && codec_pipeline.is_none() {
+            bail!("video pipeline is closed after failed recovery; reopen the session");
+        }
+        let mut audio_pipeline = self.audio_pipeline.borrow_mut();
+        if let Some(pipeline) = audio_pipeline.as_mut() {
+            pipeline.prepare(index, &self.prepared.audio_track)?;
+        }
         if let Some(pipeline) = codec_pipeline.as_mut() {
             pipeline.prepare_for(index, &self.prepared, &self.options)?;
+            // Any error after packet submission invalidates reuse, even if audio or
+            // muxing fails after video has advanced successfully.
+            pipeline.poisoned = true;
+            pipeline.control = self.control.clone();
         }
-        let result = transcode_prepared_segment(
-            self.source.as_ref(),
+        let mut result = transcode_prepared_segment(
+            &self.source,
             index,
             &self.options,
             &self.prepared,
             codec_pipeline.as_mut(),
+            audio_pipeline.as_mut(),
+            &self.metrics,
         );
+        let backend_failed = result.as_ref().err().is_some_and(|error| {
+            matches!(
+                error.downcast_ref::<super::VideoDecodeError>(),
+                Some(super::VideoDecodeError::BackendFailed { .. })
+            ) || matches!(
+                error.downcast_ref::<super::VideoEncodeError>(),
+                Some(super::VideoEncodeError::BackendFailed { .. })
+            )
+        });
+        if backend_failed
+            && codec_pipeline.as_ref().is_some_and(|pipeline| {
+                !pipeline.software_only
+                    && pipeline.policy.allow_software_video
+                    && !(matches!(
+                        pipeline.decoder,
+                        BgraDecoderSession::CpuH264(_)
+                            | BgraDecoderSession::CpuHevc(_)
+                            | BgraDecoderSession::CpuAv1(_)
+                    ) && matches!(pipeline.encoder, H264EncoderSession::Cpu(_)))
+            })
+        {
+            // Discard all partially advanced state before one eligible fallback.
+            // No output has been published; restart from the same keyframe window.
+            self.control.check()?;
+            let prior = codec_pipeline.as_ref().unwrap().stats;
+            *codec_pipeline = None;
+            *audio_pipeline = None;
+            let mut replacement = NativeVideoCodecPipeline::new_backend(
+                &self.prepared,
+                &self.options,
+                self.source.policy().clone(),
+                true,
+            )?;
+            replacement.stats = NativeVideoCodecStats {
+                decoder_sessions_created: prior.decoder_sessions_created.saturating_add(1),
+                encoder_sessions_created: prior.encoder_sessions_created.saturating_add(1),
+                reuses: prior.reuses,
+                resets: prior.resets.saturating_add(1),
+            };
+            replacement.control = self.control.clone();
+            replacement.poisoned = true;
+            *codec_pipeline = Some(replacement);
+            *audio_pipeline = AudioPipeline::new(&self.prepared.audio_track)?;
+            if let Some(audio) = audio_pipeline.as_mut() {
+                audio.prepare(index, &self.prepared.audio_track)?;
+            }
+            result = transcode_prepared_segment(
+                &self.source,
+                index,
+                &self.options,
+                &self.prepared,
+                codec_pipeline.as_mut(),
+                audio_pipeline.as_mut(),
+                &self.metrics,
+            );
+        }
+        if result.is_ok()
+            && let Some(pipeline) = audio_pipeline.as_mut()
+        {
+            pipeline.complete(index);
+        }
+        self.control.check()?;
         if result.is_ok()
             && let Some(pipeline) = codec_pipeline.as_mut()
         {
@@ -285,7 +459,10 @@ impl NativeFmp4TranscodeSession {
 
     /// Writes a native fMP4 init segment, deriving encoder configuration from segment zero.
     pub fn write_init(&self, output: &Path) -> Result<NativeFmp4TranscodeInitOutput> {
+        self.validate_output_cache(output)?;
         let segment = self.render(0)?;
+        self.source.validate_current()?;
+        let _timer = StageTimer::new(&self.metrics.publish);
         publish_bytes(output, &segment.init_segment)?;
         Ok(NativeFmp4TranscodeInitOutput {
             output: output.display().to_string(),
@@ -303,8 +480,11 @@ impl NativeFmp4TranscodeSession {
         output: &Path,
         index: u32,
     ) -> Result<NativeFmp4TranscodeSegmentOutput> {
+        self.validate_output_cache(output)?;
         let segment = self.render(index)?;
-        publish_bytes(output, &segment.media_segment)?;
+        self.source.validate_current()?;
+        let _timer = StageTimer::new(&self.metrics.publish);
+        segment.media_segment.publish(output)?;
         Ok(NativeFmp4TranscodeSegmentOutput {
             output: output.display().to_string(),
             index,
@@ -328,6 +508,7 @@ impl NativeFmp4TranscodeSession {
         start_index: u32,
         count: u32,
     ) -> Result<Vec<NativeFmp4TranscodeSegmentOutput>> {
+        validate_segment_window(start_index, count, self.prepared.video_chunks.chunks.len())?;
         let mut outputs = Vec::with_capacity(usize::try_from(count)?);
         for offset in 0..count {
             let index = start_index
@@ -374,9 +555,15 @@ impl NativeFmp4TranscodeSession {
         segment_output: &Path,
         index: u32,
     ) -> Result<NativeFmp4TranscodeStartOutput> {
+        for output in [init_output, segment_output] {
+            self.validate_output_cache(output)?;
+        }
         let segment = self.render(index)?;
+        self.source.validate_current()?;
+        let _timer = StageTimer::new(&self.metrics.publish);
         publish_bytes(init_output, &segment.init_segment)?;
-        publish_bytes(segment_output, &segment.media_segment)?;
+        self.source.validate_current()?;
+        segment.media_segment.publish(segment_output)?;
         Ok(NativeFmp4TranscodeStartOutput {
             init_output: init_output.display().to_string(),
             segment_output: segment_output.display().to_string(),
@@ -475,7 +662,7 @@ struct TranscodedSegment {
     video_codec: String,
     audio_codec: String,
     init_segment: Vec<u8>,
-    media_segment: Vec<u8>,
+    media_segment: crate::fmp4::OwnedMediaFragment,
     decoded_video_frames: usize,
     video_sample_count: usize,
     encoded_video_frames: usize,
@@ -524,6 +711,7 @@ struct PreparedVideoTrack {
     width: u32,
     height: u32,
     frame_rate: Option<f64>,
+    hdr: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -553,26 +741,101 @@ struct NativeVideoCodecStats {
 
 #[derive(Debug)]
 struct NativeVideoCodecPipeline {
+    software_only: bool,
+    policy: crate::ResourcePolicy,
     decoder: BgraDecoderSession,
+    scaler: BgraScaler,
+    scaled_buffers: Vec<Vec<u8>>,
     decoder_output_format: RawVideoFormat,
     encoder: H264EncoderSession,
     last_completed_index: Option<u32>,
+    poisoned: bool,
+    control: crate::WorkControl,
     stats: NativeVideoCodecStats,
 }
 
 impl NativeVideoCodecPipeline {
+    #[cfg(test)]
     fn new(prepared: &PreparedTranscode, options: &NativeFmp4TranscodeOptions) -> Result<Self> {
+        Self::new_with_policy(prepared, options, crate::ResourcePolicy::default())
+    }
+
+    fn new_with_policy(
+        prepared: &PreparedTranscode,
+        options: &NativeFmp4TranscodeOptions,
+        policy: crate::ResourcePolicy,
+    ) -> Result<Self> {
+        Self::new_backend(prepared, options, policy, false)
+    }
+
+    fn new_backend(
+        prepared: &PreparedTranscode,
+        options: &NativeFmp4TranscodeOptions,
+        policy: crate::ResourcePolicy,
+        software_only: bool,
+    ) -> Result<Self> {
+        if prepared.video_track.hdr {
+            bail!(
+                "HDR-to-SDR video transcode requires tone mapping; select compatible HDR video copy"
+            );
+        }
         let (decode_format, encode_format) = video_formats(&prepared.video_track);
-        let decoder_output_format = native_decoder_output_format(decode_format, encode_format);
-        Ok(Self {
-            decoder: BgraDecoderSession::new(
+        let pixels = u64::from(decode_format.width) * u64::from(decode_format.height);
+        policy.check(
+            "video pixels",
+            usize::try_from(pixels)?,
+            usize::try_from(policy.frame_pixels)?,
+        )?;
+        let frame_bytes = usize::try_from(pixels)?
+            .checked_mul(4)
+            .ok_or_else(|| anyhow::anyhow!("frame size overflow"))?;
+        policy.check("decoded frame", frame_bytes, policy.decoded_batch_bytes)?;
+        let estimate = frame_bytes
+            .saturating_mul(17)
+            .saturating_add(policy.index_bytes)
+            .saturating_add(policy.metadata_bytes)
+            .saturating_add(policy.compressed_window_bytes.saturating_mul(2))
+            .saturating_add(policy.decoded_batch_bytes)
+            .saturating_add(policy.output_bytes);
+        policy.check(
+            "video working-set reservation",
+            estimate,
+            policy.session_memory_bytes,
+        )?;
+        let (decoder, decoder_output_format) = if software_only {
+            (
+                BgraDecoderSession::new_software(
+                    prepared.video_codec,
+                    decode_format,
+                    &prepared.decoder_config,
+                    &policy,
+                )?,
+                decode_format,
+            )
+        } else {
+            BgraDecoderSession::new_scaled_with_policy(
                 prepared.video_codec,
-                decoder_output_format,
+                decode_format,
+                encode_format,
                 &prepared.decoder_config,
-            )?,
+                &policy,
+            )?
+        };
+        Ok(Self {
+            software_only,
+            encoder: if software_only {
+                H264EncoderSession::new_software(encode_format, options.video_bitrate, &policy)?
+            } else {
+                H264EncoderSession::new_with_policy(encode_format, options.video_bitrate, &policy)?
+            },
+            policy,
+            decoder,
+            scaler: BgraScaler::new(decoder_output_format, encode_format)?,
+            scaled_buffers: Vec::new(),
             decoder_output_format,
-            encoder: H264EncoderSession::new(encode_format, options.video_bitrate)?,
             last_completed_index: None,
+            poisoned: false,
+            control: crate::WorkControl::default(),
             stats: NativeVideoCodecStats {
                 decoder_sessions_created: 1,
                 encoder_sessions_created: 1,
@@ -588,18 +851,16 @@ impl NativeVideoCodecPipeline {
         options: &NativeFmp4TranscodeOptions,
     ) -> Result<()> {
         match self.last_completed_index {
-            None => Ok(()),
-            Some(previous) if previous.checked_add(1) == Some(index) => {
+            None if !self.poisoned => Ok(()),
+            Some(previous) if !self.poisoned && previous.checked_add(1) == Some(index) => {
                 self.stats.reuses = self.stats.reuses.saturating_add(1);
                 Ok(())
             }
-            Some(_) => {
+            _ => {
                 let prior = self.stats;
-                let replacement = Self::new(prepared, options)?;
-                self.decoder = replacement.decoder;
-                self.decoder_output_format = replacement.decoder_output_format;
-                self.encoder = replacement.encoder;
-                self.last_completed_index = None;
+                let replacement =
+                    Self::new_backend(prepared, options, self.policy.clone(), self.software_only)?;
+                *self = replacement;
                 self.stats = NativeVideoCodecStats {
                     decoder_sessions_created: prior.decoder_sessions_created.saturating_add(1),
                     encoder_sessions_created: prior.encoder_sessions_created.saturating_add(1),
@@ -613,21 +874,20 @@ impl NativeVideoCodecPipeline {
 
     fn mark_completed(&mut self, index: u32) {
         self.last_completed_index = Some(index);
+        self.poisoned = false;
     }
 
     fn stats(&self) -> NativeVideoCodecStats {
-        debug_assert_eq!(
-            self.decoder.decoded_batches(),
-            self.encoder.encoded_batches()
-        );
         self.stats
     }
 }
 
 fn prepare_matroska_transcode(
-    bytes: &[u8],
+    source: &MappedMediaFile,
     options: &NativeFmp4TranscodeOptions,
 ) -> Result<PreparedTranscode> {
+    let bytes = source.as_ref();
+    let source_index = source.matroska_index()?;
     let meta = crate::container::matroska::parse_basic_metadata(bytes);
     let (video_track_id, video_track) = select_matroska_track(
         &meta.tracks,
@@ -644,10 +904,11 @@ fn prepare_matroska_transcode(
         .clone()
         .or_else(|| (video_codec == VideoCodec::Av1).then(Vec::new))
         .ok_or_else(|| anyhow::anyhow!("missing Matroska video decoder config"))?;
-    let video_chunks = normalize_chunk_durations(
-        parse_matroska_chunk_plan(bytes, Some(&video_track_id), options.segment_ms.max(1))
-            .ok_or_else(|| anyhow::anyhow!("could not plan selected Matroska video track"))?,
-    );
+    let video_chunks = normalize_chunk_durations(source_index.plan(
+        source,
+        &video_track_id,
+        options.segment_ms.max(1),
+    )?);
     if video_chunks.chunks.is_empty() {
         bail!("selected Matroska video track produced no transcode segments");
     }
@@ -759,6 +1020,7 @@ impl From<&MatroskaTrack> for PreparedVideoTrack {
             width: track.width.unwrap_or(1_920),
             height: track.height.unwrap_or(1_080),
             frame_rate,
+            hdr: matches!(track.transfer_characteristics, Some(16 | 18)),
         }
     }
 }
@@ -770,6 +1032,12 @@ impl From<&Mp4Track> for PreparedVideoTrack {
             width: track.width.unwrap_or(1_920),
             height: track.height.unwrap_or(1_080),
             frame_rate: track.frame_rate,
+            hdr: matches!(
+                track.dynamic_range,
+                crate::container::mp4::Mp4DynamicRange::Hdr10
+                    | crate::container::mp4::Mp4DynamicRange::DolbyVision
+                    | crate::container::mp4::Mp4DynamicRange::Hlg
+            ),
         }
     }
 }
@@ -797,12 +1065,15 @@ impl From<&Mp4Track> for PreparedAudioTrack {
 }
 
 fn transcode_prepared_segment(
-    bytes: &[u8],
+    source: &MappedMediaFile,
     index: u32,
     options: &NativeFmp4TranscodeOptions,
     prepared: &PreparedTranscode,
     codec_pipeline: Option<&mut NativeVideoCodecPipeline>,
+    audio_pipeline: Option<&mut AudioPipeline>,
+    metrics: &StageCounters,
 ) -> Result<TranscodedSegment> {
+    let read_timer = StageTimer::new(&metrics.read);
     let mut video_chunk = prepared
         .video_chunks
         .chunks
@@ -811,44 +1082,42 @@ fn transcode_prepared_segment(
         .ok_or_else(|| anyhow::anyhow!("transcode segment {index} is out of range"))?;
     let video_start_ms = video_chunk.start.as_millis();
     let video_end_ms = video_start_ms.saturating_add(video_chunk.duration.as_millis());
-    let owned_video_packets;
-    let video_packets = match &prepared.source_index {
+    // Share the sparse index and scan interleaved blocks once, with independent
+    // video and audio-preroll windows.
+    let owned_windows = match &prepared.source_index {
+        PreparedSourceIndex::Matroska => Some(source.matroska_index()?.packet_windows(
+            source,
+            &[
+                (&prepared.video_track_id, video_start_ms, video_end_ms),
+                (
+                    &prepared.audio_track_id,
+                    video_start_ms.saturating_sub(1_000),
+                    video_end_ms,
+                ),
+            ],
+        )?),
+        PreparedSourceIndex::Mp4 { .. } => None,
+    };
+    let (video_packets, audio_packets) = match &prepared.source_index {
         PreparedSourceIndex::Matroska => {
-            owned_video_packets = parse_packet_window(
-                bytes,
-                &prepared.video_track_id,
-                video_start_ms,
-                video_end_ms,
-            )?;
+            let windows = owned_windows
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("missing packet windows"))?;
             video_chunk.packet_range = PacketRange {
                 start: 0,
-                end: u32::try_from(owned_video_packets.len())?,
+                end: u32::try_from(windows[0].packets.len())?,
             };
-            owned_video_packets.as_slice()
+            (windows[0].packets.as_slice(), windows[1].packets.as_slice())
         }
-        PreparedSourceIndex::Mp4 { video_packets, .. } => video_packets.as_slice(),
+        PreparedSourceIndex::Mp4 {
+            video_packets,
+            audio_packets,
+        } => (video_packets.as_slice(), audio_packets.as_slice()),
     };
     let (video_manifest, video_payload) =
-        extract_indexed_chunk(bytes, &prepared.video_track_id, video_packets, video_chunk)?;
-    // Decoder-backed audio paths retain bounded preroll for packets spanning the video
-    // boundary. Packet-copy paths instead partition on packet PTS so the same compressed
-    // access unit never appears in two adjacent fMP4 fragments.
-    let audio_scan_start_ms = video_start_ms.saturating_sub(1_000);
-    let owned_audio_packets;
-    let audio_packets = match &prepared.source_index {
-        PreparedSourceIndex::Matroska => {
-            owned_audio_packets = parse_packet_window(
-                bytes,
-                &prepared.audio_track_id,
-                audio_scan_start_ms,
-                video_end_ms,
-            )?;
-            owned_audio_packets.as_slice()
-        }
-        PreparedSourceIndex::Mp4 { audio_packets, .. } => audio_packets.as_slice(),
-    };
+        extract_indexed_chunk(source, &prepared.video_track_id, video_packets, video_chunk)?;
     let (audio_manifest, audio_payload) = extract_indexed_time_range(
-        bytes,
+        source,
         &prepared.audio_track_id,
         audio_packets,
         video_start_ms,
@@ -857,6 +1126,8 @@ fn transcode_prepared_segment(
         &prepared.audio_track.codec,
     )?;
 
+    drop(read_timer);
+    let video_timer = StageTimer::new(&metrics.video);
     let video_segment = native_video_segment(
         &prepared.video_track,
         prepared.video_codec,
@@ -867,13 +1138,29 @@ fn transcode_prepared_segment(
         codec_pipeline,
     )?;
 
-    let audio_segment = native_audio_segment(
-        &prepared.audio_track,
-        audio_manifest,
-        audio_payload,
-        options.audio_bitrate,
-    )?;
+    drop(video_timer);
+    let audio_timer = StageTimer::new(&metrics.audio);
+    let streaming_audio = audio_pipeline.is_some();
+    let audio_segment = if let Some(pipeline) = audio_pipeline {
+        pipeline.render(
+            audio_manifest,
+            &audio_payload,
+            audio_packets,
+            options.audio_bitrate,
+            index as usize + 1 == prepared.video_chunks.chunks.len(),
+            source,
+        )?
+    } else {
+        native_audio_segment(
+            &prepared.audio_track,
+            audio_manifest,
+            audio_payload,
+            options.audio_bitrate,
+        )?
+    };
 
+    drop(audio_timer);
+    let _mux_timer = StageTimer::new(&metrics.mux);
     let tracks = vec![
         Fmp4Track {
             id: VIDEO_TRACK_ID,
@@ -894,10 +1181,26 @@ fn transcode_prepared_segment(
             sample_entry: audio_segment.sample_entry,
         },
     ];
-    let init = init_segment(&tracks)?;
-    let media = media_fragment(
+    let init = if streaming_audio {
+        let duration = prepared
+            .video_chunks
+            .chunks
+            .last()
+            .map(|chunk| {
+                chunk
+                    .start
+                    .as_millis()
+                    .saturating_add(chunk.duration.as_millis())
+            })
+            .unwrap_or(0);
+        crate::fmp4::init_segment_with_edits(&tracks, &[(AUDIO_TRACK_ID, 1024, duration)])?
+    } else {
+        init_segment(&tracks)?
+    };
+    let media = crate::fmp4::OwnedMediaFragment::new(
         index.saturating_add(1),
-        &[video_segment.fragment, audio_segment.fragment],
+        vec![video_segment.fragment, audio_segment.fragment],
+        source.policy().output_bytes,
     )?;
 
     Ok(TranscodedSegment {
@@ -916,27 +1219,13 @@ fn transcode_prepared_segment(
     })
 }
 
-fn parse_packet_window(
-    bytes: &[u8],
-    track_id: &str,
-    start_ms: u64,
-    end_ms: u64,
-) -> Result<Vec<PacketRef>> {
-    parse_packet_tracks_in_time_window(bytes, &[track_id], start_ms, end_ms)
-        .and_then(|mut tracks| tracks.pop())
-        .map(|track| track.packets)
-        .ok_or_else(|| {
-            anyhow::anyhow!("Matroska track {track_id} has no packets in {start_ms}..{end_ms} ms")
-        })
-}
-
 fn extract_indexed_chunk(
-    bytes: &[u8],
+    bytes: &impl PacketSource,
     track_id: &str,
     packets: &[PacketRef],
     chunk: NativeChunk,
 ) -> Result<(ExtractedChunk, Vec<u8>)> {
-    let payload = extract_packet_payload(bytes, packets, chunk.packet_range)?;
+    let payload = bytes.packet_payload(packets, chunk.packet_range)?;
     let samples = packet_samples_for_range(packets, chunk.packet_range)?;
     Ok((
         ExtractedChunk {
@@ -954,7 +1243,7 @@ fn extract_indexed_chunk(
 }
 
 fn extract_indexed_time_range(
-    bytes: &[u8],
+    bytes: &impl PacketSource,
     track_id: &str,
     packets: &[PacketRef],
     start_ms: u64,
@@ -976,10 +1265,16 @@ fn extract_indexed_time_range(
         "aac" | "ac3" | "eac3" | "flac" | "alac" => {
             packets.partition_point(|packet| packet.pts.as_millis() < start_ms)
         }
-        "truehd" => (0..=decode_start)
-            .rev()
-            .find(|packet_index| packet_contains_truehd_major_sync(bytes, &packets[*packet_index]))
-            .unwrap_or(0),
+        "truehd" => {
+            let mut start = 0;
+            for packet_index in (0..=decode_start).rev() {
+                if packet_contains_truehd_major_sync(bytes, &packets[packet_index])? {
+                    start = packet_index;
+                    break;
+                }
+            }
+            start
+        }
         // A fresh Opus decoder needs the bounded Matroska seek preroll so its
         // prediction and overlap state are warm before samples are cropped.
         "opus" => 0,
@@ -1003,19 +1298,14 @@ fn extract_indexed_time_range(
     extract_indexed_chunk(bytes, track_id, packets, chunk)
 }
 
-fn packet_contains_truehd_major_sync(bytes: &[u8], packet: &PacketRef) -> bool {
-    let Ok(start) = usize::try_from(packet.source_offset) else {
-        return false;
-    };
-    let Some(end) = start.checked_add(packet.size as usize) else {
-        return false;
-    };
-    let Some(payload) = bytes.get(start..end) else {
-        return false;
-    };
-    payload
+fn packet_contains_truehd_major_sync(
+    bytes: &impl PacketSource,
+    packet: &PacketRef,
+) -> Result<bool> {
+    let payload = bytes.packet_window(packet.source_offset, packet.size as usize)?;
+    Ok(payload
         .windows(4)
-        .any(|window| matches!(window, [0xF8, 0x72, 0x6F, 0xBA] | [0xF8, 0x72, 0x6F, 0xBB]))
+        .any(|window| matches!(window, [0xF8, 0x72, 0x6F, 0xBA] | [0xF8, 0x72, 0x6F, 0xBB])))
 }
 
 fn select_matroska_track<'a>(
@@ -1255,57 +1545,131 @@ fn transcode_h264_video_segment(
 ) -> Result<VideoSegment> {
     let (_, encode_format) = video_formats(track);
     let decode_format = codec_pipeline.decoder_output_format;
-    let sample_batches = manifest
-        .samples
-        .chunks(VIDEO_DECODE_BATCH_PACKETS)
-        .collect::<Vec<_>>();
+    let batch_packets = video_batch_packets_with_budget(
+        decode_format,
+        encode_format,
+        codec_pipeline.policy.decoded_batch_bytes,
+    )?;
+    let sample_batches = manifest.samples.chunks(batch_packets);
+    let batch_count = sample_batches.len();
     let mut encoded_frames = Vec::new();
     let mut output_decoder_config = None;
     let mut output_time_scale = None;
     let mut decoded_frame_count = 0;
+    let mut encoded_bytes = 0usize;
+    let hevc_length_size = if codec == VideoCodec::Hevc {
+        Some(crate::codec::hevc::parse_hevc_decoder_config(&decoder_config)?.nalu_length_size)
+    } else {
+        None
+    };
+    let mut skip_initial_rasl = codec_pipeline.last_completed_index.is_none();
+    let mut seen_irap = false;
+    // Retain encoder state, but each independently requested HLS fragment
+    // still needs a sync access unit at its first encoded presentation frame.
+    let mut submitted_frame = false;
 
-    for (batch_index, samples) in sample_batches.iter().enumerate() {
-        let decode_input = build_video_decode_input(
+    for (batch_index, samples) in sample_batches.enumerate() {
+        codec_pipeline.control.check()?;
+        let mut decode_input = build_video_decode_input(
             codec,
             chunk_time_scale(manifest),
             Some(&decoder_config),
             samples,
             payload,
-            batch_index + 1 == sample_batches.len(),
+            batch_index + 1 == batch_count,
         )?;
-        let decoded = codec_pipeline.decoder.decode(&decode_input)?;
-        decoded_frame_count += decoded.frames.len();
-        if decoded.frames.is_empty() {
-            continue;
+        if let Some(length_size) = hevc_length_size {
+            // H.265 random access: leading RASL pictures at the initial CRA
+            // may reference pictures before the seek and must not be decoded.
+            // Preserve RASL pictures at subsequent IRAPs during continuous play.
+            let mut retained = Vec::with_capacity(decode_input.packets.len());
+            for packet in decode_input.packets {
+                let kind = crate::codec::hevc::sample_vcl_type(packet.bytes, length_size)?;
+                if kind.is_some_and(|kind| (16..=23).contains(&kind)) {
+                    if seen_irap {
+                        skip_initial_rasl = false;
+                    }
+                    seen_irap = true;
+                }
+                if !(skip_initial_rasl && matches!(kind, Some(8 | 9))) {
+                    retained.push(packet);
+                }
+            }
+            decode_input.packets = retained;
         }
-        let frame_buffers = decoded
-            .frames
-            .iter()
-            .map(|frame| {
-                scale_bgra(
-                    &frame.pixels,
-                    decode_format.width,
-                    decode_format.height,
-                    encode_format.width,
-                    encode_format.height,
-                )
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let raw_frames = decoded
-            .frames
-            .iter()
-            .zip(frame_buffers.iter())
-            .map(|(frame, pixels)| RawVideoFrameRef {
-                pts: frame.pts,
-                // The H.264 encoder disables frame reordering, so output decode
-                // order is presentation order even when the source carried B-frames.
-                dts: frame.pts,
-                duration: frame.duration,
-                bytes: pixels.as_ref(),
-                keyframe: frame.keyframe,
-            })
-            .collect::<Vec<_>>();
-        let encoded = codec_pipeline.encoder.encode(&raw_frames)?;
+        #[cfg(target_os = "macos")]
+        let surface_output = if let (
+            BgraDecoderSession::VideoToolbox(decoder),
+            H264EncoderSession::VideoToolbox(encoder),
+        ) = (&mut codec_pipeline.decoder, &mut codec_pipeline.encoder)
+        {
+            let mut surfaces = decoder.decode_surfaces(&decode_input)?;
+            decoded_frame_count += surfaces.len();
+            if surfaces.is_empty() {
+                continue;
+            }
+            if !submitted_frame {
+                surfaces[0].keyframe = true;
+            }
+            Some(encoder.encode_surfaces(&surfaces)?)
+        } else {
+            None
+        };
+        #[cfg(not(target_os = "macos"))]
+        let surface_output: Option<super::EncodedVideoOutput> = None;
+        let encoded = if let Some(encoded) = surface_output {
+            encoded
+        } else {
+            let decoded = codec_pipeline.decoder.decode(&decode_input)?;
+            decoded_frame_count += decoded.frames.len();
+            if decoded.frames.is_empty() {
+                continue;
+            }
+            let needs_scale = decode_format.width != encode_format.width
+                || decode_format.height != encode_format.height;
+            if needs_scale {
+                codec_pipeline
+                    .scaled_buffers
+                    .resize_with(decoded.frames.len(), Vec::new);
+                for (frame, buffer) in decoded
+                    .frames
+                    .iter()
+                    .zip(&mut codec_pipeline.scaled_buffers)
+                {
+                    codec_pipeline.scaler.scale_into(&frame.pixels, buffer)?;
+                }
+            }
+            let raw_frames = decoded
+                .frames
+                .iter()
+                .enumerate()
+                .map(|(index, frame)| RawVideoFrameRef {
+                    pts: frame.pts,
+                    // The encoder disables reordering, so presentation order is decode order.
+                    dts: frame.pts,
+                    duration: frame.duration,
+                    bytes: if needs_scale {
+                        &codec_pipeline.scaled_buffers[index]
+                    } else {
+                        &frame.pixels
+                    },
+                    keyframe: frame.keyframe || (!submitted_frame && index == 0),
+                })
+                .collect::<Vec<_>>();
+            codec_pipeline.encoder.encode(&raw_frames)?
+        };
+        submitted_frame = true;
+        for frame in &encoded.frames {
+            encoded_bytes = encoded_bytes
+                .checked_add(frame.payload.len())
+                .ok_or_else(|| anyhow::anyhow!("encoded video byte count overflow"))?;
+        }
+        // Leave room for assembly while retained access-unit payloads are alive.
+        codec_pipeline.policy.check(
+            "encoded video",
+            encoded_bytes,
+            codec_pipeline.policy.output_bytes / 2,
+        )?;
         output_time_scale = Some(encoded.stream.time_scale);
         if output_decoder_config.is_none() {
             output_decoder_config = encoded.stream.decoder_config;
@@ -1339,24 +1703,45 @@ fn transcode_h264_video_segment(
     })
 }
 
-fn native_decoder_output_format(
-    _decode_format: RawVideoFormat,
-    encode_format: RawVideoFormat,
-) -> RawVideoFormat {
-    // VideoToolbox honors the requested destination pixel-buffer dimensions and
-    // performs this scale while decoding. Avoid materializing and then scaling a
-    // 4K BGRA frame on the CPU before every 1080p encode; that work can starve a
-    // tvOS Simulator running on the same Mac. Portable decoders still emit the
-    // source dimensions and use Chroma's scaler below.
-    #[cfg(target_os = "macos")]
-    {
-        encode_format
+#[cfg(test)]
+fn video_batch_packets(source: RawVideoFormat, output: RawVideoFormat) -> Result<usize> {
+    video_batch_packets_with_budget(source, output, VIDEO_DECODE_BATCH_BYTES)
+}
+
+fn video_batch_packets_with_budget(
+    source: RawVideoFormat,
+    output: RawVideoFormat,
+    budget: usize,
+) -> Result<usize> {
+    let pixels = u64::from(source.width)
+        .checked_mul(u64::from(source.height))
+        .and_then(|source_pixels| {
+            if (source.width, source.height) == (output.width, output.height) {
+                Some(source_pixels)
+            } else {
+                source_pixels.checked_add(u64::from(output.width) * u64::from(output.height))
+            }
+        })
+        .ok_or_else(|| anyhow::anyhow!("video frame budget overflow"))?;
+    let bytes = usize::try_from(
+        pixels
+            .checked_mul(4)
+            .ok_or_else(|| anyhow::anyhow!("video frame budget overflow"))?,
+    )?;
+    if bytes == 0 || bytes > budget {
+        bail!("video frame exceeds decoded batch memory budget");
     }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = encode_format;
-        _decode_format
+    Ok((budget / bytes).clamp(1, VIDEO_DECODE_BATCH_PACKETS))
+}
+
+fn validate_segment_window(start: u32, count: u32, available: usize) -> Result<()> {
+    let end = usize::try_from(start)?
+        .checked_add(usize::try_from(count)?)
+        .ok_or_else(|| anyhow::anyhow!("segment window overflow"))?;
+    if end > available {
+        bail!("segment window is out of range");
     }
+    Ok(())
 }
 
 fn video_formats(track: &PreparedVideoTrack) -> (RawVideoFormat, RawVideoFormat) {
@@ -1721,7 +2106,7 @@ mod tests {
 
     #[test]
     fn packet_copy_audio_ranges_do_not_repeat_boundary_spanning_packets() {
-        let bytes = [0_u8; 4];
+        let bytes = vec![0_u8; 4];
         let packets = [0_u64, 32, 64, 96]
             .into_iter()
             .enumerate()
@@ -1748,7 +2133,7 @@ mod tests {
 
     #[test]
     fn decoder_backed_audio_keeps_boundary_preroll_for_cropping() {
-        let bytes = [0_u8; 4];
+        let bytes = vec![0_u8; 4];
         let packets = [0_u64, 32, 64, 96]
             .into_iter()
             .enumerate()
@@ -2000,9 +2385,8 @@ mod tests {
         assert_eq!(scaled.as_ref(), pixels);
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
-    fn videotoolbox_decoder_emits_the_constrained_encode_dimensions() {
+    fn software_fallback_keeps_source_dimensions_and_bounds_batches() {
         let source = RawVideoFormat {
             width: 3_840,
             height: 2_160,
@@ -2012,10 +2396,15 @@ mod tests {
         };
         let constrained = constrained_h264_format(source);
 
-        assert_eq!(
-            native_decoder_output_format(source, constrained),
-            constrained
-        );
+        // Empty AV1 config cannot open VideoToolbox; the in-band software
+        // decoder must retain source dimensions even on macOS.
+        let (_, actual) =
+            BgraDecoderSession::new_scaled(VideoCodec::Av1, source, constrained, &[]).unwrap();
+        assert_eq!(actual, source);
+        assert_eq!(video_batch_packets(source, constrained).unwrap(), 1);
+        assert!(validate_segment_window(0, u32::MAX, 20).is_err());
+        assert!(validate_segment_window(19, 2, 20).is_err());
+        assert!(validate_segment_window(19, 1, 20).is_ok());
     }
 
     #[test]
@@ -2068,6 +2457,7 @@ mod tests {
             width: None,
             height: None,
             pixel_format: None,
+            transfer_characteristics: None,
             channels: Some(6),
             sample_rate: Some(48_000),
             atmos: false,
@@ -2076,4 +2466,47 @@ mod tests {
             codec_private: None,
         }
     }
+}
+#[test]
+fn failed_pipeline_is_recreated_before_retrying_next_segment() {
+    let prepared = PreparedTranscode {
+        video_track_id: "v0".into(),
+        audio_track_id: "a0".into(),
+        video_track: PreparedVideoTrack {
+            codec: "av1".into(),
+            width: 32,
+            height: 32,
+            frame_rate: Some(24.0),
+            hdr: false,
+        },
+        audio_track: PreparedAudioTrack {
+            codec: "aac".into(),
+            channels: 2,
+            sample_rate: 48_000,
+            codec_private: None,
+        },
+        video_codec: VideoCodec::Av1,
+        decoder_config: vec![],
+        video_chunks: ChunkPlan {
+            track_ids: vec!["v0".into()],
+            chunks: vec![],
+        },
+        source_index: PreparedSourceIndex::Mp4 {
+            video_packets: vec![],
+            audio_packets: vec![],
+        },
+    };
+    let options = NativeFmp4TranscodeOptions::default();
+    let mut pipeline = NativeVideoCodecPipeline::new(&prepared, &options).unwrap();
+    pipeline.mark_completed(0);
+    pipeline.poisoned = true;
+    pipeline.prepare_for(1, &prepared, &options).unwrap();
+    assert_eq!(pipeline.stats().resets, 1);
+    assert_eq!(pipeline.stats().decoder_sessions_created, 2);
+    assert_eq!(pipeline.stats().reuses, 0);
+    assert!(!pipeline.poisoned);
+    // A failure before any segment completes must also recreate the pair.
+    pipeline.poisoned = true;
+    pipeline.prepare_for(1, &prepared, &options).unwrap();
+    assert_eq!(pipeline.stats().resets, 2);
 }

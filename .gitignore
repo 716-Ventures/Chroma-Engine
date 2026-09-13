@@ -1,5 +1,8 @@
 /target/
 /fuzz/target/
+/fuzz/corpus/
+/fuzz/artifacts/
+/scripts/__pycache__/
 .codegraph/
 /.idea/
 /.vscode/

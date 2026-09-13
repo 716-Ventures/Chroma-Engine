@@ -5,6 +5,7 @@ use crate::transcode::{EncodedAudioFrame, EncodedVideoFrame};
 
 mod validation;
 
+#[cfg(any(test, feature = "fuzzing"))]
 pub(crate) use validation::validate_media_fragment;
 
 const MOVIE_TIMESCALE: u32 = 1_000;
@@ -86,6 +87,14 @@ pub struct Fmp4FragmentTrack {
 }
 
 pub fn init_segment(tracks: &[Fmp4Track]) -> Result<Vec<u8>> {
+    init_segment_with_edits(tracks, &[])
+}
+
+/// Track ID, media-time priming in track samples, and valid movie duration in ms.
+pub(crate) fn init_segment_with_edits(
+    tracks: &[Fmp4Track],
+    edits: &[(u32, u32, u64)],
+) -> Result<Vec<u8>> {
     if tracks.is_empty() {
         bail!("fMP4 init segment requires at least one track");
     }
@@ -100,14 +109,21 @@ pub fn init_segment(tracks: &[Fmp4Track]) -> Result<Vec<u8>> {
     write_box(&mut out, *b"moov", |out| {
         write_mvhd(out);
         for track in tracks {
-            write_trak(out, track);
+            write_trak(
+                out,
+                track,
+                edits
+                    .iter()
+                    .find(|edit| edit.0 == track.id)
+                    .map(|edit| (edit.1, edit.2)),
+            );
         }
         write_mvex(out, tracks);
     });
     Ok(out)
 }
 
-pub fn media_fragment(sequence_number: u32, tracks: &[Fmp4FragmentTrack]) -> Result<Vec<u8>> {
+fn fragment_header(sequence_number: u32, tracks: &[Fmp4FragmentTrack]) -> Result<Vec<u8>> {
     if tracks.is_empty() {
         bail!("fMP4 media fragment requires at least one track");
     }
@@ -138,19 +154,87 @@ pub fn media_fragment(sequence_number: u32, tracks: &[Fmp4FragmentTrack]) -> Res
     let mut track_offsets = Vec::with_capacity(tracks.len());
     let mut cursor = mdat_payload_start;
     for track in tracks {
-        track_offsets.push(i32::try_from(cursor).unwrap_or(i32::MAX));
-        cursor = cursor.saturating_add(track.payload.len());
+        track_offsets.push(i32::try_from(cursor)?);
+        cursor = cursor
+            .checked_add(track.payload.len())
+            .ok_or_else(|| anyhow::anyhow!("fragment size overflow"))?;
     }
-    write_box(&mut out, *b"mdat", |out| {
-        for track in tracks {
-            out.extend_from_slice(&track.payload);
-        }
-    });
+    let payload_len = cursor
+        .checked_sub(mdat_payload_start)
+        .ok_or_else(|| anyhow::anyhow!("invalid fragment layout"))?;
+    be_u32(
+        &mut out,
+        u32::try_from(
+            payload_len
+                .checked_add(8)
+                .ok_or_else(|| anyhow::anyhow!("mdat overflow"))?,
+        )?,
+    );
+    out.extend_from_slice(b"mdat");
     for (patch, data_offset) in data_offset_patches.into_iter().zip(track_offsets) {
         out[patch..patch + 4].copy_from_slice(&data_offset.to_be_bytes());
     }
-    validate_media_fragment(&out)?;
+    validation::validate_fragment_header(&out, payload_len)?;
     Ok(out)
+}
+
+#[derive(Debug)]
+pub(crate) struct OwnedMediaFragment {
+    header: Vec<u8>,
+    tracks: Vec<Fmp4FragmentTrack>,
+    len: usize,
+}
+impl OwnedMediaFragment {
+    pub(crate) fn new(sequence: u32, tracks: Vec<Fmp4FragmentTrack>, limit: usize) -> Result<Self> {
+        let payload = tracks.iter().try_fold(0usize, |sum, track| {
+            sum.checked_add(track.payload.len())
+                .ok_or_else(|| anyhow::anyhow!("fragment overflow"))
+        })?;
+        let overhead = tracks.iter().try_fold(256usize, |sum, track| {
+            sum.checked_add(track.samples.len().saturating_mul(16).saturating_add(128))
+                .ok_or_else(|| anyhow::anyhow!("fragment metadata overflow"))
+        })?;
+        if payload.saturating_add(overhead) > limit {
+            return Err(crate::ResourceError::Exceeded {
+                resource: "output fragment",
+                requested: payload.saturating_add(overhead) as u64,
+                limit: limit as u64,
+            }
+            .into());
+        }
+        let header = fragment_header(sequence, &tracks)?;
+        let len = header
+            .len()
+            .checked_add(payload)
+            .ok_or_else(|| anyhow::anyhow!("fragment overflow"))?;
+        Ok(Self {
+            header,
+            tracks,
+            len,
+        })
+    }
+    pub(crate) fn len(&self) -> usize {
+        self.len
+    }
+    pub(crate) fn publish(&self, output: &std::path::Path) -> std::io::Result<()> {
+        let mut parts = Vec::with_capacity(self.tracks.len() + 1);
+        parts.push(self.header.as_slice());
+        parts.extend(self.tracks.iter().map(|track| track.payload.as_slice()));
+        crate::output::publish_parts(output, &parts)
+    }
+}
+
+pub fn media_fragment(sequence_number: u32, tracks: &[Fmp4FragmentTrack]) -> Result<Vec<u8>> {
+    let mut output = fragment_header(sequence_number, tracks)?;
+    let payload_len = tracks.iter().try_fold(0usize, |sum, track| {
+        sum.checked_add(track.payload.len())
+            .ok_or_else(|| anyhow::anyhow!("fragment overflow"))
+    })?;
+    output.try_reserve_exact(payload_len)?;
+    for track in tracks {
+        output.extend_from_slice(&track.payload);
+    }
+    Ok(output)
 }
 
 pub fn samples_from_packets_with_timescale(
@@ -415,9 +499,20 @@ fn write_mvhd(out: &mut Vec<u8>) {
     });
 }
 
-fn write_trak(out: &mut Vec<u8>, track: &Fmp4Track) {
+fn write_trak(out: &mut Vec<u8>, track: &Fmp4Track, edit: Option<(u32, u64)>) {
     write_box(out, *b"trak", |out| {
         write_tkhd(out, track);
+        if let Some((priming, duration_ms)) = edit {
+            write_box(out, *b"edts", |out| {
+                write_full_box(out, *b"elst", 1, 0, |out| {
+                    be_u32(out, 1);
+                    be_u64(out, duration_ms);
+                    be_u64(out, u64::from(priming));
+                    be_u16(out, 1);
+                    be_u16(out, 0);
+                });
+            });
+        }
         write_box(out, *b"mdia", |out| {
             write_mdhd(out, track.timescale);
             write_hdlr(out, track.kind);
@@ -864,6 +959,69 @@ mod tests {
     use crate::packet::{PacketRef, TimeDelta, TimePoint, TimeScale};
 
     use super::*;
+
+    #[test]
+    fn streamed_fragment_matches_buffered_and_never_replaces_conflict() {
+        let tracks = vec![Fmp4FragmentTrack {
+            track_id: 1,
+            base_decode_time: 0,
+            samples: vec![Fmp4Sample {
+                duration: 1000,
+                size: 3,
+                flags: 0x0200_0000,
+                composition_time_offset: 0,
+            }],
+            payload: b"abc".to_vec(),
+        }];
+        let expected = media_fragment(1, &tracks).unwrap();
+        let fragment = OwnedMediaFragment::new(1, tracks.clone(), 4096).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("segment.m4s");
+        fragment.publish(&path).unwrap();
+        fragment.publish(&path).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), expected);
+        assert_eq!(fragment.len(), expected.len());
+        assert!(OwnedMediaFragment::new(1, tracks, 2).is_err());
+        std::fs::write(&path, b"existing").unwrap();
+        assert_eq!(
+            fragment.publish(&path).unwrap_err().kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"existing");
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn aac_edit_list_separates_priming_from_coded_sample_duration() {
+        let track = Fmp4Track {
+            id: 2,
+            kind: Fmp4TrackKind::Audio,
+            timescale: 48_000,
+            default_sample_duration: 1024,
+            default_sample_size: 0,
+            default_sample_flags: 0x0200_0000,
+            sample_entry: Fmp4SampleEntry::Aac {
+                decoder_config: vec![0x11, 0x90],
+                channel_count: 2,
+                sample_rate: 48_000,
+            },
+        };
+        let init = init_segment_with_edits(&[track], &[(2, 1024, 12_345)]).unwrap();
+        let position = init.windows(4).position(|bytes| bytes == b"elst").unwrap() + 4;
+        assert_eq!(init[position], 1);
+        assert_eq!(
+            u32::from_be_bytes(init[position + 4..position + 8].try_into().unwrap()),
+            1
+        );
+        assert_eq!(
+            u64::from_be_bytes(init[position + 8..position + 16].try_into().unwrap()),
+            12_345
+        );
+        assert_eq!(
+            u64::from_be_bytes(init[position + 16..position + 24].try_into().unwrap()),
+            1024
+        );
+    }
 
     #[test]
     fn init_segment_contains_ftyp_moov_and_mvex() {

@@ -122,6 +122,7 @@ pub struct CpuH264EncoderSession {
     encoded_frames: u64,
     decoder_config: Option<Vec<u8>>,
     encoder: openh264::encoder::Encoder,
+    yuv: Option<openh264::formats::YUVBuffer>,
 }
 
 impl std::fmt::Debug for CpuH264EncoderSession {
@@ -139,6 +140,14 @@ impl std::fmt::Debug for CpuH264EncoderSession {
 impl CpuH264EncoderSession {
     /// Creates one portable H.264 software encoder that can serve multiple batches.
     pub fn new(format: RawVideoFormat, bitrate: u32) -> Result<Self, VideoEncodeError> {
+        Self::new_with_threads(format, bitrate, 2)
+    }
+
+    fn new_with_threads(
+        format: RawVideoFormat,
+        bitrate: u32,
+        threads: u32,
+    ) -> Result<Self, VideoEncodeError> {
         validate_raw_video_format(format)?;
         validate_openh264_format(format)?;
         if bitrate == 0 {
@@ -148,6 +157,7 @@ impl CpuH264EncoderSession {
         }
         let frame_rate = format.frame_rate_num as f32 / format.frame_rate_den as f32;
         let config = openh264::encoder::EncoderConfig::new()
+            .num_threads(threads.clamp(1, 64) as u16)
             .bitrate(openh264::encoder::BitRate::from_bps(bitrate))
             .max_frame_rate(openh264::encoder::FrameRate::from_hz(frame_rate))
             .rate_control_mode(openh264::encoder::RateControlMode::Bitrate)
@@ -168,6 +178,7 @@ impl CpuH264EncoderSession {
             encoded_frames: 0,
             decoder_config: None,
             encoder,
+            yuv: None,
         })
     }
 
@@ -186,9 +197,15 @@ impl CpuH264EncoderSession {
                 frame.bytes,
                 (self.format.width as usize, self.format.height as usize),
             );
-            let yuv = openh264::formats::YUVBuffer::from_bgra8_source(bgra);
+            let yuv = self.yuv.get_or_insert_with(|| {
+                openh264::formats::YUVBuffer::new(
+                    self.format.width as usize,
+                    self.format.height as usize,
+                )
+            });
+            yuv.read_bgra8(bgra);
             let timestamp = openh264_timestamp(frame.pts);
-            let bitstream = self.encoder.encode_at(&yuv, timestamp).map_err(|error| {
+            let bitstream = self.encoder.encode_at(yuv, timestamp).map_err(|error| {
                 VideoEncodeError::BackendFailed {
                     reason: format!("OpenH264 frame encode failed: {error}"),
                 }
@@ -255,6 +272,14 @@ pub enum H264EncoderSession {
 impl H264EncoderSession {
     /// Creates the preferred executable H.264 encoder for the current host.
     pub fn new(format: RawVideoFormat, bitrate: u32) -> Result<Self, VideoEncodeError> {
+        Self::new_with_policy(format, bitrate, &crate::ResourcePolicy::default())
+    }
+
+    pub(crate) fn new_with_policy(
+        format: RawVideoFormat,
+        bitrate: u32,
+        policy: &crate::ResourcePolicy,
+    ) -> Result<Self, VideoEncodeError> {
         #[cfg(target_os = "macos")]
         if let Ok(session) = VideoToolboxH264EncoderSession::new(format, bitrate) {
             return Ok(Self::VideoToolbox(session));
@@ -275,7 +300,19 @@ impl H264EncoderSession {
         if let Ok(session) = VaapiH264EncoderSession::new(format, bitrate) {
             return Ok(Self::Vaapi(Box::new(session)));
         }
-        CpuH264EncoderSession::new(format, bitrate).map(|session| Self::Cpu(Box::new(session)))
+        Self::new_software(format, bitrate, policy)
+    }
+
+    pub(crate) fn new_software(
+        format: RawVideoFormat,
+        bitrate: u32,
+        policy: &crate::ResourcePolicy,
+    ) -> Result<Self, VideoEncodeError> {
+        if !policy.allow_software_video {
+            return Err(VideoEncodeError::BackendFailed { reason: "hardware encoder unavailable and resource policy forbids software video fallback".into() });
+        }
+        CpuH264EncoderSession::new_with_threads(format, bitrate, policy.codec_threads)
+            .map(|session| Self::Cpu(Box::new(session)))
     }
 
     /// Encodes one ordered frame batch using the selected retained backend.
@@ -846,7 +883,43 @@ fn platform_new_h264_encoder_session(
 #[cfg(target_os = "macos")]
 fn platform_encode_h264_with_retained_session(
     retained: &VideoToolboxH264EncoderSession,
+    frames: &[RawVideoFrameRef<'_>],
+) -> Result<EncodedVideoOutput, VideoEncodeError> {
+    platform_encode_h264_frames(retained, frames, None)
+}
+
+#[cfg(target_os = "macos")]
+impl VideoToolboxH264EncoderSession {
+    pub(crate) fn encode_surfaces(
+        &mut self,
+        surfaces: &[super::surface::AppleVideoFrame],
+    ) -> Result<EncodedVideoOutput, VideoEncodeError> {
+        if surfaces.is_empty() || surfaces.iter().any(|frame| frame.format != self.format) {
+            return Err(VideoEncodeError::InvalidInput {
+                reason: "native surface format mismatch".into(),
+            });
+        }
+        let frames = surfaces
+            .iter()
+            .map(|frame| RawVideoFrameRef {
+                pts: frame.pts,
+                dts: frame.pts,
+                duration: frame.duration,
+                bytes: &[],
+                keyframe: frame.keyframe,
+            })
+            .collect::<Vec<_>>();
+        let output = platform_encode_h264_frames(self, &frames, Some(surfaces))?;
+        self.encoded_batches = self.encoded_batches.saturating_add(1);
+        Ok(output)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn platform_encode_h264_frames(
+    retained: &VideoToolboxH264EncoderSession,
     input_frames: &[RawVideoFrameRef<'_>],
+    surfaces: Option<&[super::surface::AppleVideoFrame]>,
 ) -> Result<EncodedVideoOutput, VideoEncodeError> {
     use std::sync::{Arc, Mutex};
 
@@ -859,9 +932,20 @@ fn platform_encode_h264_with_retained_session(
     let frames = Arc::new(Mutex::new(Vec::<EncodedVideoFrame>::new()));
     let decoder_config = Arc::new(Mutex::new(None::<Vec<u8>>));
     let callback_error = Arc::new(Mutex::new(None::<VideoEncodeError>));
-    for input in input_frames {
-        let pixel_buffer = bgra_pixel_buffer(format, input.bytes)?;
-        let image_buffer = image_buffer_from_pixel_buffer(&pixel_buffer);
+    for (index, input) in input_frames.iter().enumerate() {
+        let uploaded = if surfaces.is_none() {
+            Some(bgra_pixel_buffer(format, input.bytes)?)
+        } else {
+            None
+        };
+        let pixel_buffer = surfaces
+            .and_then(|frames| frames.get(index))
+            .map(|frame| &*frame.buffer)
+            .or(uploaded.as_deref())
+            .ok_or_else(|| VideoEncodeError::InvalidInput {
+                reason: "missing input surface".into(),
+            })?;
+        let image_buffer = image_buffer_from_pixel_buffer(pixel_buffer);
         let frames_out = Arc::clone(&frames);
         let config_out = Arc::clone(&decoder_config);
         let error_out = Arc::clone(&callback_error);
@@ -1654,8 +1738,9 @@ mod tests {
         };
         let mut session =
             CpuH264EncoderSession::new(format, 500_000).expect("create retained CPU H.264 session");
+        let mut plane_address = None;
 
-        for index in 0..2 {
+        for index in 0..3 {
             let encoded = session
                 .encode(&[RawVideoFrameRef {
                     pts: TimePoint {
@@ -1668,11 +1753,19 @@ mod tests {
                     },
                     duration: TimeDelta { units: 1, scale },
                     bytes: &bgra,
-                    keyframe: index == 0,
+                    keyframe: index != 1,
                 }])
                 .expect("encode CPU H.264 batch");
 
             assert_eq!(encoded.frames.len(), 1);
+            let address = openh264::formats::YUVSource::y(session.yuv.as_ref().unwrap()).as_ptr();
+            if let Some(previous) = plane_address {
+                assert_eq!(previous, address, "encoder reallocated its planar buffer");
+            }
+            plane_address = Some(address);
+            if index != 1 {
+                assert!(encoded.frames[0].keyframe);
+            }
             assert!(!encoded.frames[0].payload.is_empty());
             let config = encoded.stream.decoder_config.as_deref().expect("avcC");
             let parsed = crate::codec::h264::parse_avc_decoder_config(config).expect("parse avcC");
@@ -1688,7 +1781,7 @@ mod tests {
             .expect("parse AVCC sample");
         }
 
-        assert_eq!(session.encoded_batches(), 2);
+        assert_eq!(session.encoded_batches(), 3);
     }
 
     #[test]

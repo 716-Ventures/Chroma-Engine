@@ -1,13 +1,65 @@
 mod ebml;
+mod file;
+pub(crate) use file::MatroskaFileIndex;
 
+pub(crate) fn validate_metadata_budget(
+    bytes: &[u8],
+    limits: super::ParseLimits,
+) -> anyhow::Result<()> {
+    let mut budget = super::ParseBudget::new(limits);
+    let mut pending = vec![(bytes, 0)];
+    while let Some((bytes, depth)) = pending.pop() {
+        for element in ElementIter::new(bytes) {
+            let nested = matches!(
+                element.id,
+                0x1853_8067
+                    | 0x1549_a966
+                    | 0x1654_ae6b
+                    | 0xae
+                    | 0xe0
+                    | 0xe1
+                    | 0x1043_a770
+                    | 0x45b9
+                    | 0xb6
+                    | 0x80
+                    | 0x1c53_bb6b
+                    | 0xbb
+                    | 0xb7
+                    | 0x1941_a469
+                    | 0x61a7
+                    | 0x114d_9b74
+                    | 0x4dbb
+            );
+            let skipped = matches!(element.id, 0x1f43_b675 | 0x465c | 0xec);
+            budget.visit(
+                depth,
+                element.id == 0xae,
+                if nested || skipped {
+                    0
+                } else {
+                    element.payload.len()
+                },
+            )?;
+            if nested {
+                pending.push((element.payload, depth + 1));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+use crate::packet::{
+    ExtractedChunk, PacketExtractError, extract_packet_payload, packet_samples_for_range,
+};
+#[cfg(test)]
 use thiserror::Error;
 
 use crate::codec::pixel_format::{
     pixel_format_from_avc_decoder_config, pixel_format_from_hevc_decoder_config,
 };
 use crate::packet::{
-    ChunkPlan, ExtractedChunk, NativeChunk, PacketExtractError, PacketRange, PacketRef, TimeDelta,
-    TimePoint, TimeRounding, TimeScale, extract_packet_payload, packet_samples_for_range,
+    ChunkPlan, NativeChunk, PacketRange, PacketRef, TimeDelta, TimePoint, TimeRounding, TimeScale,
 };
 
 use ebml::{
@@ -45,6 +97,7 @@ pub struct MatroskaTrack {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub pixel_format: Option<String>,
+    pub transfer_characteristics: Option<u64>,
     pub channels: Option<u32>,
     pub sample_rate: Option<u32>,
     pub atmos: bool,
@@ -62,6 +115,7 @@ pub enum MatroskaTrackKind {
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
+#[cfg(test)]
 pub enum MatroskaChunkExtractError {
     #[error("no matching Matroska track found")]
     NoTrack,
@@ -75,6 +129,7 @@ pub fn looks_like_ebml(head: &[u8]) -> bool {
     head.len() >= 4 && head[0..4] == [0x1a, 0x45, 0xdf, 0xa3]
 }
 
+#[cfg(test)]
 pub fn extract_chunk(
     bytes: &[u8],
     requested_track_id: Option<&str>,
@@ -148,6 +203,7 @@ fn extract_time_range(
     extract_packets_as_chunk(bytes, &selected.id, chunk, &packets)
 }
 
+#[cfg(test)]
 pub fn extract_window(
     bytes: &[u8],
     requested_track_id: Option<&str>,
@@ -227,7 +283,8 @@ pub fn extract_window(
 
             let collect = current_index >= start_chunk && current_index < end_chunk;
             if collect {
-                push_block_packets(&mut packets, &block, timestamp_ms, selected.frame_duration);
+                push_block_packets(&mut packets, &block, timestamp_ms, selected.frame_duration)
+                    .ok_or(MatroskaChunkExtractError::NoChunk)?;
             }
             last_seen_ms = timestamp_ms;
             absolute_packet_index = absolute_packet_index.saturating_add(1);
@@ -272,6 +329,7 @@ pub fn extract_window(
     Ok(out)
 }
 
+#[cfg(test)]
 fn extract_packets_as_chunk(
     bytes: &[u8],
     track_id: &str,
@@ -562,11 +620,13 @@ fn parse_cue_point(payload: &[u8], selected_track_number: u64, timecode_scale: u
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(test)]
 struct CueLocation {
     time_ms: u64,
     cluster_position: usize,
 }
 
+#[cfg(test)]
 fn cue_cluster_position_for_time(
     segment: &[u8],
     selected_track_number: u64,
@@ -584,6 +644,7 @@ fn cue_cluster_position_for_time(
         .map(|cue| cue.cluster_position)
 }
 
+#[cfg(test)]
 fn parse_cue_point_location(
     payload: &[u8],
     selected_track_number: u64,
@@ -612,6 +673,7 @@ fn parse_cue_point_location(
     })
 }
 
+#[cfg(test)]
 fn cue_position_for_track(payload: &[u8], selected_track_number: u64) -> Option<usize> {
     let mut track = None;
     let mut cluster_position = None;
@@ -691,6 +753,15 @@ fn parse_chapters(payload: &[u8], meta: &mut MatroskaBasicMetadata) {
 }
 
 fn parse_chapter_atom(payload: &[u8], chapters: &mut Vec<MatroskaChapter>) {
+    parse_chapter_atom_at_depth(payload, chapters, 0);
+}
+
+fn parse_chapter_atom_at_depth(payload: &[u8], chapters: &mut Vec<MatroskaChapter>, depth: usize) {
+    if depth >= super::ParseLimits::default().max_depth
+        || chapters.len() >= super::ParseLimits::default().max_boxes
+    {
+        return;
+    }
     let mut uid = None;
     let mut start_ms = None;
     let mut end_ms = None;
@@ -727,7 +798,7 @@ fn parse_chapter_atom(payload: &[u8], chapters: &mut Vec<MatroskaChapter>) {
     }
 
     for nested in nested_atoms {
-        parse_chapter_atom(nested, chapters);
+        parse_chapter_atom_at_depth(nested, chapters, depth + 1);
     }
 }
 
@@ -763,6 +834,7 @@ fn parse_track_entry(payload: &[u8], index: u32) -> Option<MatroskaTrack> {
     let mut forced = false;
     let mut width = None;
     let mut height = None;
+    let mut transfer_characteristics = None;
     let mut channels = None;
     let mut sample_rate = None;
     let mut default_duration_ns = None;
@@ -780,9 +852,10 @@ fn parse_track_entry(payload: &[u8], index: u32) -> Option<MatroskaTrack> {
             0x55aa => forced = read_uint(child.payload).unwrap_or(0) != 0,
             0x0023_e383 => default_duration_ns = read_uint(child.payload),
             0xe0 => {
-                let (w, h) = parse_video(child.payload);
+                let (w, h, transfer) = parse_video(child.payload);
                 width = w;
                 height = h;
+                transfer_characteristics = transfer;
             }
             0xe1 => {
                 let (ch, sr) = parse_audio(child.payload);
@@ -810,6 +883,7 @@ fn parse_track_entry(payload: &[u8], index: u32) -> Option<MatroskaTrack> {
         width,
         height,
         pixel_format,
+        transfer_characteristics,
         channels,
         sample_rate,
         atmos: audio_features.atmos,
@@ -845,17 +919,25 @@ fn video_pixel_format_from_codec_private(
     }
 }
 
-fn parse_video(payload: &[u8]) -> (Option<u32>, Option<u32>) {
+fn parse_video(payload: &[u8]) -> (Option<u32>, Option<u32>, Option<u64>) {
     let mut width = None;
     let mut height = None;
+    let mut transfer = None;
     for child in ElementIter::new(payload) {
         match child.id {
             0xb0 => width = read_uint(child.payload).and_then(|v| u32::try_from(v).ok()),
             0xba => height = read_uint(child.payload).and_then(|v| u32::try_from(v).ok()),
+            // Matroska Colour / TransferCharacteristics (ITU-T H.273).
+            // https://www.matroska.org/technical/elements.html
+            0x55b0 => {
+                transfer = ElementIter::new(child.payload)
+                    .find(|element| element.id == 0x55ba)
+                    .and_then(|element| read_uint(element.payload));
+            }
             _ => {}
         }
     }
-    (width, height)
+    (width, height, transfer)
 }
 
 fn parse_audio(payload: &[u8]) -> (Option<u32>, Option<u32>) {
@@ -928,6 +1010,7 @@ pub struct MatroskaPacketTrack {
     pub packets: Vec<PacketRef>,
 }
 
+#[cfg(test)]
 pub fn parse_packet_tracks_in_time_window(
     bytes: &[u8],
     requested_track_ids: &[&str],
@@ -935,6 +1018,75 @@ pub fn parse_packet_tracks_in_time_window(
     end_ms: u64,
 ) -> Option<Vec<MatroskaPacketTrack>> {
     let meta = parse_basic_metadata(bytes);
+    parse_packet_window_at(bytes, &meta, requested_track_ids, start_ms, end_ms, None)
+}
+
+/// Retained, track-independent cluster anchors. Audio can use these even when
+/// the source's Cues contains entries only for the video track.
+#[derive(Debug)]
+#[cfg(test)]
+pub(crate) struct MatroskaWindowIndex {
+    metadata: MatroskaBasicMetadata,
+    clusters: Vec<(u64, usize)>,
+    relative_span_ms: u64,
+}
+
+#[cfg(test)]
+impl MatroskaWindowIndex {
+    pub(crate) fn new(bytes: &[u8]) -> Option<Self> {
+        let segment = find_first_child(bytes, 0x1853_8067)?;
+        let scale = parse_segment_timecode_scale(segment);
+        let mut clusters = Vec::new();
+        for cluster in ElementIter::new(segment).filter(|element| element.id == 0x1f43_b675) {
+            if clusters.len() >= super::ParseLimits::default().max_boxes {
+                return None;
+            }
+            let time = matroska_timecode_to_ms(parse_cluster_timecode(cluster.payload)?, scale);
+            if clusters
+                .last()
+                .is_some_and(|(previous, _)| *previous > time)
+            {
+                return None;
+            }
+            // Element payload offsets are relative to the Segment. Locate the
+            // element header without assuming a fixed EBML size-field width.
+            let offset = cluster.offset;
+            clusters.try_reserve(1).ok()?;
+            clusters.push((time, offset));
+        }
+        Some(Self {
+            metadata: parse_basic_metadata(bytes),
+            clusters,
+            relative_span_ms: matroska_timecode_to_ms(32_768, scale).saturating_add(1),
+        })
+    }
+
+    pub(crate) fn packets(
+        &self,
+        bytes: &[u8],
+        tracks: &[&str],
+        start: u64,
+        end: u64,
+    ) -> Option<Vec<MatroskaPacketTrack>> {
+        let earliest = start.saturating_sub(self.relative_span_ms);
+        let index = self.clusters.partition_point(|(time, _)| *time < earliest);
+        let offset = self.clusters.get(index)?.1;
+        parse_packet_window_at(bytes, &self.metadata, tracks, start, end, Some(offset))
+    }
+}
+
+#[cfg(test)]
+fn parse_packet_window_at(
+    bytes: &[u8],
+    meta: &MatroskaBasicMetadata,
+    requested_track_ids: &[&str],
+    start_ms: u64,
+    end_ms: u64,
+    scan_offset: Option<usize>,
+) -> Option<Vec<MatroskaPacketTrack>> {
+    if requested_track_ids.is_empty() || start_ms >= end_ms {
+        return None;
+    }
     let selected = requested_track_ids
         .iter()
         .map(|track_id| select_chunk_track(&meta.tracks, Some(track_id)))
@@ -943,9 +1095,10 @@ pub fn parse_packet_tracks_in_time_window(
     let segment = segment_element.payload;
     let segment_base_offset = segment_element.payload_offset;
     let timecode_scale = parse_segment_timecode_scale(segment);
-    let scan_offset =
+    let scan_offset = scan_offset.unwrap_or_else(|| {
         cue_cluster_position_for_time(segment, selected[0].number, start_ms, timecode_scale)
-            .unwrap_or(0);
+            .unwrap_or(0)
+    });
     let mut out = selected
         .iter()
         .map(|track| MatroskaPacketTrack {
@@ -959,7 +1112,9 @@ pub fn parse_packet_tracks_in_time_window(
     'clusters: for cluster in ElementIter::new(scan).filter(|element| element.id == 0x1f43_b675) {
         let cluster_timecode = parse_cluster_timecode(cluster.payload).unwrap_or(0);
         let cluster_ms = matroska_timecode_to_ms(cluster_timecode, timecode_scale);
-        if saw_window_packet && cluster_ms >= end_ms {
+        // Block timestamps are signed offsets from the cluster timestamp.
+        let relative_span = matroska_timecode_to_ms(32_768, timecode_scale).saturating_add(1);
+        if cluster_ms.saturating_sub(relative_span) >= end_ms {
             break;
         }
 
@@ -989,10 +1144,10 @@ pub fn parse_packet_tracks_in_time_window(
                 &block,
                 timestamp_ms,
                 selected[track_index].frame_duration,
-            );
+            )?;
         }
 
-        if saw_window_packet && cluster_ms > end_ms {
+        if saw_window_packet && cluster_ms.saturating_sub(relative_span) > end_ms {
             break 'clusters;
         }
     }
@@ -1164,7 +1319,7 @@ fn parse_track_packets(
             {
                 previous.duration = TimeDelta::millis(timestamp_ms.saturating_sub(prev));
             }
-            push_block_packets(&mut packets, &block, timestamp_ms, frame_duration);
+            push_block_packets(&mut packets, &block, timestamp_ms, frame_duration)?;
             last_pts = Some(timestamp_ms);
         }
     }
@@ -1198,7 +1353,15 @@ fn push_block_packets(
     block: &ClusterBlock,
     timestamp_ms: u64,
     frame_duration: Option<TimeDelta>,
-) {
+) -> Option<()> {
+    let count = packets.len().checked_add(block.frames.len())?;
+    let limits = super::ParseLimits::default();
+    if count > limits.max_samples_per_track
+        || count.checked_mul(std::mem::size_of::<PacketRef>())? > limits.max_index_bytes
+    {
+        return None;
+    }
+    packets.try_reserve(block.frames.len()).ok()?;
     let frame_duration = frame_duration.unwrap_or_else(|| TimeDelta::millis(0));
     let base_pts = if frame_duration.scale == TimeScale::MILLIS {
         TimePoint::millis(timestamp_ms)
@@ -1237,6 +1400,7 @@ fn push_block_packets(
             keyframe: block.keyframe,
         });
     }
+    Some(())
 }
 
 fn repair_matroska_packet_timing(
@@ -1286,14 +1450,14 @@ fn infer_nominal_frame_duration(packets: &[PacketRef]) -> Option<TimeDelta> {
             if pair[0].pts.scale == pair[1].pts.scale {
                 let a = pair[0].pts.units;
                 let b = pair[1].pts.units;
-                (b > a).then_some(TimeDelta {
+                (b > a).then(|| TimeDelta {
                     units: b - a,
                     scale: pair[0].pts.scale,
                 })
             } else {
                 let a = pair[0].pts.as_millis();
                 let b = pair[1].pts.as_millis();
-                (b > a).then_some(TimeDelta::millis(b - a))
+                (b > a).then(|| TimeDelta::millis(b - a))
             }
         })
         .filter(|delta| delta.as_millis() <= 250)
@@ -1332,6 +1496,15 @@ fn parse_block(
     payload_base_offset: usize,
     forced_keyframe: Option<bool>,
 ) -> Option<ClusterBlock> {
+    parse_block_prefix(payload, payload.len(), payload_base_offset, forced_keyframe)
+}
+
+fn parse_block_prefix(
+    payload: &[u8],
+    total_len: usize,
+    payload_base_offset: usize,
+    forced_keyframe: Option<bool>,
+) -> Option<ClusterBlock> {
     let (track_number, track_len) = read_vint_size(payload)?;
     if payload.len() < track_len + 3 {
         return None;
@@ -1344,7 +1517,7 @@ fn parse_block(
     );
     let flags = payload[timecode_offset + 2];
     let data_offset = track_len + 3;
-    let frames = parse_block_frames(payload, payload_base_offset, data_offset, flags)?;
+    let frames = parse_block_frames(payload, total_len, payload_base_offset, data_offset, flags)?;
     Some(ClusterBlock {
         track_number: track_number as u64,
         relative_timecode,
@@ -1355,6 +1528,7 @@ fn parse_block(
 
 fn parse_block_frames(
     payload: &[u8],
+    total_len: usize,
     payload_base_offset: usize,
     data_offset: usize,
     flags: u8,
@@ -1362,21 +1536,22 @@ fn parse_block_frames(
     let lacing = (flags >> 1) & 0x03;
     match lacing {
         0 => {
-            let size = payload.len().checked_sub(data_offset)?;
+            let size = total_len.checked_sub(data_offset)?;
             Some(vec![BlockFrame {
-                payload_offset: (payload_base_offset + data_offset) as u64,
+                payload_offset: payload_base_offset.checked_add(data_offset)? as u64,
                 payload_size: u32::try_from(size).ok()?,
             }])
         }
-        1 => parse_xiph_laced_frames(payload, payload_base_offset, data_offset),
-        2 => parse_fixed_laced_frames(payload, payload_base_offset, data_offset),
-        3 => parse_ebml_laced_frames(payload, payload_base_offset, data_offset),
+        1 => parse_xiph_laced_frames(payload, total_len, payload_base_offset, data_offset),
+        2 => parse_fixed_laced_frames(payload, total_len, payload_base_offset, data_offset),
+        3 => parse_ebml_laced_frames(payload, total_len, payload_base_offset, data_offset),
         _ => None,
     }
 }
 
 fn parse_xiph_laced_frames(
     payload: &[u8],
+    total_len: usize,
     payload_base_offset: usize,
     data_offset: usize,
 ) -> Option<Vec<BlockFrame>> {
@@ -1397,7 +1572,7 @@ fn parse_xiph_laced_frames(
         known_total = known_total.checked_add(size)?;
         sizes.push(size);
     }
-    let remaining = payload.len().checked_sub(cursor)?;
+    let remaining = total_len.checked_sub(cursor)?;
     let last = remaining.checked_sub(known_total)?;
     sizes.push(last);
     frames_from_sizes(payload_base_offset, cursor, &sizes)
@@ -1405,6 +1580,7 @@ fn parse_xiph_laced_frames(
 
 fn parse_fixed_laced_frames(
     payload: &[u8],
+    total_len: usize,
     payload_base_offset: usize,
     data_offset: usize,
 ) -> Option<Vec<BlockFrame>> {
@@ -1413,7 +1589,7 @@ fn parse_fixed_laced_frames(
         return None;
     }
     let cursor = data_offset + 1;
-    let remaining = payload.len().checked_sub(cursor)?;
+    let remaining = total_len.checked_sub(cursor)?;
     if remaining % frame_count != 0 {
         return None;
     }
@@ -1423,11 +1599,19 @@ fn parse_fixed_laced_frames(
 
 fn parse_ebml_laced_frames(
     payload: &[u8],
+    total_len: usize,
     payload_base_offset: usize,
     data_offset: usize,
 ) -> Option<Vec<BlockFrame>> {
     let frame_count = usize::from(*payload.get(data_offset)?) + 1;
     let mut cursor = data_offset + 1;
+    if frame_count == 1 {
+        return frames_from_sizes(
+            payload_base_offset,
+            cursor,
+            &[total_len.checked_sub(cursor)?],
+        );
+    }
     let (first_size, first_len) = read_vint_size(payload.get(cursor..)?)?;
     cursor += first_len;
     let mut sizes = Vec::with_capacity(frame_count);
@@ -1445,7 +1629,7 @@ fn parse_ebml_laced_frames(
         known_total = known_total.checked_add(size)?;
         sizes.push(size);
     }
-    let remaining = payload.len().checked_sub(cursor)?;
+    let remaining = total_len.checked_sub(cursor)?;
     let last = remaining.checked_sub(known_total)?;
     sizes.push(last);
     frames_from_sizes(payload_base_offset, cursor, &sizes)
@@ -1459,7 +1643,7 @@ fn frames_from_sizes(
     let mut frames = Vec::with_capacity(sizes.len());
     for size in sizes {
         frames.push(BlockFrame {
-            payload_offset: (payload_base_offset + cursor) as u64,
+            payload_offset: payload_base_offset.checked_add(cursor)? as u64,
             payload_size: u32::try_from(*size).ok()?,
         });
         cursor = cursor.checked_add(*size)?;
@@ -1508,6 +1692,202 @@ mod tests {
                     <= matroska_timecode_to_ms(second, scale)
             );
         }
+    }
+
+    #[test]
+    fn positional_block_prefixes_preserve_all_lacing_offsets() {
+        // Header-only reads must produce the same offsets as complete blocks.
+        for (header, data) in [
+            (vec![0x81, 0, 0, 0x80], vec![7; 12]),
+            (vec![0x81, 0xff, 0xfe, 0x82, 2, 3, 4], vec![7; 12]),
+            (vec![0x81, 0, 0, 0x84, 2], vec![7; 12]),
+            (vec![0x81, 0, 0, 0x86, 2, 0x83, 0xc0], vec![7; 12]),
+            (vec![0x81, 0, 0, 0x86, 0], vec![7; 12]),
+        ] {
+            let full = [header.clone(), data].concat();
+            let expected = parse_block(&full, 1024, None).unwrap();
+            let actual = parse_block_prefix(&header, full.len(), 1024, None).unwrap();
+            assert_eq!(actual.track_number, expected.track_number);
+            assert_eq!(actual.relative_timecode, expected.relative_timecode);
+            assert_eq!(actual.keyframe, expected.keyframe);
+            assert_eq!(actual.frames.len(), expected.frames.len());
+            for (actual, expected) in actual.frames.iter().zip(&expected.frames) {
+                assert_eq!(actual.payload_offset, expected.payload_offset);
+                assert_eq!(actual.payload_size, expected.payload_size);
+            }
+            assert_eq!(
+                actual
+                    .frames
+                    .iter()
+                    .map(|frame| frame.payload_size)
+                    .sum::<u32>(),
+                12
+            );
+        }
+    }
+
+    #[test]
+    fn retained_cluster_index_seeks_audio_without_audio_cues() {
+        let tracks = elem(
+            0x1654_ae6b,
+            &[
+                track_entry(1, 1, "V_MPEG4/ISO/AVC", &[]),
+                track_entry(2, 2, "A_AAC", &[]),
+            ]
+            .concat(),
+        );
+        let mut contents = tracks;
+        for time in [0_u64, 60_000, 120_000] {
+            contents.extend(elem(
+                0x1f43_b675,
+                &[
+                    elem(0xe7, &time.to_be_bytes()),
+                    simple_block(1, 0, true),
+                    simple_block(2, 0, true),
+                ]
+                .concat(),
+            ));
+        }
+        let bytes = elem(0x1853_8067, &contents);
+        let index = MatroskaWindowIndex::new(&bytes).unwrap();
+        let actual = index.packets(&bytes, &["a0"], 120_000, 121_000).unwrap();
+        let expected =
+            parse_packet_tracks_in_time_window(&bytes, &["a0"], 120_000, 121_000).unwrap();
+        assert_eq!(actual, expected);
+        assert!(index.clusters[2].1 > index.clusters[1].1);
+        assert!(index.packets(&bytes, &[], 0, 1000).is_none());
+
+        let file_bytes = [elem(0x1a45_dfa3, &[]), bytes].concat();
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), &file_bytes).unwrap();
+        let source = crate::source::MediaSource::open_packet_copy(file.path()).unwrap();
+        let file_index = MatroskaFileIndex::open(&source).unwrap();
+        for start in [0, 60_000, 120_000] {
+            let before = source.io_stats();
+            let actual = file_index
+                .packets(&source, &["v0", "a0"], start, start + 1000)
+                .unwrap();
+            let expected =
+                parse_packet_tracks_in_time_window(&file_bytes, &["v0", "a0"], start, start + 1000)
+                    .unwrap();
+            assert_eq!(actual, expected);
+            assert_eq!(
+                source.io_stats().2 - before.2,
+                1,
+                "seek rescanned prior clusters"
+            );
+        }
+        let together = file_index
+            .packet_windows(
+                &source,
+                &[("v0", 120_000, 121_000), ("a0", 119_000, 121_000)],
+            )
+            .unwrap();
+        assert_eq!(together.len(), 2);
+    }
+
+    #[test]
+    fn file_video_windows_keep_decode_order_gops_with_leading_pictures() {
+        let tracks = elem(0x1654_ae6b, &track_entry(1, 1, "V_MPEGH/ISO/HEVC", &[]));
+        let cluster = elem(
+            0x1f43_b675,
+            &[
+                elem(0xe7, &[0]),
+                simple_block(1, 0, true),
+                simple_block(1, 900, false),
+                simple_block(1, 1000, true),
+                simple_block(1, 950, false),
+                simple_block(1, 1100, false),
+                simple_block(1, 2000, true),
+                simple_block(1, 1950, false),
+            ]
+            .concat(),
+        );
+        let bytes = [
+            elem(0x1a45_dfa3, &[]),
+            elem(0x1853_8067, &[tracks, cluster].concat()),
+        ]
+        .concat();
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), bytes).unwrap();
+        let source = crate::source::MediaSource::open_packet_copy(file.path()).unwrap();
+        let index = MatroskaFileIndex::open(&source).unwrap();
+        for (start, expected) in [(0, vec![0, 900]), (1000, vec![1000, 950, 1100])] {
+            let window = index
+                .packets(&source, &["v0"], start, start + 1000)
+                .unwrap();
+            assert_eq!(
+                window[0]
+                    .packets
+                    .iter()
+                    .map(|p| p.pts.as_millis())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn reads_hdr_transfer_characteristics_from_video_colour() {
+        let video = elem(
+            0xe0,
+            &[
+                elem(0xb0, &[32]),
+                elem(0xba, &[32]),
+                elem(0x55b0, &elem(0x55ba, &[16])),
+            ]
+            .concat(),
+        );
+        let entry = [
+            elem(0xd7, &[1]),
+            elem(0x83, &[1]),
+            elem(0x86, b"V_MPEGH/ISO/HEVC"),
+            video,
+        ]
+        .concat();
+        assert_eq!(
+            parse_track_entry(&entry, 0)
+                .unwrap()
+                .transfer_characteristics,
+            Some(16)
+        );
+    }
+
+    #[test]
+    fn metadata_budget_rejects_nested_chapters_and_excess_tracks() {
+        let mut chapter = elem(0xb6, &elem(0x91, &[0]));
+        for _ in 0..40 {
+            chapter = elem(0xb6, &chapter);
+        }
+        let bytes = elem(0x1a45_dfa3, &[])
+            .into_iter()
+            .chain(elem(
+                0x1853_8067,
+                &elem(0x1043_a770, &elem(0x45b9, &chapter)),
+            ))
+            .collect::<Vec<_>>();
+        assert!(validate_metadata_budget(&bytes, super::super::ParseLimits::default()).is_err());
+        let tracks = elem(
+            0x1853_8067,
+            &elem(
+                0x1654_ae6b,
+                &[
+                    track_entry(1, 1, "V_MPEG4/ISO/AVC", &[]),
+                    track_entry(2, 2, "A_AAC", &[]),
+                ]
+                .concat(),
+            ),
+        );
+        assert!(
+            validate_metadata_budget(
+                &tracks,
+                super::super::ParseLimits {
+                    max_tracks: 1,
+                    ..Default::default()
+                }
+            )
+            .is_err()
+        );
     }
 
     #[test]

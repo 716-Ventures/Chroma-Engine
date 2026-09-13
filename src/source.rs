@@ -6,8 +6,55 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use memmap2::{Mmap, MmapOptions};
-use tempfile::TempDir;
+use std::sync::atomic::{AtomicU64, Ordering};
+pub(crate) mod probe_reader;
+
+/// Packet reads are separate from container metadata, so parsers never need a
+/// file-sized byte slice merely to copy a selected payload.
+pub(crate) trait PacketSource {
+    fn packet_window(&self, offset: u64, len: usize) -> io::Result<Vec<u8>>;
+    fn packet_payload(
+        &self,
+        packets: &[crate::packet::PacketRef],
+        range: crate::packet::PacketRange,
+    ) -> Result<Vec<u8>>;
+}
+
+impl PacketSource for MediaSource {
+    fn packet_window(&self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+        self.read_at(offset, len)
+    }
+    fn packet_payload(
+        &self,
+        packets: &[crate::packet::PacketRef],
+        range: crate::packet::PacketRange,
+    ) -> Result<Vec<u8>> {
+        let packets = packets
+            .get(range.start as usize..range.end as usize)
+            .ok_or_else(|| anyhow::anyhow!("invalid packet range"))?;
+        Ok(self.read_packets(packets)?)
+    }
+}
+
+#[cfg(test)]
+impl PacketSource for Vec<u8> {
+    fn packet_window(&self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+        let start = usize::try_from(offset).map_err(io::Error::other)?;
+        let end = start
+            .checked_add(len)
+            .ok_or_else(|| io::Error::other("range overflow"))?;
+        self.get(start..end)
+            .map(<[u8]>::to_vec)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "packet outside source"))
+    }
+    fn packet_payload(
+        &self,
+        packets: &[crate::packet::PacketRef],
+        range: crate::packet::PacketRange,
+    ) -> Result<Vec<u8>> {
+        Ok(crate::packet::extract_packet_payload(self, packets, range)?)
+    }
+}
 
 /// Immutable identity captured when a media source is opened.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,28 +85,20 @@ impl MediaSourceIdentity {
 
 /// File-backed media source view plus its original filesystem identity.
 pub struct MediaSource {
+    read_bytes: AtomicU64,
+    read_operations: AtomicU64,
+    clusters_visited: AtomicU64,
+    runtime: std::sync::Arc<crate::EngineRuntime>,
+    _lease: crate::resources::SessionLease,
+    control: crate::WorkControl,
+    matroska_index: std::sync::OnceLock<
+        std::result::Result<crate::container::matroska::MatroskaFileIndex, String>,
+    >,
     path: PathBuf,
     identity: MediaSourceIdentity,
     len: u64,
-    bytes: SnapshotBytes,
-    _mapped_file: File,
-    // Keep this last so Windows closes the mapping and file before cleanup.
-    snapshot_dir: Option<TempDir>,
-    private_snapshot: bool,
-}
-
-enum SnapshotBytes {
-    Empty,
-    Mapped(Mmap),
-}
-
-impl AsRef<[u8]> for SnapshotBytes {
-    fn as_ref(&self) -> &[u8] {
-        match self {
-            Self::Empty => &[],
-            Self::Mapped(bytes) => bytes.as_ref(),
-        }
-    }
+    bytes: Vec<u8>,
+    file: File,
 }
 
 impl std::fmt::Debug for MediaSource {
@@ -69,82 +108,188 @@ impl std::fmt::Debug for MediaSource {
             .field("path", &self.path)
             .field("identity", &self.identity)
             .field("len", &self.len)
-            .field("private_snapshot", &self.private_snapshot)
-            .field(
-                "snapshot_dir",
-                &self.snapshot_dir.as_ref().map(TempDir::path),
-            )
             .finish_non_exhaustive()
     }
 }
 
 impl MediaSource {
-    /// Opens a source and creates a file-backed parser view.
-    ///
-    /// The snapshot is mapped instead of copied into a file-sized heap buffer. On
-    /// copy-on-write filesystems the platform copy is normally a cheap private
-    /// clone. Other filesystems retain and validate the original read handle,
-    /// avoiding both file-sized heap allocations and eager disk copies.
-    pub fn open(path: &Path) -> Result<Self> {
-        let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
-        let metadata = file
-            .metadata()
-            .with_context(|| format!("stat {}", path.display()))?;
-        let identity = MediaSourceIdentity::from_metadata(&metadata);
-        let len = metadata.len();
-        usize::try_from(len).with_context(|| {
-            format!(
-                "source too large to map on this platform: {}",
-                path.display()
-            )
-        })?;
-
-        let candidate_dir = create_snapshot_dir(path).ok();
-        let private_snapshot = candidate_dir
-            .as_ref()
-            .map(|directory| clone_file(path, &directory.path().join("source.snapshot")))
-            .transpose()
-            .with_context(|| format!("clone snapshot for {}", path.display()))?
-            .unwrap_or(false);
-        let mapped_file = if private_snapshot {
-            let snapshot_path = candidate_dir
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("private snapshot has no owning directory"))?
-                .path()
-                .join("source.snapshot");
-            seal_snapshot(&snapshot_path)
-                .with_context(|| format!("seal snapshot for {}", path.display()))?;
-            File::open(&snapshot_path)
-                .with_context(|| format!("open snapshot for {}", path.display()))?
-        } else {
-            file.try_clone()
-                .with_context(|| format!("retain read handle for {}", path.display()))?
-        };
-        let mapped_len = mapped_file
-            .metadata()
-            .with_context(|| format!("stat mapped source for {}", path.display()))?
-            .len();
-        let current = fs::metadata(path).with_context(|| format!("restat {}", path.display()))?;
-        if mapped_len != len || MediaSourceIdentity::from_metadata(&current) != identity {
-            anyhow::bail!("source changed while reading {}", path.display());
+    pub(crate) fn io_stats(&self) -> (u64, u64, u64) {
+        (
+            self.read_bytes.load(Ordering::Relaxed),
+            self.read_operations.load(Ordering::Relaxed),
+            self.clusters_visited.load(Ordering::Relaxed),
+        )
+    }
+    pub(crate) fn visit_cluster(&self) {
+        self.clusters_visited.fetch_add(1, Ordering::Relaxed);
+    }
+    fn read_exact_counted(&self, buffer: &mut [u8], offset: u64) -> io::Result<()> {
+        self.read_operations.fetch_add(1, Ordering::Relaxed);
+        read_exact_at(&self.file, buffer, offset)?;
+        self.read_bytes
+            .fetch_add(buffer.len() as u64, Ordering::Relaxed);
+        Ok(())
+    }
+    pub(crate) fn policy(&self) -> &crate::ResourcePolicy {
+        self.runtime.policy()
+    }
+    pub(crate) fn check_work(&self) -> Result<()> {
+        Ok(self.control.check()?)
+    }
+    pub(crate) fn chunk_plan(
+        &self,
+        track: Option<&str>,
+        target_ms: u64,
+    ) -> Result<crate::packet::ChunkPlan> {
+        if target_ms == 0 {
+            anyhow::bail!("chunk target duration must be positive");
         }
-        let bytes = if len == 0 {
-            SnapshotBytes::Empty
+        match crate::container::sniff_container(self.as_ref()) {
+            crate::container::ContainerKind::Mp4 | crate::container::ContainerKind::Mov => {
+                crate::container::mp4::parse_chunk_plan(self.as_ref(), track, target_ms)
+                    .ok_or_else(|| anyhow::anyhow!("missing MP4 chunk plan"))
+            }
+            crate::container::ContainerKind::Matroska | crate::container::ContainerKind::Webm => {
+                self.matroska_index()?
+                    .plan(self, track.unwrap_or("v0"), target_ms)
+            }
+            _ => anyhow::bail!("unsupported source container"),
+        }
+    }
+
+    pub(crate) fn extract_chunk(
+        &self,
+        track: Option<&str>,
+        target_ms: u64,
+        index: u32,
+    ) -> Result<(crate::packet::ExtractedChunk, Vec<u8>)> {
+        use crate::packet::{ExtractedChunk, PacketRange, packet_samples_for_range};
+        self.validate_current()?;
+        let mut chunk = self
+            .chunk_plan(track, target_ms)?
+            .chunks
+            .into_iter()
+            .find(|chunk| chunk.index == index)
+            .ok_or_else(|| anyhow::anyhow!("chunk {index} is out of range"))?;
+        let (id, packets) = if crate::container::mp4::looks_like_mp4(self.as_ref()) {
+            let track = crate::container::mp4::parse_packet_track(self.as_ref(), track)
+                .ok_or_else(|| anyhow::anyhow!("missing MP4 packet track"))?;
+            (track.track_id, track.packets)
         } else {
-            SnapshotBytes::Mapped(
-                map_readonly(&mapped_file)
-                    .with_context(|| format!("map source for {}", path.display()))?,
-            )
+            let track = track.unwrap_or("v0");
+            let track = self
+                .matroska_index()?
+                .packets(
+                    self,
+                    &[track],
+                    chunk.start.as_millis(),
+                    chunk
+                        .start
+                        .as_millis()
+                        .saturating_add(chunk.duration.as_millis()),
+                )?
+                .remove(0);
+            chunk.packet_range = PacketRange {
+                start: 0,
+                end: u32::try_from(track.packets.len())?,
+            };
+            (track.id, track.packets)
         };
-        Ok(Self {
+        let payload = self.packet_payload(&packets, chunk.packet_range)?;
+        let samples = packet_samples_for_range(&packets, chunk.packet_range)?;
+        Ok((
+            ExtractedChunk {
+                track_id: id,
+                packet_count: u32::try_from(samples.len())?,
+                byte_count: payload.len() as u64,
+                samples,
+                chunk,
+            },
+            payload,
+        ))
+    }
+
+    pub(crate) fn matroska_index(&self) -> Result<&crate::container::matroska::MatroskaFileIndex> {
+        self.matroska_index
+            .get_or_init(|| {
+                crate::container::matroska::MatroskaFileIndex::open(self)
+                    .map_err(|error| error.to_string())
+            })
+            .as_ref()
+            .map_err(|error| anyhow::anyhow!(error.clone()))
+    }
+    pub(crate) fn element_at(&self, offset: u64, end: u64) -> Result<probe_reader::Element> {
+        self.check_work()?;
+        if end > self.len {
+            anyhow::bail!("element outside source");
+        }
+        self.read_operations.fetch_add(1, Ordering::Relaxed);
+        let element = probe_reader::element(&self.file, offset, end)?;
+        self.read_bytes
+            .fetch_add(end.saturating_sub(offset).min(12), Ordering::Relaxed);
+        Ok(element)
+    }
+
+    pub(crate) fn read_window_unvalidated(&self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+        self.check_work().map_err(io::Error::other)?;
+        self.policy()
+            .check(
+                "compressed window",
+                len,
+                self.policy().compressed_window_bytes,
+            )
+            .map_err(io::Error::other)?;
+        if offset
+            .checked_add(len as u64)
+            .is_none_or(|end| end > self.len)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "window outside source",
+            ));
+        }
+        let mut output = bounded_buffer(len)?;
+        self.read_exact_counted(&mut output, offset)?;
+        Ok(output)
+    }
+
+    /// Modern packet sessions retain owned container metadata and read payload
+    /// offsets positionally. Matroska additionally indexes original cluster offsets.
+    pub(crate) fn open_packet_copy(path: &Path) -> Result<Self> {
+        Self::open_with_context(
+            path,
+            crate::EngineRuntime::global()?,
+            crate::WorkControl::default(),
+        )
+    }
+
+    pub(crate) fn open_with_context(
+        path: &Path,
+        runtime: std::sync::Arc<crate::EngineRuntime>,
+        control: crate::WorkControl,
+    ) -> Result<Self> {
+        control.check()?;
+        let lease = runtime.admit()?;
+        let file = File::open(path)?;
+        let identity = MediaSourceIdentity::from_metadata(&file.metadata()?);
+        let (_, metadata) =
+            probe_reader::read_metadata_with_context(path, runtime.policy(), &control)?;
+        let source = Self {
+            read_bytes: AtomicU64::new(0),
+            read_operations: AtomicU64::new(0),
+            clusters_visited: AtomicU64::new(0),
+            runtime,
+            _lease: lease,
+            control,
+            matroska_index: Default::default(),
             path: path.to_path_buf(),
+            len: identity.len,
             identity,
-            len,
-            bytes,
-            _mapped_file: mapped_file,
-            snapshot_dir: private_snapshot.then_some(candidate_dir).flatten(),
-            private_snapshot,
-        })
+            bytes: metadata,
+            file,
+        };
+        source.validate_current()?;
+        Ok(source)
     }
 
     /// Returns the source length captured at open time.
@@ -154,98 +299,154 @@ impl MediaSource {
 
     /// Returns the bytes in the retained source view.
     pub fn as_bytes(&self) -> &[u8] {
-        let bytes = self.bytes.as_ref();
-        self.read_at(0, bytes.len()).unwrap_or(bytes)
+        self.bytes.as_ref()
     }
 
-    /// Reads a bounded positional window from the retained source view.
-    pub fn read_at(&self, offset: u64, len: usize) -> io::Result<&[u8]> {
-        let start = usize::try_from(offset)
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "offset is too large"))?;
-        let end = start.checked_add(len).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "read range overflows usize")
+    /// Reads a bounded owned positional window.
+    pub fn read_at(&self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+        self.validate_current().map_err(io::Error::other)?;
+        if offset
+            .checked_add(len as u64)
+            .is_none_or(|end| end > self.len)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "window outside source",
+            ));
+        }
+        self.policy()
+            .check(
+                "compressed window",
+                len,
+                self.policy().compressed_window_bytes,
+            )
+            .map_err(io::Error::other)?;
+        let mut output = bounded_buffer(len)?;
+        self.read_exact_counted(&mut output, offset)?;
+        self.validate_current().map_err(io::Error::other)?;
+        Ok(output)
+    }
+
+    /// Reads selected packet spans with identity validation around the complete
+    /// operation. Positional reads never depend on a shared file cursor.
+    pub(crate) fn read_packets(&self, packets: &[crate::packet::PacketRef]) -> io::Result<Vec<u8>> {
+        if let [packet] = packets {
+            return self.read_at(packet.source_offset, packet.size as usize);
+        }
+        self.validate_current().map_err(io::Error::other)?;
+        let size = packets.iter().try_fold(0_usize, |total, packet| {
+            let end = packet
+                .source_offset
+                .checked_add(u64::from(packet.size))
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "packet offset overflow")
+                })?;
+            if end > self.len {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "packet outside source",
+                ));
+            }
+            total
+                .checked_add(packet.size as usize)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "packet size overflow"))
         })?;
-        self.bytes.as_ref().get(start..end).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::UnexpectedEof, "read range is outside source")
-        })
+        self.policy()
+            .check(
+                "compressed window",
+                size,
+                self.policy().compressed_window_bytes,
+            )
+            .map_err(io::Error::other)?;
+        let mut output = bounded_buffer(size)?;
+        let mut cursor = 0;
+        let mut index = 0;
+        while index < packets.len() {
+            self.check_work().map_err(io::Error::other)?;
+            let first = &packets[index];
+            let offset = first.source_offset;
+            let mut length = first.size as usize;
+            index += 1;
+            // Coalesce only physically adjacent spans. Preserve decode order and
+            // never read unselected interleaved payload or allocate a gap buffer.
+            while let Some(next) = packets.get(index) {
+                if offset.checked_add(length as u64) != Some(next.source_offset) {
+                    break;
+                }
+                length += next.size as usize;
+                index += 1;
+            }
+            let end = cursor + length;
+            self.read_exact_counted(&mut output[cursor..end], offset)?;
+            cursor = end;
+        }
+        self.validate_current().map_err(io::Error::other)?;
+        Ok(output)
     }
 
     /// Verifies that the path still points at the same source identity.
     pub fn validate_current(&self) -> Result<()> {
+        self.check_work()?;
         let current =
             fs::metadata(&self.path).with_context(|| format!("stat {}", self.path.display()))?;
         let current = MediaSourceIdentity::from_metadata(&current);
-        if current != self.identity {
+        if current != self.identity
+            || MediaSourceIdentity::from_metadata(&self.file.metadata()?) != self.identity
+        {
             anyhow::bail!("source changed: {}", self.path.display());
         }
         Ok(())
     }
 }
 
-fn create_snapshot_dir(source_path: &Path) -> io::Result<TempDir> {
-    if let Some(parent) = source_path.parent()
-        && let Ok(directory) = tempfile::Builder::new()
-            .prefix(".chroma-media-source-")
-            .tempdir_in(parent)
-    {
-        return Ok(directory);
+fn bounded_buffer(len: usize) -> io::Result<Vec<u8>> {
+    if len > 64 * 1024 * 1024 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "source window exceeds 64 MiB budget",
+        ));
     }
-    tempfile::Builder::new()
-        .prefix("chroma-media-source-")
-        .tempdir()
+    let mut buffer = Vec::new();
+    buffer.try_reserve_exact(len).map_err(io::Error::other)?;
+    buffer.resize(len, 0);
+    Ok(buffer)
 }
 
-#[cfg(target_os = "macos")]
-#[allow(unsafe_code)]
-fn clone_file(source_path: &Path, snapshot_path: &Path) -> io::Result<bool> {
-    use std::{ffi::CString, os::unix::ffi::OsStrExt};
-
-    unsafe extern "C" {
-        fn clonefile(
-            source: *const std::ffi::c_char,
-            destination: *const std::ffi::c_char,
-            flags: u32,
-        ) -> std::ffi::c_int;
+fn read_exact_at(file: &File, mut buffer: &mut [u8], mut offset: u64) -> io::Result<()> {
+    while !buffer.is_empty() {
+        #[cfg(unix)]
+        let result = {
+            use std::os::unix::fs::FileExt;
+            file.read_at(buffer, offset)
+        };
+        #[cfg(windows)]
+        let result = {
+            use std::os::windows::fs::FileExt;
+            file.seek_read(buffer, offset)
+        };
+        #[cfg(not(any(unix, windows)))]
+        let result: io::Result<usize> = Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "positional reads unsupported",
+        ));
+        match result {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "source truncated during read",
+                ));
+            }
+            Ok(read) => {
+                offset = offset.checked_add(read as u64).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "read offset overflow")
+                })?;
+                buffer = &mut buffer[read..];
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        }
     }
-
-    let source = CString::new(source_path.as_os_str().as_bytes())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "source path contains NUL"))?;
-    let destination = CString::new(snapshot_path.as_os_str().as_bytes())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "snapshot path contains NUL"))?;
-    // SAFETY: both pointers reference live, NUL-terminated paths for the
-    // duration of the call. The destination is inside a private new directory.
-    let result = unsafe { clonefile(source.as_ptr(), destination.as_ptr(), 0) };
-    if result == 0 {
-        return Ok(true);
-    }
-    let _ = fs::remove_file(snapshot_path);
-    Ok(false)
-}
-
-#[cfg(not(target_os = "macos"))]
-fn clone_file(_source_path: &Path, _snapshot_path: &Path) -> io::Result<bool> {
-    Ok(false)
-}
-
-fn seal_snapshot(snapshot_path: &Path) -> io::Result<()> {
-    #[cfg(unix)]
-    {
-        let mut permissions = fs::metadata(snapshot_path)?.permissions();
-        permissions.set_readonly(true);
-        fs::set_permissions(snapshot_path, permissions)?;
-    }
-    #[cfg(not(unix))]
-    let _ = snapshot_path;
     Ok(())
-}
-
-#[allow(unsafe_code)]
-fn map_readonly(file: &File) -> io::Result<Mmap> {
-    // SAFETY: MediaSource retains the read-only File for the mapping lifetime.
-    // Clone-capable filesystems map a sealed private inode. The portable path
-    // is used only by sessions that validate source identity before work;
-    // callers must not mutate an actively leased source file in place.
-    unsafe { MmapOptions::new().map(file) }
 }
 
 impl AsRef<[u8]> for MediaSource {
@@ -262,18 +463,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn detects_same_path_replacement_and_preserves_private_snapshots() {
+    fn detects_same_path_replacement_and_preserves_owned_metadata() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("sample.mp4");
         fs::write(&path, b"first").expect("write source");
-        let source = MediaSource::open(&path).expect("open source");
+        let source = MediaSource::open_packet_copy(&path).expect("open source");
 
         fs::write(&path, b"second").expect("replace source");
 
         assert!(source.validate_current().is_err());
-        if source.private_snapshot {
-            assert_eq!(source.as_bytes(), b"first");
-        }
+        assert_eq!(source.as_bytes(), b"first");
+    }
+
+    #[test]
+    fn positional_reads_reject_changed_sources_and_oversized_windows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source.bin");
+        fs::write(&path, b"original").unwrap();
+        let source = MediaSource::open_packet_copy(&path).unwrap();
+        assert!(source.read_at(0, 65 * 1024 * 1024).is_err());
+        fs::write(&path, b"x").unwrap();
+        assert!(source.read_at(0, 8).is_err());
     }
 
     #[test]
@@ -281,7 +491,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("sample.mp4");
         fs::write(&path, b"abcdef").expect("write source");
-        let source = MediaSource::open(&path).expect("open source");
+        let source = MediaSource::open_packet_copy(&path).expect("open source");
 
         assert_eq!(source.read_at(2, 3).expect("read"), b"cde");
         assert_eq!(

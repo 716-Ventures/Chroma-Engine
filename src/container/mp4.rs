@@ -1,15 +1,68 @@
 mod atom;
+#[cfg(test)]
+use crate::packet::{
+    ExtractedChunk, PacketExtractError, extract_packet_payload, packet_samples_for_range,
+    plan_track_chunks,
+};
+
+pub(crate) fn validate_metadata_budget(bytes: &[u8], limits: ParseLimits) -> anyhow::Result<()> {
+    let mut budget = super::ParseBudget::new(limits);
+    let mut largest_track_samples = 0usize;
+    let mut pending = vec![(bytes, 0)];
+    while let Some((bytes, depth)) = pending.pop() {
+        for atom in AtomIter::new(bytes) {
+            let nested = matches!(
+                &atom.kind,
+                b"moov" | b"trak" | b"mdia" | b"minf" | b"stbl" | b"udta" | b"edts"
+            );
+            let allocation = if &atom.kind == b"mdat" || nested {
+                0
+            } else {
+                atom.payload.len()
+            };
+            budget.visit(depth, &atom.kind == b"trak", allocation)?;
+            if &atom.kind == b"stsz" && atom.payload.len() >= 12 {
+                let samples = read_u32(&atom.payload[8..12]).unwrap_or(0) as usize;
+                if samples > limits.max_samples_per_track {
+                    anyhow::bail!("sample resource limit exceeded");
+                }
+                // Retained packet indexes accumulate across tracks; table/timing
+                // expansion is sequential, so its scratch peak is the largest
+                // track, not the sum of every track's scratch allocation.
+                largest_track_samples = largest_track_samples.max(samples);
+                budget.visit(
+                    depth,
+                    false,
+                    samples
+                        .checked_mul(std::mem::size_of::<PacketRef>())
+                        .ok_or_else(|| anyhow::anyhow!("sample index budget overflow"))?,
+                )?;
+            }
+            if nested {
+                pending.push((atom.payload, depth + 1));
+            }
+        }
+    }
+    // 48 bytes/sample covers the size/duration/CTO/sync arrays plus normalized
+    // timing. Normalization uses two passes, not an additional raw tuple array. Table entries are also
+    // charged above by their serialized payload size; owned source metadata has
+    // a separate ceiling.
+    budget.visit(
+        0,
+        false,
+        largest_track_samples
+            .checked_mul(48)
+            .ok_or_else(|| anyhow::anyhow!("sample scratch budget overflow"))?,
+    )?;
+    Ok(())
+}
 
 use crate::{
     codec::pixel_format::{
         pixel_format_from_avc_decoder_config, pixel_format_from_hevc_decoder_config,
     },
     container::{ContainerKind, ParseLimits},
-    packet::{
-        ChunkPlan, ExtractedChunk, NativeChunk, PacketExtractError, PacketRange, PacketRef,
-        TimeDelta, TimePoint, TimeScale, extract_packet_payload, packet_samples_for_range,
-        plan_track_chunks,
-    },
+    packet::{ChunkPlan, NativeChunk, PacketRange, PacketRef, TimeDelta, TimePoint, TimeScale},
 };
 use serde::{Deserialize, Serialize};
 
@@ -246,6 +299,7 @@ pub fn parse_chunk_plan(
     None
 }
 
+#[cfg(test)]
 pub fn extract_chunk(
     bytes: &[u8],
     requested_track_id: Option<&str>,
@@ -311,6 +365,7 @@ pub fn parse_codec_config(
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[cfg(test)]
 pub enum Mp4ChunkExtractError {
     #[error("no matching MP4 packet-indexed track found")]
     NoTrack,
@@ -620,7 +675,6 @@ impl SampleTable {
     }
 
     fn normalized_timing(&self) -> Option<Vec<NormalizedSampleTiming>> {
-        let mut raw = Vec::with_capacity(self.sample_sizes.len());
         let mut dts = 0_i128;
         let mut min_time = 0_i128;
 
@@ -634,16 +688,21 @@ impl SampleTable {
             let offset = i128::from(*self.composition_offsets.get(sample_index)?);
             let pts = dts.checked_add(offset)?;
             min_time = min_time.min(pts).min(dts);
-            raw.push((pts, dts, duration));
             dts = dts.checked_add(duration)?;
         }
 
         let shift = min_time.checked_neg()?;
-        raw.into_iter()
-            .map(|(pts, dts, duration)| {
+        dts = 0;
+        (0..self.sample_sizes.len())
+            .map(|sample_index| {
+                let duration = i128::from(*self.sample_durations.get(sample_index)?);
+                let pts =
+                    dts.checked_add(i128::from(*self.composition_offsets.get(sample_index)?))?;
+                let current_dts = dts;
+                dts = dts.checked_add(duration)?;
                 Some(NormalizedSampleTiming {
                     pts: u64::try_from(pts.checked_add(shift)?).ok()?,
-                    dts: u64::try_from(dts.checked_add(shift)?).ok()?,
+                    dts: u64::try_from(current_dts.checked_add(shift)?).ok()?,
                     duration: u64::try_from(duration).ok()?,
                 })
             })
@@ -748,15 +807,15 @@ fn parse_sample_table(stbl: &[u8]) -> Option<SampleTable> {
 fn parse_sample_table_with_limits(stbl: &[u8], limits: ParseLimits) -> Option<SampleTable> {
     let sample_sizes = find_atom(stbl, b"stsz").and_then(|payload| parse_stsz(payload, limits))?;
     let sample_count = sample_sizes.len();
-    let sample_durations = find_atom(stbl, b"stts")
-        .and_then(|payload| parse_stts(payload, sample_count, limits))
-        .unwrap_or_else(|| vec![0; sample_count]);
-    let composition_offsets = find_atom(stbl, b"ctts")
-        .and_then(|payload| parse_ctts(payload, sample_count, limits))
-        .unwrap_or_else(|| vec![0; sample_count]);
-    let keyframes = find_atom(stbl, b"stss")
-        .and_then(|payload| parse_stss(payload, sample_count, limits))
-        .unwrap_or_else(|| vec![true; sample_count]);
+    let sample_durations = parse_stts(find_atom(stbl, b"stts")?, sample_count, limits)?;
+    let composition_offsets = match find_atom(stbl, b"ctts") {
+        Some(payload) => parse_ctts(payload, sample_count, limits)?,
+        None => vec![0; sample_count],
+    };
+    let keyframes = match find_atom(stbl, b"stss") {
+        Some(payload) => parse_stss(payload, sample_count, limits)?,
+        None => vec![true; sample_count],
+    };
     let chunk_offsets = find_atom(stbl, b"stco")
         .and_then(|payload| parse_stco(payload, limits))
         .or_else(|| find_atom(stbl, b"co64").and_then(|payload| parse_co64(payload, limits)))?;
@@ -924,9 +983,10 @@ fn parse_stss(payload: &[u8], sample_count: usize, limits: ParseLimits) -> Optio
     let mut offset = 8;
     for _ in 0..entry_count {
         let sample_number = read_u32(&payload[offset..offset + 4])? as usize;
-        if (1..=sample_count).contains(&sample_number) {
-            out[sample_number - 1] = true;
+        if !(1..=sample_count).contains(&sample_number) || out[sample_number - 1] {
+            return None;
         }
+        out[sample_number - 1] = true;
         offset += 4;
     }
     Some(out)
@@ -1795,6 +1855,52 @@ mod tests {
     }
 
     #[test]
+    fn malformed_optional_tables_do_not_turn_into_sync_or_zero_timing() {
+        let table = [
+            atom(
+                b"stsz",
+                &full_box_payload(&[&4_u32.to_be_bytes(), &1_u32.to_be_bytes()]),
+            ),
+            atom(
+                b"stts",
+                &full_box_payload(&[
+                    &1_u32.to_be_bytes(),
+                    &1_u32.to_be_bytes(),
+                    &40_u32.to_be_bytes(),
+                ]),
+            ),
+            atom(
+                b"stco",
+                &full_box_payload(&[&1_u32.to_be_bytes(), &128_u32.to_be_bytes()]),
+            ),
+            atom(
+                b"stsc",
+                &full_box_payload(&[
+                    &1_u32.to_be_bytes(),
+                    &1_u32.to_be_bytes(),
+                    &1_u32.to_be_bytes(),
+                    &1_u32.to_be_bytes(),
+                ]),
+            ),
+        ]
+        .concat();
+        assert!(parse_sample_table(&table).is_some());
+        for name in [b"ctts", b"stss"] {
+            let mut malformed = table.clone();
+            malformed.extend(atom(name, &[0; 4]));
+            assert!(parse_sample_table(&malformed).is_none());
+        }
+        assert!(
+            parse_stss(
+                &full_box_payload(&[&1_u32.to_be_bytes(), &2_u32.to_be_bytes()]),
+                1,
+                ParseLimits::default()
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
     fn rejects_fixed_size_stsz_count_above_sample_limit_before_allocation() {
         let limits = ParseLimits {
             max_samples_per_track: 16,
@@ -2072,10 +2178,28 @@ mod tests {
     }
 
     #[test]
+    fn cumulative_index_budget_counts_all_tracks_but_only_peak_scratch() {
+        let mut payload = vec![0; 12];
+        payload[4..8].copy_from_slice(&1u32.to_be_bytes());
+        payload[8..12].copy_from_slice(&100u32.to_be_bytes());
+        let table = atom(b"stsz", &payload);
+        let mut metadata = table.clone();
+        metadata.extend_from_slice(&table);
+        let required = 24 + 200 * std::mem::size_of::<PacketRef>() + 100 * 48;
+        let mut limits = ParseLimits {
+            max_index_bytes: required,
+            ..ParseLimits::default()
+        };
+        assert!(validate_metadata_budget(&metadata, limits).is_ok());
+        limits.max_index_bytes -= 1;
+        assert!(validate_metadata_budget(&metadata, limits).is_err());
+    }
+
+    #[test]
     fn derives_mp4_pixel_format_from_hevc_config() {
         let mut data = ftyp();
         let mut hvcc = vec![
-            1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 120, 0xfd, 0xfa, 0, 0, 0, 0, 0, 0, 3, 0,
+            1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 120, 0xf0, 0, 0xfc, 0xfd, 0xfa, 0xfa, 0, 0, 3, 0,
         ];
         hvcc[22] = 0;
         let sample_entry_payload =

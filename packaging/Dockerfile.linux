@@ -37,5 +37,25 @@ RUN CARGO_BUILD_JOBS=1 \
     && patchelf --set-rpath '$ORIGIN' /runtime/chroma-engine \
     && LD_LIBRARY_PATH=/runtime /runtime/chroma-engine decoder-probe
 
+# Run the actual bundle in the declared oldest supported userspace without
+# graphics libraries or devices. The fixture contains original synthetic media.
+RUN CARGO_BUILD_JOBS=1 CARGO_TARGET_DIR=/tmp/chroma-target \
+      cargo run --locked --example make-test-media -- /fixture.mkv 6 \
+    && cp THIRD_PARTY_NOTICES.md /runtime/ \
+    && cp third_party/rusty_aac/LICENSE /runtime/rusty-aac-LICENSE \
+    && printf '%s\n' 'libc=glibc-2.36' 'cpu=generic-x86-64-or-aarch64' \
+      'features=linux-vaapi' 'rust=1.90' 'profile=release,lto=false,codegen-units=16,truehd-opt=0' \
+      > /runtime/BUILD-BASELINE.txt
+
+FROM debian:bookworm-slim AS baseline-test
+RUN apt-get update && apt-get install -y --no-install-recommends libgcc-s1 libstdc++6 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /runtime/ /runtime/
+COPY --from=builder /fixture.mkv /fixture.mkv
+RUN /runtime/chroma-engine decoder-probe \
+    && /runtime/chroma-engine cache-probe /tmp/chroma-cache \
+    && CHROMA_RESOURCE_POLICY=small-nas /runtime/chroma-engine transcode-fmp4-segments \
+      /fixture.mkv /tmp/chroma-cache --start-index 0 --count 2 --video-mode copy
+
 FROM scratch AS bundle
-COPY --from=builder /runtime/ /
+COPY --from=baseline-test /runtime/ /

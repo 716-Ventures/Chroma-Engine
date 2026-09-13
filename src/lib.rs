@@ -24,16 +24,24 @@ pub(crate) mod platform;
 pub(crate) mod playback_manifest;
 pub(crate) mod probe;
 pub(crate) mod remux;
+mod resources;
 pub(crate) mod session;
 pub(crate) mod source;
+pub use resources::{EngineRuntime, ResourceError, ResourcePolicy};
 pub(crate) mod transcode;
+mod work;
+mod worker;
+pub use output::validate_cache_directory;
+pub use transcode::NativeFmp4VideoMode;
+pub use work::{WorkControl, WorkStopped};
+pub use worker::{WorkerOutput, WorkerSupervisor};
 
 pub use codec::subtitles::{
     MovTextSample, NativeTextSubtitleTrack, TextSubtitleCue, WebVttSegment, WebVttSidecarInput,
     WebVttSidecarSet, WebVttSidecarTrack, build_webvtt_sidecars,
     build_webvtt_sidecars_from_native_text_tracks, cues_to_mov_text_samples,
     encode_mov_text_sample, parse_native_text_subtitle_cues, parse_subrip, render_webvtt,
-    segment_webvtt, write_webvtt_sidecars,
+    segment_webvtt, try_build_webvtt_sidecars, try_segment_webvtt, write_webvtt_sidecars,
 };
 pub use container::{ContainerKind, sniff_container};
 pub use engine::{
@@ -64,7 +72,9 @@ pub use playback_manifest::{
     ManifestTrack, MatroskaManifestOptions, Mp4ManifestOptions, NativePlaybackManifest,
     build_matroska_playback_manifest, build_mp4_playback_manifest,
 };
-pub use probe::{Chapter, MediaProbe, ProbeError, probe_media_source};
+pub use probe::{
+    Chapter, MediaProbe, ProbeError, probe_media_source, probe_media_source_with_runtime,
+};
 pub use remux::{
     RemuxChapter, RemuxError, RemuxMetadata, RemuxPacketSpans, RemuxTrackKind, RemuxTrackMetadata,
     copyable_metadata, remux_mp4, stream_copy_packet_spans, write_faststart_mp4,

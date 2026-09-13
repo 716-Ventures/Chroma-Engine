@@ -34,11 +34,13 @@ pub fn pixel_format_from_avc_decoder_config(payload: &[u8]) -> Option<String> {
 
 /// Returns a Chroma pixel-format label from an HEVC decoder configuration record.
 pub fn pixel_format_from_hevc_decoder_config(payload: &[u8]) -> Option<String> {
-    if payload.len() < 15 || payload[0] != 1 {
+    if payload.len() < 23 || payload[0] != 1 {
         return None;
     }
-    let chroma_format_idc = payload[13] & 0x03;
-    let bit_depth_luma = 8_u8.saturating_add(payload[14] & 0x07);
+    // HEVCDecoderConfigurationRecord: bytes 13–14 are spatial segmentation,
+    // byte 15 is parallelism; chroma/depth begin at 16, not at 13.
+    let chroma_format_idc = payload[16] & 0x03;
+    let bit_depth_luma = 8_u8.saturating_add(payload[17] & 0x07);
     pixel_format_label(chroma_format_idc, bit_depth_luma)
 }
 
@@ -94,8 +96,10 @@ mod tests {
     fn derives_hevc_pixel_format() {
         let mut config = [0_u8; 23];
         config[0] = 1;
-        config[13] = 0xfd;
-        config[14] = 0xfa;
+        config[13] = 0xf0;
+        config[14] = 0;
+        config[16] = 0xfd;
+        config[17] = 0xfa;
         assert_eq!(
             pixel_format_from_hevc_decoder_config(&config).as_deref(),
             Some("yuv420-10bit")

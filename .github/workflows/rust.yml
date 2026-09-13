@@ -50,6 +50,14 @@ jobs:
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - name: Test
         run: cargo test --locked --all-targets --all-features
+      - name: Release source-mutation and retained-session regressions
+        if: matrix.toolchain == '1.90.0'
+        run: cargo test --locked --release --test stability
+      - name: Generated native-session smoke
+        shell: bash
+        run: |
+          cargo run --locked --example make-test-media -- synthetic.mkv 6
+          cargo run --locked --bin chroma-engine -- transcode-fmp4-segments synthetic.mkv smoke-output --start-index 0 --count 2 --video-mode copy
       - name: Docs
         if: matrix.toolchain == '1.97.1'
         env:
@@ -110,15 +118,20 @@ jobs:
       - name: Install cargo-fuzz
         run: cargo +nightly install cargo-fuzz --locked
       - name: Compile fuzz targets
-        run: cargo +nightly check --manifest-path fuzz/Cargo.toml
+        run: cargo +nightly check --locked --manifest-path fuzz/Cargo.toml
+      - name: Seed container and fragment fuzzers with valid synthetic structure
+        run: |
+          mkdir -p fuzz/corpus/containers fuzz/corpus/fmp4
+          cargo +nightly run --locked --example make-test-media -- fuzz/corpus/containers/generated.mkv 6
+          cargo +nightly run --locked --bin chroma-engine -- transcode-fmp4-segments fuzz/corpus/containers/generated.mkv fuzz/corpus/fmp4 --start-index 0 --count 2 --video-mode copy
       - name: Smoke fuzz containers
-        run: cargo +nightly fuzz run containers -- -runs=1
+        run: cargo +nightly fuzz run containers -- -max_total_time=60 -timeout=10 -rss_limit_mb=512
       - name: Smoke fuzz codecs
-        run: cargo +nightly fuzz run codecs -- -runs=1
+        run: cargo +nightly fuzz run codecs -- -max_total_time=60 -timeout=10 -rss_limit_mb=512
       - name: Smoke fuzz subtitles
-        run: cargo +nightly fuzz run subtitles -- -runs=1
+        run: cargo +nightly fuzz run subtitles -- -max_total_time=60 -timeout=10 -rss_limit_mb=512
       - name: Smoke fuzz fmp4
-        run: cargo +nightly fuzz run fmp4 -- -runs=1
+        run: cargo +nightly fuzz run fmp4 -- -max_total_time=60 -timeout=10 -rss_limit_mb=512
 
   release-build:
     name: Auditable release build / ${{ matrix.os }}
@@ -166,6 +179,7 @@ jobs:
         run: |
           mkdir -p dist/chroma-engine
           cp README.md THIRD_PARTY_NOTICES.md dist/chroma-engine/
+          cp third_party/rusty_aac/LICENSE dist/chroma-engine/rusty-aac-LICENSE
       - name: Bundle macOS runtime
         if: runner.os == 'macOS'
         shell: bash
@@ -280,8 +294,8 @@ jobs:
           key: arm64-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
       - name: Check portable build
         run: cargo check --locked --all-targets --all-features
-      - name: Test portable CPU codec
-        run: cargo test --locked --all-features cpu_h264
+      - name: Test complete portable suite
+        run: cargo test --locked --all-features
       - name: Install cargo-auditable
         run: cargo install cargo-auditable --locked --version 0.7.5
       - name: Build auditable Linux ARM64 release binary
@@ -299,6 +313,7 @@ jobs:
         run: |
           mkdir -p dist/chroma-engine
           cp README.md THIRD_PARTY_NOTICES.md dist/chroma-engine/
+          cp third_party/rusty_aac/LICENSE dist/chroma-engine/rusty-aac-LICENSE
       - name: Bundle Linux ARM64 runtime
         if: runner.os == 'Linux'
         shell: bash
@@ -358,4 +373,29 @@ jobs:
           name: chroma-engine-${{ runner.os }}-${{ runner.arch }}
           path: |
             dist/chroma-engine-${{ runner.os }}-${{ runner.arch }}.*
+          if-no-files-found: error
+
+  linux-nas-baseline:
+    name: NAS glibc 2.36 bundle / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Build and execute in Debian 12 without graphics devices
+        run: docker build --target baseline-test -f packaging/Dockerfile.linux -t chroma-nas-baseline .
+      - name: Exercise actual worker under the small-NAS memory ceiling
+        run: |
+          docker run --rm --memory=512m --cpus=2 --network=none -e CHROMA_RESOURCE_POLICY=small-nas chroma-nas-baseline /runtime/chroma-engine transcode-fmp4-segments /fixture.mkv /tmp/segments --start-index 0 --count 2 --video-mode copy
+      - name: Export baseline-specific bundle
+        run: docker build --output type=local,dest=dist/nas-glibc236 -f packaging/Dockerfile.linux .
+      - name: Upload baseline bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: chroma-engine-Linux-${{ runner.arch }}-glibc236
+          path: dist/nas-glibc236/
           if-no-files-found: error

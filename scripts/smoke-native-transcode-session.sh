@@ -3,8 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENGINE="${ROOT}/target/release/chroma-engine"
-DEFAULT_MEDIA="/Volumes/TVShows/Is It Wrong to Try to Pick Up Girls in a Dungeon!/Season 5/Is.It.Wrong.to.Try.to.Pick.Up.Girls.in.a.Dungeon.S05E10.720p.HEVC.x265-MeGusta.mkv"
-MEDIA_FILE="${1:-${DEFAULT_MEDIA}}"
+MEDIA_FILE="${1:?Usage: smoke-native-transcode-session.sh MEDIA_FILE}"
 
 cargo build --manifest-path "${ROOT}/Cargo.toml" --release >/dev/null
 if [[ ! -f "${MEDIA_FILE}" ]]; then

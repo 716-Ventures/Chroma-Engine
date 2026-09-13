@@ -1,10 +1,36 @@
 use std::{
     fs::{self, OpenOptions},
-    io::{self, Write},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
     process,
     time::{SystemTime, UNIX_EPOCH},
 };
+
+/// Checks the cache filesystem's required no-replace hard-link operation.
+/// Run once when the host selects a cache directory, before expensive work.
+/// The probe creates and removes only files in its own temporary directory.
+pub fn validate_cache_directory(directory: &Path) -> io::Result<()> {
+    fs::create_dir_all(directory)?;
+    let probe = tempfile::Builder::new()
+        .prefix(".chroma-cache-check-")
+        .tempdir_in(directory)?;
+    let original = probe.path().join("original");
+    let published = probe.path().join("published");
+    fs::write(&original, b"chroma-cache-probe")?;
+    fs::hard_link(&original, &published).map_err(|error| {
+        io::Error::new(error.kind(), format!("cache {} does not support required atomic hard-link publication: {error}; select a compatible local cache filesystem", directory.display()))
+    })?;
+    match fs::hard_link(&original, &published) {
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error),
+        Ok(()) => {
+            return Err(io::Error::other(
+                "cache filesystem did not enforce no-replace publication",
+            ));
+        }
+    }
+    probe.close()
+}
 
 /// Options controlling atomic publication of generated engine outputs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,71 +93,88 @@ pub(crate) fn publish_bytes_with_options(
     bytes: &[u8],
     options: PublishOptions,
 ) -> io::Result<()> {
-    if options.allow_existing_identical && existing_file_matches(path, bytes)? {
+    publish_parts_with_options(path, &[bytes], options)
+}
+
+pub(crate) fn publish_parts(path: &Path, parts: &[&[u8]]) -> io::Result<()> {
+    publish_parts_with_options(path, parts, PublishOptions::default())
+}
+
+fn publish_parts_with_options(
+    path: &Path,
+    parts: &[&[u8]],
+    options: PublishOptions,
+) -> io::Result<()> {
+    if options.allow_existing_identical && existing_file_matches_parts(path, parts)? {
         return Ok(());
     }
-
     if path.exists() {
         return Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
-            format!(
-                "output already exists with different content: {}",
-                path.display()
-            ),
+            "output already exists with different content",
         ));
     }
-
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
-    let (mut file, tmp_path) = create_unique_temp(parent, path)?;
-    let publish_result = (|| {
-        file.write_all(bytes)?;
+    let (mut file, temporary) = create_unique_temp(parent, path)?;
+    let result = (|| {
+        for part in parts {
+            file.write_all(part)?;
+        }
         file.flush()?;
         if options.sync_data {
             file.sync_data()?;
         }
         drop(file);
-        publish_temp_without_replacement(&tmp_path, path, bytes)
+        match fs::hard_link(&temporary, path) {
+            Ok(()) => {}
+            Err(error)
+                if error.kind() == io::ErrorKind::AlreadyExists
+                    && options.allow_existing_identical
+                    && existing_file_matches_parts(path, parts)? => {}
+            Err(error) => return Err(error),
+        }
+        fs::remove_file(&temporary)
     })();
-
-    if publish_result.is_err() {
-        let _ = fs::remove_file(&tmp_path);
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
     }
-    publish_result
+    result
 }
 
-fn publish_temp_without_replacement(tmp_path: &Path, path: &Path, bytes: &[u8]) -> io::Result<()> {
-    match fs::hard_link(tmp_path, path) {
-        Ok(()) => {
-            fs::remove_file(tmp_path)?;
-            Ok(())
-        }
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-            if existing_file_matches(path, bytes)? {
-                fs::remove_file(tmp_path)?;
-                Ok(())
-            } else {
-                Err(io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    format!(
-                        "output was concurrently published with different content: {}",
-                        path.display()
-                    ),
-                ))
-            }
-        }
-        Err(error) => Err(error),
-    }
-}
-
+#[cfg(test)]
 fn existing_file_matches(path: &Path, bytes: &[u8]) -> io::Result<bool> {
-    let Ok(metadata) = fs::metadata(path) else {
-        return Ok(false);
+    existing_file_matches_parts(path, &[bytes])
+}
+
+fn existing_file_matches_parts(path: &Path, parts: &[&[u8]]) -> io::Result<bool> {
+    let mut file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
     };
-    if !metadata.is_file() || metadata.len() != bytes.len() as u64 {
+    let metadata = file.metadata()?;
+    if !metadata.is_file()
+        || metadata.len()
+            != parts.iter().try_fold(0u64, |sum, part| {
+                sum.checked_add(part.len() as u64)
+                    .ok_or_else(|| io::Error::other("output size overflow"))
+            })?
+    {
         return Ok(false);
     }
-    Ok(fs::read(path)? == bytes)
+    let mut buffer = [0_u8; 16 * 1024];
+    for chunk in parts.iter().flat_map(|part| part.chunks(16 * 1024)) {
+        match file.read_exact(&mut buffer[..chunk.len()]) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(false),
+            Err(error) => return Err(error),
+        }
+        if &buffer[..chunk.len()] != chunk {
+            return Ok(false);
+        }
+    }
+    Ok(file.read(&mut buffer[..1])? == 0)
 }
 
 fn create_unique_temp(parent: &Path, target: &Path) -> io::Result<(fs::File, PathBuf)> {
@@ -167,6 +210,13 @@ fn create_unique_temp(parent: &Path, target: &Path) -> io::Result<(fs::File, Pat
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cache_capability_probe_cleans_up_its_files() {
+        let dir = tempfile::tempdir().unwrap();
+        validate_cache_directory(dir.path()).unwrap();
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
 
     #[test]
     fn publishes_complete_bytes_and_leaves_no_temp_file() {
@@ -255,4 +305,14 @@ mod tests {
         worker.join().expect("publisher thread").expect("publish");
         assert_eq!(fs::read(&*output).expect("read output"), b"prefix-suffix");
     }
+}
+#[test]
+fn comparison_checks_every_bounded_chunk_and_the_tail() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("segment.m4s");
+    let mut bytes = vec![7; 32 * 1024 + 3];
+    fs::write(&path, &bytes).unwrap();
+    assert!(existing_file_matches(&path, &bytes).unwrap());
+    bytes[32 * 1024 + 2] = 8;
+    assert!(!existing_file_matches(&path, &bytes).unwrap());
 }

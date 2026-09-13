@@ -233,6 +233,7 @@ impl CpuEac3EncoderSession {
 
 /// Portable, retained AAC-LC encoder facade backed by safe scalar Rust code.
 pub struct CpuAacEncoderSession {
+    encoder: rusty_aac::encode::stream::StreamingAacEncoder,
     format: PcmAudioFormat,
     bitrate: u32,
     encoded_batches: u64,
@@ -256,6 +257,12 @@ impl CpuAacEncoderSession {
     pub fn new(format: PcmAudioFormat, bitrate: u32) -> Result<Self, AudioEncodeError> {
         validate_cpu_aac_config(format, bitrate)?;
         Ok(Self {
+            encoder: rusty_aac::encode::stream::StreamingAacEncoder::new(
+                format.channels as u16,
+                format.sample_rate,
+                aac_lc_encode_bitrate(format, bitrate),
+            )
+            .map_err(cpu_aac_error)?,
             format,
             bitrate,
             encoded_batches: 0,
@@ -278,6 +285,22 @@ impl CpuAacEncoderSession {
     pub fn encoded_batches(&self) -> u64 {
         self.encoded_batches
     }
+
+    /// Flushes residual PCM and MDCT overlap once, at actual end of stream.
+    pub fn finish(&mut self) -> Result<EncodedAudioOutput, AudioEncodeError> {
+        let packets = self.encoder.finish().map_err(cpu_aac_error)?;
+        cpu_aac_output(self, packets)
+    }
+
+    /// Codec priming in samples per channel; not part of valid source PCM.
+    pub fn delay_samples(&self) -> u32 {
+        self.encoder.delay_samples()
+    }
+
+    /// Number of valid input PCM samples per channel.
+    pub fn valid_samples(&self) -> u64 {
+        self.encoder.valid_samples()
+    }
 }
 
 /// Preferred AAC-LC encoder for the current host.
@@ -286,7 +309,7 @@ pub enum AacEncoderSession {
     /// macOS AudioToolbox implementation.
     AudioToolbox(AudioToolboxAacEncoderSession),
     /// Portable safe-Rust implementation.
-    Cpu(CpuAacEncoderSession),
+    Cpu(Box<CpuAacEncoderSession>),
 }
 
 impl AacEncoderSession {
@@ -296,7 +319,7 @@ impl AacEncoderSession {
         if let Ok(session) = AudioToolboxAacEncoderSession::new(format, bitrate) {
             return Ok(Self::AudioToolbox(session));
         }
-        CpuAacEncoderSession::new(format, bitrate).map(Self::Cpu)
+        CpuAacEncoderSession::new(format, bitrate).map(|session| Self::Cpu(Box::new(session)))
     }
 
     /// Encodes one interleaved signed 16-bit PCM batch.
@@ -404,7 +427,12 @@ pub fn encode_aac_from_interleaved_i16(
     pcm: &[i16],
     bitrate: u32,
 ) -> Result<EncodedAudioOutput, AudioEncodeError> {
-    AacEncoderSession::new(format, bitrate)?.encode(pcm)
+    let mut session = AacEncoderSession::new(format, bitrate)?;
+    let mut output = session.encode(pcm)?;
+    if let AacEncoderSession::Cpu(encoder) = &mut session {
+        output.frames.extend(encoder.finish()?.frames);
+    }
+    Ok(output)
 }
 
 /// Encodes interleaved signed 16-bit PCM with the portable CPU AAC-LC backend.
@@ -413,7 +441,10 @@ pub fn encode_aac_cpu_from_interleaved_i16(
     pcm: &[i16],
     bitrate: u32,
 ) -> Result<EncodedAudioOutput, AudioEncodeError> {
-    CpuAacEncoderSession::new(format, bitrate)?.encode(pcm)
+    let mut encoder = CpuAacEncoderSession::new(format, bitrate)?;
+    let mut output = encoder.encode(pcm)?;
+    output.frames.extend(encoder.finish()?.frames);
+    Ok(output)
 }
 
 /// Encodes interleaved signed 16-bit PCM with the portable AC-3 backend.
@@ -473,44 +504,23 @@ fn encode_cpu_aac_batch(
     retained: &mut CpuAacEncoderSession,
     pcm: &[i16],
 ) -> Result<EncodedAudioOutput, AudioEncodeError> {
-    use rusty_aac::{AacEncoder, AacEncoderConfig, Error as AacError};
-
-    let format = retained.format;
-    let channels =
-        u16::try_from(format.channels).map_err(|_| AudioEncodeError::UnsupportedAacConfig {
-            reason: format!("unsupported AAC-LC channel count {}", format.channels),
-        })?;
     let samples = pcm
         .iter()
         .map(|sample| f32::from(*sample) / 32_768.0)
         .collect::<Vec<_>>();
-    let mut encoder = AacEncoder::new(AacEncoderConfig {
-        bitrate_bps: aac_lc_encode_bitrate(format, retained.bitrate),
-        ..AacEncoderConfig::default()
-    });
-    encoder
-        .push_pcm(&samples, channels, format.sample_rate)
-        .map_err(cpu_aac_error)?;
-    encoder.finish();
+    let packets = retained.encoder.push_pcm(&samples).map_err(cpu_aac_error)?;
+    cpu_aac_output(retained, packets)
+}
 
-    let mut frames = Vec::new();
-    loop {
-        match encoder.next_packet() {
-            Ok(packet) => frames.push(frame_from_payload(
-                &mut retained.clock,
-                packet.data,
-                packet.duration,
-            )),
-            Err(AacError::Eof) => break,
-            Err(error) => return Err(cpu_aac_error(error)),
-        }
-    }
-    if frames.is_empty() {
-        return Err(AudioEncodeError::BackendFailed {
-            reason: "portable AAC encoder returned no access units".to_string(),
-        });
-    }
-
+fn cpu_aac_output(
+    retained: &mut CpuAacEncoderSession,
+    packets: Vec<rusty_aac::encode::EncodedPacket>,
+) -> Result<EncodedAudioOutput, AudioEncodeError> {
+    let format = retained.format;
+    let frames = packets
+        .into_iter()
+        .map(|packet| frame_from_payload(&mut retained.clock, packet.data, packet.duration))
+        .collect();
     Ok(EncodedAudioOutput {
         stream: EncodedAudioStream {
             codec: AudioCodec::Aac,
@@ -931,7 +941,7 @@ mod tests {
             sample_rate: 48_000,
             channels: 1,
         };
-        let pcm = sine_pcm(format, 1024);
+        let pcm = sine_pcm(format, 4096);
         let mut session = CpuAacEncoderSession::new(format, 96_000).expect("CPU AAC session");
 
         let first = session.encode(&pcm).expect("first batch");
@@ -961,6 +971,46 @@ mod tests {
                 .start_sample,
             first_end
         );
+    }
+
+    #[test]
+    fn streaming_aac_is_identical_across_non_frame_aligned_pushes() {
+        for sample_rate in [44_100, 48_000] {
+            for channels in [2, 6] {
+                let format = PcmAudioFormat {
+                    sample_rate,
+                    channels,
+                };
+                let pcm = sine_pcm(format, 8193);
+                let mut reference = CpuAacEncoderSession::new(format, 320_000).unwrap();
+                let mut expected = reference.encode(&pcm).unwrap().frames;
+                expected.extend(reference.finish().unwrap().frames);
+                let mut segmented = CpuAacEncoderSession::new(format, 320_000).unwrap();
+                let mut actual = Vec::new();
+                for chunk in pcm.chunks(137 * channels as usize) {
+                    actual.extend(segmented.encode(chunk).unwrap().frames);
+                }
+                actual.extend(segmented.finish().unwrap().frames);
+                assert!(segmented.finish().unwrap().frames.is_empty());
+                assert_eq!(segmented.valid_samples(), 8193);
+                assert_eq!(segmented.delay_samples(), 1024);
+                assert_eq!(actual.len(), 8193_usize.div_ceil(1024) + 1);
+                assert_eq!(actual, expected);
+                let mut decoder = rusty_aac::AacDecoder::with_config_bytes(
+                    &aac_lc_audio_specific_config(format).unwrap(),
+                )
+                .unwrap();
+                for frame in actual {
+                    assert!(
+                        !decoder
+                            .decode(&frame.payload, None)
+                            .unwrap()
+                            .samples
+                            .is_empty()
+                    );
+                }
+            }
+        }
     }
 
     #[test]

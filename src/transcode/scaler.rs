@@ -1,3 +1,4 @@
+#[cfg(test)]
 use std::borrow::Cow;
 
 use anyhow::{Result, bail};
@@ -6,6 +7,101 @@ use super::video_encode::RawVideoFormat;
 
 const H264_WEB_MAX_WIDTH: u32 = 1_920;
 const H264_WEB_MAX_HEIGHT: u32 = 1_080;
+
+/// Retained coordinate tables; output storage belongs to the pipeline's pool.
+#[derive(Debug)]
+pub(super) struct BgraScaler {
+    source: (u32, u32),
+    destination: (u32, u32),
+    horizontal: Vec<(usize, usize, f64)>,
+    vertical: Vec<(usize, usize, f64)>,
+}
+
+impl BgraScaler {
+    pub(super) fn new(source: RawVideoFormat, destination: RawVideoFormat) -> Result<Self> {
+        if [
+            source.width,
+            source.height,
+            destination.width,
+            destination.height,
+        ]
+        .contains(&0)
+        {
+            bail!("scaler dimensions must be positive");
+        }
+        fn coordinates(source: u32, destination: u32) -> Result<Vec<(usize, usize, f64)>> {
+            let mut out = Vec::new();
+            out.try_reserve_exact(destination as usize)?;
+            for position in 0..destination {
+                let coordinate = ((f64::from(position) + 0.5) * f64::from(source)
+                    / f64::from(destination)
+                    - 0.5)
+                    .clamp(0.0, f64::from(source - 1));
+                let first = coordinate.floor() as usize;
+                out.push((
+                    first,
+                    (first + 1).min(source as usize - 1),
+                    coordinate - first as f64,
+                ));
+            }
+            Ok(out)
+        }
+        Ok(Self {
+            source: (source.width, source.height),
+            destination: (destination.width, destination.height),
+            horizontal: coordinates(source.width, destination.width)?,
+            vertical: coordinates(source.height, destination.height)?,
+        })
+    }
+
+    pub(super) fn scale_into(&self, source: &[u8], out: &mut Vec<u8>) -> Result<()> {
+        let stride = (self.source.0 as usize)
+            .checked_mul(4)
+            .ok_or_else(|| anyhow::anyhow!("scaler stride overflow"))?;
+        if stride.checked_mul(self.source.1 as usize) != Some(source.len()) {
+            bail!("scaler source size mismatch");
+        }
+        let destination_stride = (self.destination.0 as usize)
+            .checked_mul(4)
+            .ok_or_else(|| anyhow::anyhow!("scaler destination stride overflow"))?;
+        let length = destination_stride
+            .checked_mul(self.destination.1 as usize)
+            .ok_or_else(|| anyhow::anyhow!("scaler destination size overflow"))?;
+        out.try_reserve_exact(length.saturating_sub(out.len()))?;
+        out.resize(length, 0);
+        if self.source == self.destination {
+            out.copy_from_slice(source);
+            return Ok(());
+        }
+        let half = self.source.0 == self.destination.0.saturating_mul(2)
+            && self.source.1 == self.destination.1.saturating_mul(2);
+        for (y, &(y0, y1, yw)) in self.vertical.iter().enumerate() {
+            for (x, &(x0, x1, xw)) in self.horizontal.iter().enumerate() {
+                for channel in 0..4 {
+                    let destination = y * destination_stride + x * 4 + channel;
+                    if half {
+                        let offset = y * 2 * stride + x * 8 + channel;
+                        let sum = u16::from(source[offset])
+                            + u16::from(source[offset + 4])
+                            + u16::from(source[offset + stride])
+                            + u16::from(source[offset + stride + 4]);
+                        out[destination] = ((sum + 2) / 4) as u8;
+                    } else {
+                        let tl = f64::from(source[y0 * stride + x0 * 4 + channel]);
+                        let tr = f64::from(source[y0 * stride + x1 * 4 + channel]);
+                        let bl = f64::from(source[y1 * stride + x0 * 4 + channel]);
+                        let br = f64::from(source[y1 * stride + x1 * 4 + channel]);
+                        let top = tl + (tr - tl) * xw;
+                        let bottom = bl + (br - bl) * xw;
+                        out[destination] =
+                            (top + (bottom - top) * yw).round().clamp(0.0, 255.0) as u8;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
 
 pub(super) fn constrained_h264_format(source: RawVideoFormat) -> RawVideoFormat {
     let width_scale = H264_WEB_MAX_WIDTH as f64 / source.width.max(1) as f64;
@@ -26,6 +122,32 @@ fn even_dimension(value: u32) -> u32 {
     if value <= 2 { 2 } else { value & !1 }
 }
 
+#[cfg(test)]
+#[test]
+fn pooled_scaler_matches_reference_and_reuses_capacity() {
+    for (sw, sh, dw, dh) in [(16, 12, 8, 6), (17, 13, 10, 8), (8, 6, 14, 10)] {
+        let pixels = (0..sw * sh * 4).map(|i| (i * 31) as u8).collect::<Vec<_>>();
+        let format = |width, height| RawVideoFormat {
+            width,
+            height,
+            frame_rate_num: 24,
+            frame_rate_den: 1,
+            pixel_format: super::video_encode::RawVideoPixelFormat::Bgra,
+        };
+        let scaler = BgraScaler::new(format(sw, sh), format(dw, dh)).unwrap();
+        let mut output = Vec::new();
+        scaler.scale_into(&pixels, &mut output).unwrap();
+        assert_eq!(
+            output,
+            scale_bgra(&pixels, sw, sh, dw, dh).unwrap().as_ref()
+        );
+        let pointer = output.as_ptr();
+        scaler.scale_into(&pixels, &mut output).unwrap();
+        assert_eq!(pointer, output.as_ptr());
+    }
+}
+
+#[cfg(test)]
 pub(super) fn scale_bgra<'a>(
     src: &'a [u8],
     src_width: u32,
@@ -87,6 +209,7 @@ pub(super) fn scale_bgra<'a>(
     Ok(Cow::Owned(out))
 }
 
+#[cfg(test)]
 fn scale_bgra_half(
     src: &[u8],
     src_width: u32,

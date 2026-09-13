@@ -164,61 +164,77 @@ pub fn plan_hls_transcode(
         "bounded native container probe and packet scheduling",
     ));
 
-    let output_video = video.map(|track| {
-        let can_copy =
-            !request.force_video_transcode && video_can_copy_for_hls(track, request.target);
-        if can_copy {
-            stages.push(copy_stage(
-                "video-copy0",
-                TranscodeStageKind::VideoCopy,
-                vec![track.id.clone()],
-                "target can consume the compressed video packets without decode",
-            ));
-            reasons.push(format!("video {} stays on packet-copy path", track.id));
-            TranscodeOutputVideo {
-                codec: video_codec_for_family(track.codec.family).unwrap_or(VideoCodec::H264),
-                packet_copy: true,
-                bitrate_bps: video_bitrate_bps(track, true),
-                width: track.video.as_ref().and_then(|video| video.width),
-                height: track.video.as_ref().and_then(|video| video.height),
-            }
-        } else {
-            if native_video_decode_ready(track.codec.family) {
-                stages.push(ready_stage(
-                    "video-decode0",
-                    TranscodeStageKind::VideoDecode,
+    let output_video =
+        video.map(|track| {
+            let can_copy =
+                !request.force_video_transcode && video_can_copy_for_hls(track, request.target);
+            if can_copy {
+                stages.push(copy_stage(
+                    "video-copy0",
+                    TranscodeStageKind::VideoCopy,
                     vec![track.id.clone()],
-                    native_video_decode_reason(track.codec.family),
+                    "target can consume the compressed video packets without decode",
                 ));
+                reasons.push(format!("video {} stays on packet-copy path", track.id));
+                TranscodeOutputVideo {
+                    codec: video_codec_for_family(track.codec.family).unwrap_or(VideoCodec::H264),
+                    packet_copy: true,
+                    bitrate_bps: video_bitrate_bps(track, true),
+                    width: track.video.as_ref().and_then(|video| video.width),
+                    height: track.video.as_ref().and_then(|video| video.height),
+                }
             } else {
-                let missing = format!("videoDecode:{}", capability_label(track.codec.family));
-                stages.push(missing_stage(
-                    "video-decode0",
-                    TranscodeStageKind::VideoDecode,
-                    vec![track.id.clone()],
-                    "compressed source video must decode before target-native HLS encode",
-                    missing,
+                if track.video.as_ref().is_some_and(|video| {
+                    matches!(
+                        video.dynamic_range,
+                        crate::probe::DynamicRange::Hdr10
+                            | crate::probe::DynamicRange::Hdr10Plus
+                            | crate::probe::DynamicRange::Hlg
+                            | crate::probe::DynamicRange::DolbyVision
+                    )
+                }) {
+                    stages.push(missing_stage(
+                    "tone-map0", TranscodeStageKind::VideoEncode, vec![track.id.clone()],
+                    "HDR-to-SDR requires verified tone mapping; use compatible compressed HDR copy",
+                    "videoToneMap:hdrToSdr".into(),
                 ));
+                }
+                if native_video_decode_ready(track.codec.family) {
+                    stages.push(ready_stage(
+                        "video-decode0",
+                        TranscodeStageKind::VideoDecode,
+                        vec![track.id.clone()],
+                        native_video_decode_reason(track.codec.family),
+                    ));
+                } else {
+                    let missing = format!("videoDecode:{}", capability_label(track.codec.family));
+                    stages.push(missing_stage(
+                        "video-decode0",
+                        TranscodeStageKind::VideoDecode,
+                        vec![track.id.clone()],
+                        "compressed source video must decode before target-native HLS encode",
+                        missing,
+                    ));
+                }
+                stages.push(ready_stage(
+                    "video-encode0",
+                    TranscodeStageKind::VideoEncode,
+                    vec![track.id.clone()],
+                    "preferred native H.264 encode with portable OpenH264 fallback",
+                ));
+                reasons.push(format!(
+                    "video {} is planned for native H.264 encode",
+                    track.id
+                ));
+                TranscodeOutputVideo {
+                    codec: VideoCodec::H264,
+                    packet_copy: false,
+                    bitrate_bps: video_bitrate_bps(track, false),
+                    width: track.video.as_ref().and_then(|video| video.width),
+                    height: track.video.as_ref().and_then(|video| video.height),
+                }
             }
-            stages.push(ready_stage(
-                "video-encode0",
-                TranscodeStageKind::VideoEncode,
-                vec![track.id.clone()],
-                "preferred native H.264 encode with portable OpenH264 fallback",
-            ));
-            reasons.push(format!(
-                "video {} is planned for native H.264 encode",
-                track.id
-            ));
-            TranscodeOutputVideo {
-                codec: VideoCodec::H264,
-                packet_copy: false,
-                bitrate_bps: video_bitrate_bps(track, false),
-                width: track.video.as_ref().and_then(|video| video.width),
-                height: track.video.as_ref().and_then(|video| video.height),
-            }
-        }
-    });
+        });
 
     let output_audio = audio.map(|track| {
         let can_copy = audio_can_copy_for_hls(track, request.target);
@@ -615,6 +631,26 @@ mod tests {
         assert!(plan.missing_capabilities.is_empty());
         assert!(plan.output.video.as_ref().unwrap().packet_copy);
         assert!(plan.output.audio.as_ref().unwrap().packet_copy);
+    }
+
+    #[test]
+    fn hdr_transcode_is_not_advertised_without_tone_mapping() {
+        let mut video = video_track("v0", CodecFamily::Hevc, 3840, 2160, 20_000_000, None);
+        video.video.as_mut().unwrap().dynamic_range = crate::probe::DynamicRange::Hdr10;
+        let probe = probe_with_tracks(vec![
+            video,
+            audio_track("a0", CodecFamily::Aac, true, 2, 48_000, Some(192_000)),
+        ]);
+        let transcode = plan_hls_transcode(&probe, request(PlaybackTarget::Browser, true, None));
+        assert!(!transcode.engine_executable);
+        assert!(
+            transcode
+                .missing_capabilities
+                .iter()
+                .any(|capability| capability == "videoToneMap:hdrToSdr")
+        );
+        let copy = plan_hls_transcode(&probe, request(PlaybackTarget::AppleNative, false, None));
+        assert!(copy.output.video.unwrap().packet_copy);
     }
 
     #[test]

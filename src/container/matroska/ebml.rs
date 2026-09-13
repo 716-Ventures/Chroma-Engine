@@ -3,6 +3,8 @@ pub(super) struct Element<'a> {
     pub(super) id: u32,
     pub(super) payload: &'a [u8],
     pub(super) payload_offset: usize,
+    #[cfg(test)]
+    pub(super) offset: usize,
 }
 
 pub(super) struct ElementIter<'a> {
@@ -23,6 +25,8 @@ impl<'a> Iterator for ElementIter<'a> {
         if self.offset >= self.bytes.len() {
             return None;
         }
+        #[cfg(test)]
+        let offset = self.offset;
         let (id, id_len) = read_vint_id(&self.bytes[self.offset..])?;
         let size_offset = self.offset + id_len;
         let (size, size_len) = read_vint_size(&self.bytes[size_offset..])?;
@@ -37,6 +41,8 @@ impl<'a> Iterator for ElementIter<'a> {
             id,
             payload: &self.bytes[payload_start..payload_end],
             payload_offset: payload_start,
+            #[cfg(test)]
+            offset,
         })
     }
 }

@@ -132,6 +132,53 @@ pub fn build_mp4_playback_manifest(
 }
 
 /// Builds a native playback manifest for a Matroska/WebM source.
+pub(crate) fn build_file_matroska_manifest(
+    source: &crate::source::MediaSource,
+    source_path: &Path,
+    options: MatroskaManifestOptions,
+) -> anyhow::Result<NativePlaybackManifest> {
+    let metadata = parse_matroska_basic_metadata(source.as_ref());
+    let mut tracks = Vec::new();
+    let mut video_index = 0;
+    let mut audio_index = 0;
+    for track in &metadata.tracks {
+        let id = match track.kind {
+            MatroskaTrackKind::Video => next_semantic_track_id("v", &mut video_index),
+            MatroskaTrackKind::Audio => next_semantic_track_id("a", &mut audio_index),
+            _ => continue,
+        };
+        if track.kind == MatroskaTrackKind::Audio && !options.include_audio {
+            continue;
+        }
+        let private = track.codec_private.as_deref();
+        tracks.push(ManifestTrack {
+            id: id.clone(),
+            kind: matroska_track_kind_name(track.kind).into(),
+            codec: track.codec.clone(),
+            codec_string: matroska_codec_string(track, private),
+            language: track.language.clone(),
+            title: track.name.clone(),
+            channels: track.channels,
+            sample_rate: track.sample_rate,
+            default: track.default,
+            forced: track.forced,
+            config_box: matroska_config_box(track, private).map(str::to_string),
+            decoder_config_hex: private.map(hex_string),
+            chunks: source
+                .chunk_plan(Some(&id), options.chunk_target_ms)?
+                .chunks,
+        });
+    }
+    Ok(NativePlaybackManifest {
+        schema_version: 2,
+        source_path: source_path.display().to_string(),
+        duration_ms: metadata.duration_ms,
+        chunk_target_ms: options.chunk_target_ms,
+        tracks,
+    })
+}
+
+/// Builds a native playback manifest from an owned Matroska/WebM byte slice.
 pub fn build_matroska_playback_manifest(
     bytes: &[u8],
     source_path: &Path,

@@ -15,8 +15,8 @@ use crate::{
     },
     error::{EngineError, EngineErrorCode, RetryAdvice},
     packet::{
-        ChunkPlan, ExtractedChunk, PacketExtractError, PacketRef, extract_packet_payload,
-        packet_samples_for_range, plan_track_chunks,
+        ChunkPlan, ExtractedChunk, PacketExtractError, PacketRef, packet_samples_for_range,
+        plan_track_chunks,
     },
     source::MediaSource,
     transcode::{NativeFmp4TranscodeOptions, NativeFmp4TranscodeSession},
@@ -138,12 +138,26 @@ impl PlaybackSession {
     /// fails, the container cannot be packet-indexed, no requested track exists,
     /// or `options.target_ms` is zero.
     pub fn open(input: &Path, options: PlaybackSessionOptions) -> Result<Self, EngineSessionError> {
+        Self::open_with_runtime(
+            input,
+            options,
+            crate::WorkControl::default(),
+            crate::EngineRuntime::global().map_err(EngineSessionError::from_source)?,
+        )
+    }
+
+    /// Opens a packet-copy session in a shared admission pool with cancellation.
+    pub fn open_with_runtime(
+        input: &Path,
+        options: PlaybackSessionOptions,
+        control: crate::WorkControl,
+        runtime: std::sync::Arc<crate::EngineRuntime>,
+    ) -> Result<Self, EngineSessionError> {
         if options.target_ms == 0 {
             return Err(EngineSessionError::InvalidTargetDuration);
         }
-        let source = MediaSource::open(input).map_err(|error| EngineSessionError::Source {
-            reason: error.to_string(),
-        })?;
+        let source = MediaSource::open_with_context(input, runtime, control)
+            .map_err(EngineSessionError::from_source)?;
         let stats = PlaybackSessionCounters::opened_packet_copy();
         let container = sniff_container(source.as_ref());
         let (track_id, packets) = match container {
@@ -155,9 +169,18 @@ impl PlaybackSession {
                 (track_id, packets)
             }
             ContainerKind::Matroska | ContainerKind::Webm => {
-                let MatroskaPacketTrack { id, packets } =
-                    matroska::parse_packet_track(source.as_ref(), options.track_id.as_deref())
-                        .ok_or(EngineSessionError::NoTrack)?;
+                let index = matroska::MatroskaFileIndex::open(&source).map_err(|error| {
+                    EngineSessionError::Source {
+                        reason: error.to_string(),
+                    }
+                })?;
+                let id = options.track_id.as_deref().unwrap_or("v0");
+                let MatroskaPacketTrack { id, packets } = index
+                    .packets(&source, &[id], 0, u64::MAX)
+                    .map_err(|error| EngineSessionError::Source {
+                        reason: error.to_string(),
+                    })?
+                    .remove(0);
                 (id, packets)
             }
             ContainerKind::Unknown => return Err(EngineSessionError::UnsupportedContainer),
@@ -212,8 +235,16 @@ impl PlaybackSession {
             .find(|chunk| chunk.index == index)
             .cloned()
             .ok_or(EngineSessionError::NoChunk { index })?;
+        let packets = self
+            .packets
+            .get(chunk.packet_range.start as usize..chunk.packet_range.end as usize)
+            .ok_or(PacketExtractError::RangeOutOfBounds)?;
         let payload =
-            extract_packet_payload(self.source.as_ref(), &self.packets, chunk.packet_range)?;
+            self.source
+                .read_packets(packets)
+                .map_err(|error| EngineSessionError::Source {
+                    reason: error.to_string(),
+                })?;
         let samples = packet_samples_for_range(&self.packets, chunk.packet_range)?;
         let packet_count = chunk
             .packet_range
@@ -263,6 +294,9 @@ impl PlaybackSessionCounters {
 /// Error returned by stateful engine session operations.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum EngineSessionError {
+    /// Configured capacity was exhausted or the request exceeded its budget.
+    #[error(transparent)]
+    Resource(#[from] crate::ResourceError),
     /// Source open/read failed.
     #[error("source failed: {reason}")]
     Source {
@@ -296,9 +330,18 @@ pub enum EngineSessionError {
 }
 
 impl EngineSessionError {
+    fn from_source(error: anyhow::Error) -> Self {
+        if let Some(resource) = error.downcast_ref::<crate::ResourceError>() {
+            return Self::Resource(resource.clone());
+        }
+        Self::Source {
+            reason: error.to_string(),
+        }
+    }
     /// Returns the stable machine-readable error code for this session failure.
     pub fn code(&self) -> EngineErrorCode {
         match self {
+            Self::Resource(_) => EngineErrorCode::ResourceLimitExceeded,
             Self::Source { .. } => EngineErrorCode::SourceOpenFailed,
             Self::SourceChanged { .. } => EngineErrorCode::SourceChanged,
             Self::UnsupportedContainer => EngineErrorCode::UnsupportedContainer,
@@ -312,6 +355,8 @@ impl EngineSessionError {
     /// Converts this typed session failure into the structured engine error envelope.
     pub fn into_engine_error(self, operation: impl Into<String>) -> EngineError {
         let retry = match &self {
+            Self::Resource(crate::ResourceError::Busy) => RetryAdvice::RetryLater,
+            Self::Resource(_) => RetryAdvice::DoNotRetry,
             Self::SourceChanged { .. } => RetryAdvice::RetryAfterRefresh,
             Self::Source { .. } | Self::Packet(_) => RetryAdvice::RetryLater,
             Self::UnsupportedContainer

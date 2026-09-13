@@ -6,7 +6,6 @@ use thiserror::Error;
 use crate::{
     container::{ContainerKind, matroska, mp4, sniff_container},
     error::EngineErrorCode,
-    source::MappedMediaFile,
 };
 
 #[derive(Debug, Error)]
@@ -329,10 +328,22 @@ pub fn probe_media_source(path: &Path) -> Result<MediaProbe, ProbeError> {
         return Err(ProbeError::FileNotFound);
     }
 
-    let mapped =
-        MappedMediaFile::open(path).map_err(|err| ProbeError::MapFailed(err.to_string()))?;
-    let size_bytes = mapped.len();
-    let bytes = mapped.as_ref();
+    let (size_bytes, bytes) = crate::source::probe_reader::read_metadata(path)
+        .map_err(|err| ProbeError::ReadFailed(err.to_string()))?;
+    Ok(probe_metadata(path, size_bytes, &bytes))
+}
+
+/// Probes under a caller-shared resource pool and cooperative work deadline.
+pub fn probe_media_source_with_runtime(
+    path: &Path,
+    runtime: std::sync::Arc<crate::EngineRuntime>,
+    control: crate::WorkControl,
+) -> anyhow::Result<MediaProbe> {
+    let source = crate::source::MediaSource::open_with_context(path, runtime, control)?;
+    Ok(probe_metadata(path, source.len(), source.as_ref()))
+}
+
+fn probe_metadata(path: &Path, size_bytes: u64, bytes: &[u8]) -> MediaProbe {
     let container = sniff_container(&bytes[..bytes.len().min(4096)]);
 
     let mut duration_ms = None;
@@ -341,24 +352,20 @@ pub fn probe_media_source(path: &Path) -> Result<MediaProbe, ProbeError> {
     let mut attachment_count = 0;
 
     if matches!(container, ContainerKind::Mp4 | ContainerKind::Mov) {
-        let meta = mp4::parse_basic_metadata(mapped.as_ref());
+        let meta = mp4::parse_basic_metadata(bytes);
         duration_ms = meta.duration_ms;
         tracks = tracks_from_mp4(&meta);
         chapters = chapters_from_mp4(&meta.chapters);
     } else if matches!(container, ContainerKind::Matroska | ContainerKind::Webm) {
-        let meta = matroska::parse_basic_metadata(mapped.as_ref());
+        let meta = matroska::parse_basic_metadata(bytes);
         duration_ms = meta.duration_ms;
         attachment_count = meta.attachment_count;
         chapters = chapters_from_matroska(&meta.chapters);
         tracks = tracks_from_matroska(&meta);
     }
 
-    mapped
-        .validate_current()
-        .map_err(|err| ProbeError::ReadFailed(err.to_string()))?;
-
     let capabilities = infer_capabilities(&tracks);
-    Ok(MediaProbe {
+    MediaProbe {
         schema_version: 1,
         engine: ProbeEngine {
             name: "chroma-engine".to_string(),
@@ -376,7 +383,7 @@ pub fn probe_media_source(path: &Path) -> Result<MediaProbe, ProbeError> {
             count: attachment_count,
         },
         capabilities,
-    })
+    }
 }
 
 fn chapters_from_mp4(chapters: &[mp4::Mp4Chapter]) -> Vec<Chapter> {
@@ -480,7 +487,11 @@ fn tracks_from_matroska(meta: &matroska::MatroskaBasicMetadata) -> Vec<MediaTrac
                     height: track.height,
                     frame_rate: frame_rate_from_default_duration(track.default_duration_ns),
                     bitrate_bps: None,
-                    dynamic_range: DynamicRange::Unknown,
+                    dynamic_range: match track.transfer_characteristics {
+                        Some(16) => DynamicRange::Hdr10,
+                        Some(18) => DynamicRange::Hlg,
+                        _ => DynamicRange::Unknown,
+                    },
                     pixel_format: track.pixel_format.clone(),
                     channels: track.channels,
                     sample_rate: track.sample_rate,
@@ -806,6 +817,7 @@ mod tests {
                 width: None,
                 height: None,
                 pixel_format: None,
+                transfer_characteristics: None,
                 channels: Some(6),
                 sample_rate: Some(48_000),
                 atmos: false,

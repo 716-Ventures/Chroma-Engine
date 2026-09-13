@@ -78,34 +78,89 @@ pub fn segment_webvtt(
     segment_ms: u64,
     uri_prefix: &str,
 ) -> Vec<WebVttSegment> {
+    try_segment_webvtt(cues, segment_ms, uri_prefix).unwrap_or_default()
+}
+
+/// Checked subtitle segmentation with cumulative output and work limits.
+/// The compatibility `segment_webvtt` helper returns no segments on rejection;
+/// hosts should use this function to distinguish a budget failure from no cues.
+pub fn try_segment_webvtt(
+    cues: &[TextSubtitleCue],
+    segment_ms: u64,
+    uri_prefix: &str,
+) -> Result<Vec<WebVttSegment>, crate::ResourceError> {
+    segment_webvtt_with_limit(cues, segment_ms, uri_prefix, 32 * 1024 * 1024)
+}
+
+fn segment_webvtt_with_limit(
+    cues: &[TextSubtitleCue],
+    segment_ms: u64,
+    uri_prefix: &str,
+    limit: u64,
+) -> Result<Vec<WebVttSegment>, crate::ResourceError> {
     if segment_ms == 0 {
-        return Vec::new();
+        return Err(crate::ResourceError::InvalidPolicy(
+            "subtitle segment duration must be positive",
+        ));
     }
-
     let max_end = cues.iter().map(|cue| cue.end_ms).max().unwrap_or(0);
-    if max_end == 0 {
-        return Vec::new();
+    let count = max_end.div_ceil(segment_ms);
+    let reject = |resource, requested, limit| crate::ResourceError::Exceeded {
+        resource,
+        requested,
+        limit,
+    };
+    if count > 100_000 {
+        return Err(reject("subtitle segments", count, 100_000));
     }
-
-    let segment_count = max_end.div_ceil(segment_ms);
-    (0..segment_count)
-        .map(|idx| {
-            let start = idx * segment_ms;
-            let end = start + segment_ms;
-            let segment_cues = cues
-                .iter()
-                .filter(|cue| cue.start_ms < end && cue.end_ms > start)
-                .cloned()
-                .collect::<Vec<_>>();
-            WebVttSegment {
-                index: idx as u32,
-                start_ms: start,
-                duration_ms: segment_ms.min(max_end.saturating_sub(start)),
-                uri: segment_uri(uri_prefix, idx),
-                body: render_webvtt(&segment_cues),
-            }
-        })
-        .collect()
+    let mut bytes = count.saturating_mul(uri_prefix.len() as u64 + 128);
+    let mut visits = 0u64;
+    for cue in cues {
+        if cue.end_ms <= cue.start_ms {
+            continue;
+        }
+        let repetitions = (cue.end_ms - 1) / segment_ms - cue.start_ms / segment_ms + 1;
+        visits = visits.saturating_add(repetitions);
+        bytes = bytes.saturating_add(repetitions.saturating_mul(cue.text.len() as u64 + 128));
+    }
+    if visits > 2_000_000 {
+        return Err(reject("subtitle cue expansions", visits, 2_000_000));
+    }
+    if bytes > limit {
+        return Err(reject("subtitle output bytes", bytes, limit));
+    }
+    let mut segments = Vec::new();
+    segments
+        .try_reserve_exact(count as usize)
+        .map_err(|_| reject("subtitle allocation", bytes, 32 * 1024 * 1024))?;
+    for index in 0..count {
+        let start = index.saturating_mul(segment_ms);
+        segments.push(WebVttSegment {
+            index: index as u32,
+            start_ms: start,
+            duration_ms: segment_ms.min(max_end.saturating_sub(start)),
+            uri: segment_uri(uri_prefix, index),
+            body: "WEBVTT\n\n".into(),
+        });
+    }
+    // Distribute each cue only to its intersecting windows, preserving cue order.
+    for cue in cues {
+        if cue.end_ms <= cue.start_ms {
+            continue;
+        }
+        let first = cue.start_ms / segment_ms;
+        let last = (cue.end_ms - 1) / segment_ms;
+        let text = format!(
+            "{} --> {}\n{}\n\n",
+            format_timestamp(cue.start_ms),
+            format_timestamp(cue.end_ms),
+            cue.text.trim()
+        );
+        for segment in &mut segments[first as usize..=last as usize] {
+            segment.body.push_str(&text);
+        }
+    }
+    Ok(segments)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -179,24 +234,55 @@ pub struct NativeTextSubtitleTrack<'a> {
 
 /// Builds WebVTT sidecar playlists and segments for all selected text subtitle tracks.
 pub fn build_webvtt_sidecars(tracks: &[WebVttSidecarInput], segment_ms: u64) -> WebVttSidecarSet {
+    try_build_webvtt_sidecars(tracks, segment_ms)
+        .unwrap_or_else(|_| WebVttSidecarSet { tracks: Vec::new() })
+}
+
+/// Builds subtitle sidecars with explicit resource failures and an aggregate cap.
+pub fn try_build_webvtt_sidecars(
+    tracks: &[WebVttSidecarInput],
+    segment_ms: u64,
+) -> Result<WebVttSidecarSet, crate::ResourceError> {
+    if tracks.len() > 128 {
+        return Err(crate::ResourceError::Exceeded {
+            resource: "subtitle tracks",
+            requested: tracks.len() as u64,
+            limit: 128,
+        });
+    }
+    let mut remaining = 32 * 1024 * 1024usize;
     let tracks = tracks
         .iter()
         .map(|track| {
             let safe_id = safe_path_component(&track.track_id);
-            let segments = segment_webvtt(&track.cues, segment_ms, "");
+            let segments =
+                segment_webvtt_with_limit(&track.cues, segment_ms, "", remaining as u64)?;
+            let size = segments.iter().fold(0usize, |bytes, segment| {
+                bytes
+                    .saturating_add(segment.body.len())
+                    .saturating_add(segment.uri.len())
+                    .saturating_add(128)
+            });
+            remaining = remaining
+                .checked_sub(size)
+                .ok_or(crate::ResourceError::Exceeded {
+                    resource: "subtitle sidecar bytes",
+                    requested: size as u64,
+                    limit: remaining as u64,
+                })?;
             let playlist_body = render_webvtt_media_playlist(&segments);
-            WebVttSidecarTrack {
+            Ok(WebVttSidecarTrack {
                 track_id: track.track_id.clone(),
                 language: track.language.clone(),
                 name: track.name.clone(),
                 playlist_uri: format!("subs/{safe_id}/index.m3u8"),
                 segments,
                 playlist_body,
-            }
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, crate::ResourceError>>()?;
 
-    WebVttSidecarSet { tracks }
+    Ok(WebVttSidecarSet { tracks })
 }
 
 /// Parses native text subtitle packets and builds WebVTT sidecars for every selected track.
@@ -222,7 +308,7 @@ pub fn write_webvtt_sidecars(
     tracks: &[WebVttSidecarInput],
     segment_ms: u64,
 ) -> std::io::Result<WebVttSidecarSet> {
-    let sidecars = build_webvtt_sidecars(tracks, segment_ms);
+    let sidecars = try_build_webvtt_sidecars(tracks, segment_ms).map_err(std::io::Error::other)?;
     for track in &sidecars.tracks {
         let safe_id = safe_path_component(&track.track_id);
         let track_dir = output_dir.join("subs").join(safe_id);
@@ -309,7 +395,16 @@ fn parse_subrip_timestamp(raw: &str) -> Option<u64> {
     let (seconds, millis) = seconds_ms.split_once('.')?;
     let seconds = seconds.parse::<u64>().ok()?;
     let millis = parse_millis(millis)?;
-    Some((((hours * 60 + minutes) * 60) + seconds) * 1000 + millis)
+    if minutes >= 60 || seconds >= 60 {
+        return None;
+    }
+    hours
+        .checked_mul(60)?
+        .checked_add(minutes)?
+        .checked_mul(60)?
+        .checked_add(seconds)?
+        .checked_mul(1000)?
+        .checked_add(millis)
 }
 
 fn parse_millis(raw: &str) -> Option<u64> {
@@ -435,6 +530,21 @@ fn format_timestamp(ms: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn malformed_subtitle_timestamps_and_expansion_are_bounded() {
+        // Reduced from the ASan/libFuzzer crash discovered during this audit.
+        assert!(parse_subrip_timestamp("3:35555553333333333:355.553333").is_none());
+        assert!(parse_subrip_timestamp("18446744073709551615:00:00.000").is_none());
+        assert!(parse_subrip_timestamp("01:60:00.000").is_none());
+        let cue = TextSubtitleCue {
+            start_ms: 0,
+            end_ms: u64::MAX,
+            text: "x".into(),
+        };
+        assert!(try_segment_webvtt(std::slice::from_ref(&cue), 1, "").is_err());
+        assert!(segment_webvtt(&[cue], 1, "").is_empty());
+    }
 
     #[test]
     fn parses_subrip() {

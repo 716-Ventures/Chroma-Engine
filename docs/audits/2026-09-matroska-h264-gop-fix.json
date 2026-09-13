@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "platform": "macOS-26.6.2-arm64-arm-64bit",
+  "architecture": "arm64",
+  "engineSha256": "9a30b1315f1455f898e3599ff2266fe808efab9843e15f91f72c4d3296d533da",
+  "mediaBytes": 93551130,
+  "mode": "h264",
+  "cacheState": "uncontrolled",
+  "measurement": "fresh-process contiguous-window wall time",
+  "workerMetrics": "sampled-psutil",
+  "label": "",
+  "resourcePolicy": "default",
+  "runs": [
+    {
+      "startIndex": 70,
+      "count": 1,
+      "repeat": 0,
+      "exitCode": 1,
+      "workerMetrics": {
+        "peakSampledRssBytes": 28803072,
+        "cpuSeconds": 0.04282999999999999,
+        "readBytes": null,
+        "writeBytes": null,
+        "sampleIntervalMs": 20,
+        "sampleCount": 68,
+        "osPeakRssBytes": 40697856
+      },
+      "error": "Error: native video decode failed: HEVC packet decode failed: invalid syntax: reference picture POC not present in DPB\n",
+      "elapsedSeconds": 1.848551833
+    },
+    {
+      "startIndex": 130,
+      "count": 1,
+      "repeat": 0,
+      "exitCode": 1,
+      "workerMetrics": {
+        "peakSampledRssBytes": 30474240,
+        "cpuSeconds": 0.04091,
+        "readBytes": null,
+        "writeBytes": null,
+        "sampleIntervalMs": 20,
+        "sampleCount": 5,
+        "osPeakRssBytes": 41828352
+      },
+      "error": "Error: native video decode failed: HEVC packet decode failed: invalid syntax: reference picture POC not present in DPB\n",
+      "elapsedSeconds": 0.14823304199999998
+    }
+  ]
+}

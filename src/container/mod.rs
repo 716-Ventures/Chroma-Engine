@@ -14,6 +14,8 @@ pub struct ParseLimits {
     pub max_table_entries: usize,
     /// Maximum bytes retained for metadata/index state.
     pub max_index_bytes: usize,
+    /// Maximum metadata nesting depth.
+    pub max_depth: usize,
 }
 
 impl Default for ParseLimits {
@@ -24,7 +26,56 @@ impl Default for ParseLimits {
             max_samples_per_track: 2_000_000,
             max_table_entries: 2_000_000,
             max_index_bytes: 256 * 1024 * 1024,
+            max_depth: 32,
         }
+    }
+}
+
+pub(crate) struct ParseBudget {
+    limits: ParseLimits,
+    boxes: usize,
+    tracks: usize,
+    bytes: usize,
+}
+
+impl ParseBudget {
+    pub(crate) fn new(limits: ParseLimits) -> Self {
+        Self {
+            limits,
+            boxes: 0,
+            tracks: 0,
+            bytes: 0,
+        }
+    }
+
+    pub(crate) fn visit(&mut self, depth: usize, track: bool, bytes: usize) -> anyhow::Result<()> {
+        self.boxes = self
+            .boxes
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("parser work overflow"))?;
+        self.tracks += usize::from(track);
+        self.bytes = self
+            .bytes
+            .checked_add(bytes)
+            .ok_or_else(|| anyhow::anyhow!("parser memory overflow"))?;
+        if depth > self.limits.max_depth
+            || self.boxes > self.limits.max_boxes
+            || self.tracks > self.limits.max_tracks
+            || self.bytes > self.limits.max_index_bytes
+        {
+            anyhow::bail!("container resource limit exceeded");
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn validate_metadata_budget(bytes: &[u8], limits: ParseLimits) -> anyhow::Result<()> {
+    match sniff_container(bytes) {
+        ContainerKind::Mp4 | ContainerKind::Mov => mp4::validate_metadata_budget(bytes, limits),
+        ContainerKind::Matroska | ContainerKind::Webm => {
+            matroska::validate_metadata_budget(bytes, limits)
+        }
+        ContainerKind::Unknown => Ok(()),
     }
 }
 

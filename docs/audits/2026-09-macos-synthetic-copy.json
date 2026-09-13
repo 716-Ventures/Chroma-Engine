@@ -1,0 +1,1111 @@
+{
+  "schemaVersion": 1,
+  "platform": "macOS-26.6.2-arm64-arm-64bit",
+  "architecture": "arm64",
+  "engineSha256": "78a8fcb89e47948810886446b91b52c517bbf3b32173894725e9ce567637c6c9",
+  "mediaBytes": 5876,
+  "mode": "copy",
+  "cacheState": "uncontrolled",
+  "measurement": "fresh-process contiguous-window wall time",
+  "workerMetrics": "sampled-psutil",
+  "label": "synthetic 32x32; small-NAS policy on macOS, not NAS hardware",
+  "resourcePolicy": "small-nas",
+  "runs": [
+    {
+      "startIndex": 0,
+      "count": 1,
+      "repeat": 0,
+      "exitCode": 0,
+      "workerMetrics": {
+        "peakSampledRssBytes": 114688,
+        "cpuSeconds": 0.000985041,
+        "readBytes": null,
+        "writeBytes": null,
+        "sampleIntervalMs": 20
+      },
+      "engineResult": {
+        "init": null,
+        "plan": {
+          "audioTrackId": "a0",
+          "chunks": {
+            "chunks": [
+              {
+                "duration": {
+                  "scale": {
+                    "unitsPerSecond": 1000
+                  },
+                  "units": 4000
+                },
+                "index": 0,
+                "keyAligned": true,
+                "packetRange": {
+                  "end": 8,
+                  "start": 0
+                },
+                "start": {
+                  "scale": {
+                    "unitsPerSecond": 1000
+                  },
+                  "units": 0
+                }
+              },
+              {
+                "duration": {
+                  "scale": {
+                    "unitsPerSecond": 1000
+                  },
+                  "units": 2000
+                },
+                "index": 1,
+                "keyAligned": true,
+                "packetRange": {
+                  "end": 12,
+                  "start": 8
+                },
+                "start": {
+                  "scale": {
+                    "unitsPerSecond": 1000
+                  },
+                  "units": 4000
+                }
+              }
+            ],
+            "trackIds": [
+              "v0"
+            ]
+          },
+          "videoMode": "copy",
+          "videoTrackId": "v0"
+        },
+        "playlist": null,
+        "segments": [
+          {
+            "audioCodec": "aac",
+            "audioTrackId": "a0",
+            "byteCount": 4596,
+            "decodedVideoFrames": 0,
+            "encodedAudioFrames": 186,
+            "encodedVideoFrames": 0,
+            "firstAudioPtsMs": 0,
+            "firstVideoPtsMs": 0,
+            "index": 0,
+            "output": "/var/folders/kr/1mg177b94fnd59scnxq9kpqr0000gn/T/chroma-benchmark-zqf3rkwn/seg-00000.m4s",
+            "videoSampleCount": 8,
+            "videoTrackId": "v0"
+          }
+        ],
+        "stats": {
+          "audioMicros": 10137,
+          "clustersVisited": 12,
+          "codecSessionResets": 0,
+          "codecSessionReuses": 0,
+          "decoderBackend": "copy",
+          "encoderBackend": "copy",
+          "indexParses": 1,
+          "muxMicros": 12,
+          "openMicros": 546,
+          "publishMicros": 480,
+          "readMicros": 510,
+          "segmentRequests": 1,
+          "sourceBytesRead": 13272,
+          "sourceOpens": 1,
+          "sourceReadOperations": 1490,
+          "sourceValidations": 1,
+          "videoDecoderSessionsCreated": 0,
+          "videoEncoderSessionsCreated": 0,
+          "videoMicros": 4
+        }
+      },
+      "outputBytes": 4596,
+      "elapsedSeconds": 0.05383195900000001
+    },
+    {
+      "startIndex": 0,
+      "count": 1,
+      "repeat": 1,
+      "exitCode": 0,
+      "workerMetrics": {
+        "peakSampledRssBytes": 114688,
+        "cpuSeconds": 0.0008435000000000001,
+        "readBytes": null,
+        "writeBytes": null,
+        "sampleIntervalMs": 20
+      },
+      "engineResult": {
+        "init": null,
+        "plan": {
+          "audioTrackId": "a0",
+          "chunks": {
+            "chunks": [
+              {
+                "duration": {
+                  "scale": {
+                    "unitsPerSecond": 1000
+                  },
+                  "units": 4000
+                },
+                "index": 0,
+                "keyAligned": true,
+                "packetRange": {
+                  "end": 8,
+                  "start": 0
+                },
+                "start": {
+                  "scale": {
+                    "unitsPerSecond": 1000
+                  },
+                  "units": 0
+                }
+              },
+              {
+                "duration": {
+                  "scale": {
+                    "unitsPerSecond": 1000
+                  },
+                  "units": 2000
+                },
+                "index": 1,
+                "keyAligned": true,
+                "packetRange": {
+                  "end": 12,
+                  "start": 8
+                },
+                "start": {
+                  "scale": {
+                    "unitsPerSecond": 1000
+                  },
+                  "units": 4000
+                }
+              }
+            ],
+            "trackIds": [
+              "v0"
+            ]
+          },
+          "videoMode": "copy",
+          "videoTrackId": "v0"
+        },
+        "playlist": null,
+        "segments": [
+          {
+            "audioCodec": "aac",
+            "audioTrackId": "a0",
+            "byteCount": 4596,
+            "decodedVideoFrames": 0,
+            "encodedAudioFrames": 186,
+            "encodedVideoFrames": 0,
+            "firstAudioPtsMs": 0,
+            "firstVideoPtsMs": 0,
+            "index": 0,
+            "output": "/var/folders/kr/1mg177b94fnd59scnxq9kpqr0000gn/T/chroma-benchmark-3131jvwf/seg-00000.m4s",
+            "videoSampleCount": 8,
+            "videoTrackId": "v0"
+          }
+        ],
+        "stats": {
+          "audioMicros": 9572,
+          "clustersVisited": 12,
+          "codecSessionResets": 0,
+          "codecSessionReuses": 0,
+          "decoderBackend": "copy",
+          "encoderBackend": "copy",
+          "indexParses": 1,
+          "muxMicros": 16,
+          "openMicros": 286,
+          "publishMicros": 451,
+          "readMicros": 272,
+          "segmentRequests": 1,
+          "sourceBytesRead": 13272,
+          "sourceOpens": 1,
+          "sourceReadOperations": 1490,
+          "sourceValidations": 1,
+          "videoDecoderSessionsCreated": 0,
+          "videoEncoderSessionsCreated": 0,
+          "videoMicros": 1
+        }
+      },
+      "outputBytes": 4596,
+      "elapsedSeconds": 0.03145625000000002
+    },
+    {
+      "startIndex": 0,
+      "count": 1,
+      "repeat": 2,
+      "exitCode": 0,
+      "workerMetrics": {
+        "peakSampledRssBytes": 114688,
+        "cpuSeconds": 0.000792333,
+        "readBytes": null,
+        "writeBytes": null,
+        "sampleIntervalMs": 20
+      },
+      "engineResult": {
+        "init": null,
+        "plan": {
+          "audioTrackId": "a0",
+          "chunks": {
+            "chunks": [
+              {
+                "duration": {
+                  "scale": {
+                    "unitsPerSecond": 1000
+                  },
+                  "units": 4000
+                },
+                "index": 0,
+                "keyAligned": true,
+                "packetRange": {
+                  "end": 8,
+                  "start": 0
+                },
+                "start": {
+                  "scale": {
+                    "unitsPerSecond": 1000
+                  },
+                  "units": 0
+                }
+              },
+              {
+                "duration": {
+                  "scale": {
+                    "unitsPerSecond": 1000
+                  },
+                  "units": 2000
+                },
+                "index": 1,
+                "keyAligned": true,
+                "packetRange": {
+                  "end": 12,
+                  "start": 8
+                },
+                "start": {
+                  "scale": {
+                    "unitsPerSecond": 1000
+                  },
+                  "units": 4000
+                }
+              }
+            ],
+            "trackIds": [
+              "v0"
+            ]
+          },
+          "videoMode": "copy",
+          "videoTrackId": "v0"
+        },
+        "playlist": null,
+        "segments": [
+          {
+            "audioCodec": "aac",
+            "audioTrackId": "a0",
+            "byteCount": 4596,
+            "decodedVideoFrames": 0,
+            "encodedAudioFrames": 186,
+            "encodedVideoFrames": 0,
+            "firstAudioPtsMs": 0,
+            "firstVideoPtsMs": 0,
+            "index": 0,
+            "output": "/var/folders/kr/1mg177b94fnd59scnxq9kpqr0000gn/T/chroma-benchmark-yxv00c6q/seg-00000.m4s",
+            "videoSampleCount": 8,
+            "videoTrackId": "v0"
+          }
+        ],
+        "stats": {
+          "audioMicros": 8397,
+          "clustersVisited": 12,
+          "codecSessionResets": 0,
+          "codecSessionReuses": 0,
+          "decoderBackend": "copy",
+          "encoderBackend": "copy",
+          "indexParses": 1,
+          "muxMicros": 12,
+          "openMicros": 286,
+          "publishMicros": 394,
+          "readMicros": 271,
+          "segmentRequests": 1,
+          "sourceBytesRead": 13272,
+          "sourceOpens": 1,
+          "sourceReadOperations": 1490,
+          "sourceValidations": 1,
+          "videoDecoderSessionsCreated": 0,
+          "videoEncoderSessionsCreated": 0,
+          "videoMicros": 1
+        }
+      },
+      "outputBytes": 4596,
+      "elapsedSeconds": 0.031894040999999984
+    },
+    {
+      "startIndex": 0,
+      "count": 1,
+      "repeat": 3,
+      "exitCode": 0,
+      "workerMetrics": {
+        "peakSampledRssBytes": 212992,
+        "cpuSeconds": 0.0010135,
+        "readBytes": null,
+        "writeBytes": null,
+        "sampleIntervalMs": 20
+      },
+      "engineResult": {
+        "init": null,
+        "plan": {
+          "audioTrackId": "a0",
+          "chunks": {
+            "chunks": [
+              {
+                "duration": {
+                  "scale": {
+                    "unitsPerSecond": 1000
+                  },
+                  "units": 4000
+                },
+                "index": 0,
+                "keyAligned": true,
+                "packetRange": {
+                  "end": 8,
+                  "start": 0
+                },
+                "start": {
+                  "scale": {
+                    "unitsPerSecond": 1000
+                  },
+                  "units": 0
+                }
+              },
+              {
+                "duration": {
+                  "scale": {
+                    "unitsPerSecond": 1000
+                  },
+                  "units": 2000
+                },
+                "index": 1,
+                "keyAligned": true,
+                "packetRange": {
+                  "end": 12,
+                  "start": 8
+                },
+                "start": {
+                  "scale": {
+                    "unitsPerSecond": 1000
+                  },
+                  "units": 4000
+                }
+              }
+            ],
+            "trackIds": [
+              "v0"
+            ]
+          },
+          "videoMode": "copy",
+          "videoTrackId": "v0"
+        },
+        "playlist": null,
+        "segments": [
+          {
+            "audioCodec": "aac",
+            "audioTrackId": "a0",
+            "byteCount": 4596,
+            "decodedVideoFrames": 0,
+            "encodedAudioFrames": 186,
+            "encodedVideoFrames": 0,
+            "firstAudioPtsMs": 0,
+            "firstVideoPtsMs": 0,
+            "index": 0,
+            "output": "/var/folders/kr/1mg177b94fnd59scnxq9kpqr0000gn/T/chroma-benchmark-z34ndbzk/seg-00000.m4s",
+            "videoSampleCount": 8,
+            "videoTrackId": "v0"
+          }
+        ],
+        "stats": {
+          "audioMicros": 8424,
+          "clustersVisited": 12,
+          "codecSessionResets": 0,
+          "codecSessionReuses": 0,
+          "decoderBackend": "copy",
+          "encoderBackend": "copy",
+          "indexParses": 1,
+          "muxMicros": 15,
+          "openMicros": 288,
+          "publishMicros": 430,
+          "readMicros": 268,
+          "segmentRequests": 1,
+          "sourceBytesRead": 13272,
+          "sourceOpens": 1,
+          "sourceReadOperations": 1490,
+          "sourceValidations": 1,
+          "videoDecoderSessionsCreated": 0,
+          "videoEncoderSessionsCreated": 0,
+          "videoMicros": 2
+        }
+      },
+      "outputBytes": 4596,
+      "elapsedSeconds": 0.03220395799999998
+    },
+    {
+      "startIndex": 0,
+      "count": 1,
+      "repeat": 4,
+      "exitCode": 0,
+      "workerMetrics": {
+        "peakSampledRssBytes": 573440,
+        "cpuSeconds": 0.000621083,
+        "readBytes": null,
+        "writeBytes": null,
+        "sampleIntervalMs": 20
+      },
+      "engineResult": {
+        "init": null,
+        "plan": {
+          "audioTrackId": "a0",
+          "chunks": {
+            "chunks": [
+              {
+                "duration": {
+                  "scale": {
+                    "unitsPerSecond": 1000
+                  },
+                  "units": 4000
+                },
+                "index": 0,
+                "keyAligned": true,
+                "packetRange": {
+                  "end": 8,
+                  "start": 0
+                },
+                "start": {
+                  "scale": {
+                    "unitsPerSecond": 1000
+                  },
+                  "units": 0
+                }
+              },
+              {
+                "duration": {
+                  "scale": {
+                    "unitsPerSecond": 1000
+                  },
+                  "units": 2000
+                },
+                "index": 1,
+                "keyAligned": true,
+                "packetRange": {
+                  "end": 12,
+                  "start": 8
+                },
+                "start": {
+                  "scale": {
+                    "unitsPerSecond": 1000
+                  },
+                  "units": 4000
+                }
+              }
+            ],
+            "trackIds": [
+              "v0"
+            ]
+          },
+          "videoMode": "copy",
+          "videoTrackId": "v0"
+        },
+        "playlist": null,
+        "segments": [
+          {
+            "audioCodec": "aac",
+            "audioTrackId": "a0",
+            "byteCount": 4596,
+            "decodedVideoFrames": 0,
+            "encodedAudioFrames": 186,
+            "encodedVideoFrames": 0,
+            "firstAudioPtsMs": 0,
+            "firstVideoPtsMs": 0,
+            "index": 0,
+            "output": "/var/folders/kr/1mg177b94fnd59scnxq9kpqr0000gn/T/chroma-benchmark-5_dbxy92/seg-00000.m4s",
+            "videoSampleCount": 8,
+            "videoTrackId": "v0"
+          }
+        ],
+        "stats": {
+          "audioMicros": 8308,
+          "clustersVisited": 12,
+          "codecSessionResets": 0,
+          "codecSessionReuses": 0,
+          "decoderBackend": "copy",
+          "encoderBackend": "copy",
+          "indexParses": 1,
+          "muxMicros": 14,
+          "openMicros": 286,
+          "publishMicros": 427,
+          "readMicros": 272,
+          "segmentRequests": 1,
+          "sourceBytesRead": 13272,
+          "sourceOpens": 1,
+          "sourceReadOperations": 1490,
+          "sourceValidations": 1,
+          "videoDecoderSessionsCreated": 0,
+          "videoEncoderSessionsCreated": 0,
+          "videoMicros": 1
+        }
+      },
+      "outputBytes": 4596,
+      "elapsedSeconds": 0.03205512500000002
+    },
+    {
+      "startIndex": 1,
+      "count": 1,
+      "repeat": 0,
+      "exitCode": 0,
+      "workerMetrics": {
+        "peakSampledRssBytes": 688128,
+        "cpuSeconds": 0.000722916,
+        "readBytes": null,
+        "writeBytes": null,
+        "sampleIntervalMs": 20
+      },
+      "engineResult": {
+        "init": null,
+        "plan": {
+          "audioTrackId": "a0",
+          "chunks": {
+            "chunks": [
+              {
+                "duration": {
+                  "scale": {
+                    "unitsPerSecond": 1000
+                  },
+                  "units": 4000
+                },
+                "index": 0,
+                "keyAligned": true,
+                "packetRange": {
+                  "end": 8,
+                  "start": 0
+                },
+                "start": {
+                  "scale": {
+                    "unitsPerSecond": 1000
+                  },
+                  "units": 0
+                }
+              },
+              {
+                "duration": {
+                  "scale": {
+                    "unitsPerSecond": 1000
+                  },
+                  "units": 2000
+                },
+                "index": 1,
+                "keyAligned": true,
+                "packetRange": {
+                  "end": 12,
+                  "start": 8
+                },
+                "start": {
+                  "scale": {
+                    "unitsPerSecond": 1000
+                  },
+                  "units": 4000
+                }
+              }
+            ],
+            "trackIds": [
+              "v0"
+            ]
+          },
+          "videoMode": "copy",
+          "videoTrackId": "v0"
+        },
+        "playlist": null,
+        "segments": [
+          {
+            "audioCodec": "aac",
+            "audioTrackId": "a0",
+            "byteCount": 2422,
+            "decodedVideoFrames": 0,
+            "encodedAudioFrames": 95,
+            "encodedVideoFrames": 0,
+            "firstAudioPtsMs": 4000,
+            "firstVideoPtsMs": 4000,
+            "index": 1,
+            "output": "/var/folders/kr/1mg177b94fnd59scnxq9kpqr0000gn/T/chroma-benchmark-c64lgbdk/seg-00001.m4s",
+            "videoSampleCount": 4,
+            "videoTrackId": "v0"
+          }
+        ],
+        "stats": {
+          "audioMicros": 4766,
+          "clustersVisited": 12,
+          "codecSessionResets": 0,
+          "codecSessionReuses": 0,
+          "decoderBackend": "copy",
+          "encoderBackend": "copy",
+          "indexParses": 1,
+          "muxMicros": 14,
+          "openMicros": 308,
+          "publishMicros": 455,
+          "readMicros": 479,
+          "segmentRequests": 1,
+          "sourceBytesRead": 13014,
+          "sourceOpens": 1,
+          "sourceReadOperations": 1436,
+          "sourceValidations": 1,
+          "videoDecoderSessionsCreated": 0,
+          "videoEncoderSessionsCreated": 0,
+          "videoMicros": 4
+        }
+      },
+      "outputBytes": 2422,
+      "elapsedSeconds": 0.027975833000000006
+    },
+    {
+      "startIndex": 1,
+      "count": 1,
+      "repeat": 1,
+      "exitCode": 0,
+      "workerMetrics": {
+        "peakSampledRssBytes": 507904,
+        "cpuSeconds": 0.000809832,
+        "readBytes": null,
+        "writeBytes": null,
+        "sampleIntervalMs": 20
+      },
+      "engineResult": {
+        "init": null,
+        "plan": {
+          "audioTrackId": "a0",
+          "chunks": {
+            "chunks": [
+              {
+                "duration": {
+                  "scale": {
+                    "unitsPerSecond": 1000
+                  },
+                  "units": 4000
+                },
+                "index": 0,
+                "keyAligned": true,
+                "packetRange": {
+                  "end": 8,
+                  "start": 0
+                },
+                "start": {
+                  "scale": {
+                    "unitsPerSecond": 1000
+                  },
+                  "units": 0
+                }
+              },
+              {
+                "duration": {
+                  "scale": {
+                    "unitsPerSecond": 1000
+                  },
+                  "units": 2000
+                },
+                "index": 1,
+                "keyAligned": true,
+                "packetRange": {
+                  "end": 12,
+                  "start": 8
+                },
+                "start": {
+                  "scale": {
+                    "unitsPerSecond": 1000
+                  },
+                  "units": 4000
+                }
+              }
+            ],
+            "trackIds": [
+              "v0"
+            ]
+          },
+          "videoMode": "copy",
+          "videoTrackId": "v0"
+        },
+        "playlist": null,
+        "segments": [
+          {
+            "audioCodec": "aac",
+            "audioTrackId": "a0",
+            "byteCount": 2422,
+            "decodedVideoFrames": 0,
+            "encodedAudioFrames": 95,
+            "encodedVideoFrames": 0,
+            "firstAudioPtsMs": 4000,
+            "firstVideoPtsMs": 4000,
+            "index": 1,
+            "output": "/var/folders/kr/1mg177b94fnd59scnxq9kpqr0000gn/T/chroma-benchmark-nxehdocz/seg-00001.m4s",
+            "videoSampleCount": 4,
+            "videoTrackId": "v0"
+          }
+        ],
+        "stats": {
+          "audioMicros": 4861,
+          "clustersVisited": 12,
+          "codecSessionResets": 0,
+          "codecSessionReuses": 0,
+          "decoderBackend": "copy",
+          "encoderBackend": "copy",
+          "indexParses": 1,
+          "muxMicros": 15,
+          "openMicros": 278,
+          "publishMicros": 388,
+          "readMicros": 259,
+          "segmentRequests": 1,
+          "sourceBytesRead": 13014,
+          "sourceOpens": 1,
+          "sourceReadOperations": 1436,
+          "sourceValidations": 1,
+          "videoDecoderSessionsCreated": 0,
+          "videoEncoderSessionsCreated": 0,
+          "videoMicros": 1
+        }
+      },
+      "outputBytes": 2422,
+      "elapsedSeconds": 0.032601416999999966
+    },
+    {
+      "startIndex": 1,
+      "count": 1,
+      "repeat": 2,
+      "exitCode": 0,
+      "workerMetrics": {
+        "peakSampledRssBytes": 491520,
+        "cpuSeconds": 0.000926916,
+        "readBytes": null,
+        "writeBytes": null,
+        "sampleIntervalMs": 20
+      },
+      "engineResult": {
+        "init": null,
+        "plan": {
+          "audioTrackId": "a0",
+          "chunks": {
+            "chunks": [
+              {
+                "duration": {
+                  "scale": {
+                    "unitsPerSecond": 1000
+                  },
+                  "units": 4000
+                },
+                "index": 0,
+                "keyAligned": true,
+                "packetRange": {
+                  "end": 8,
+                  "start": 0
+                },
+                "start": {
+                  "scale": {
+                    "unitsPerSecond": 1000
+                  },
+                  "units": 0
+                }
+              },
+              {
+                "duration": {
+                  "scale": {
+                    "unitsPerSecond": 1000
+                  },
+                  "units": 2000
+                },
+                "index": 1,
+                "keyAligned": true,
+                "packetRange": {
+                  "end": 12,
+                  "start": 8
+                },
+                "start": {
+                  "scale": {
+                    "unitsPerSecond": 1000
+                  },
+                  "units": 4000
+                }
+              }
+            ],
+            "trackIds": [
+              "v0"
+            ]
+          },
+          "videoMode": "copy",
+          "videoTrackId": "v0"
+        },
+        "playlist": null,
+        "segments": [
+          {
+            "audioCodec": "aac",
+            "audioTrackId": "a0",
+            "byteCount": 2422,
+            "decodedVideoFrames": 0,
+            "encodedAudioFrames": 95,
+            "encodedVideoFrames": 0,
+            "firstAudioPtsMs": 4000,
+            "firstVideoPtsMs": 4000,
+            "index": 1,
+            "output": "/var/folders/kr/1mg177b94fnd59scnxq9kpqr0000gn/T/chroma-benchmark-1gv3h6zs/seg-00001.m4s",
+            "videoSampleCount": 4,
+            "videoTrackId": "v0"
+          }
+        ],
+        "stats": {
+          "audioMicros": 4782,
+          "clustersVisited": 12,
+          "codecSessionResets": 0,
+          "codecSessionReuses": 0,
+          "decoderBackend": "copy",
+          "encoderBackend": "copy",
+          "indexParses": 1,
+          "muxMicros": 12,
+          "openMicros": 282,
+          "publishMicros": 387,
+          "readMicros": 254,
+          "segmentRequests": 1,
+          "sourceBytesRead": 13014,
+          "sourceOpens": 1,
+          "sourceReadOperations": 1436,
+          "sourceValidations": 1,
+          "videoDecoderSessionsCreated": 0,
+          "videoEncoderSessionsCreated": 0,
+          "videoMicros": 1
+        }
+      },
+      "outputBytes": 2422,
+      "elapsedSeconds": 0.03269983399999998
+    },
+    {
+      "startIndex": 1,
+      "count": 1,
+      "repeat": 3,
+      "exitCode": 0,
+      "workerMetrics": {
+        "peakSampledRssBytes": 458752,
+        "cpuSeconds": 0.0007828739999999999,
+        "readBytes": null,
+        "writeBytes": null,
+        "sampleIntervalMs": 20
+      },
+      "engineResult": {
+        "init": null,
+        "plan": {
+          "audioTrackId": "a0",
+          "chunks": {
+            "chunks": [
+              {
+                "duration": {
+                  "scale": {
+                    "unitsPerSecond": 1000
+                  },
+                  "units": 4000
+                },
+                "index": 0,
+                "keyAligned": true,
+                "packetRange": {
+                  "end": 8,
+                  "start": 0
+                },
+                "start": {
+                  "scale": {
+                    "unitsPerSecond": 1000
+                  },
+                  "units": 0
+                }
+              },
+              {
+                "duration": {
+                  "scale": {
+                    "unitsPerSecond": 1000
+                  },
+                  "units": 2000
+                },
+                "index": 1,
+                "keyAligned": true,
+                "packetRange": {
+                  "end": 12,
+                  "start": 8
+                },
+                "start": {
+                  "scale": {
+                    "unitsPerSecond": 1000
+                  },
+                  "units": 4000
+                }
+              }
+            ],
+            "trackIds": [
+              "v0"
+            ]
+          },
+          "videoMode": "copy",
+          "videoTrackId": "v0"
+        },
+        "playlist": null,
+        "segments": [
+          {
+            "audioCodec": "aac",
+            "audioTrackId": "a0",
+            "byteCount": 2422,
+            "decodedVideoFrames": 0,
+            "encodedAudioFrames": 95,
+            "encodedVideoFrames": 0,
+            "firstAudioPtsMs": 4000,
+            "firstVideoPtsMs": 4000,
+            "index": 1,
+            "output": "/var/folders/kr/1mg177b94fnd59scnxq9kpqr0000gn/T/chroma-benchmark-nwxg1l09/seg-00001.m4s",
+            "videoSampleCount": 4,
+            "videoTrackId": "v0"
+          }
+        ],
+        "stats": {
+          "audioMicros": 4792,
+          "clustersVisited": 12,
+          "codecSessionResets": 0,
+          "codecSessionReuses": 0,
+          "decoderBackend": "copy",
+          "encoderBackend": "copy",
+          "indexParses": 1,
+          "muxMicros": 13,
+          "openMicros": 287,
+          "publishMicros": 437,
+          "readMicros": 254,
+          "segmentRequests": 1,
+          "sourceBytesRead": 13014,
+          "sourceOpens": 1,
+          "sourceReadOperations": 1436,
+          "sourceValidations": 1,
+          "videoDecoderSessionsCreated": 0,
+          "videoEncoderSessionsCreated": 0,
+          "videoMicros": 2
+        }
+      },
+      "outputBytes": 2422,
+      "elapsedSeconds": 0.02543662499999999
+    },
+    {
+      "startIndex": 1,
+      "count": 1,
+      "repeat": 4,
+      "exitCode": 0,
+      "workerMetrics": {
+        "peakSampledRssBytes": 704512,
+        "cpuSeconds": 0.0008063320000000001,
+        "readBytes": null,
+        "writeBytes": null,
+        "sampleIntervalMs": 20
+      },
+      "engineResult": {
+        "init": null,
+        "plan": {
+          "audioTrackId": "a0",
+          "chunks": {
+            "chunks": [
+              {
+                "duration": {
+                  "scale": {
+                    "unitsPerSecond": 1000
+                  },
+                  "units": 4000
+                },
+                "index": 0,
+                "keyAligned": true,
+                "packetRange": {
+                  "end": 8,
+                  "start": 0
+                },
+                "start": {
+                  "scale": {
+                    "unitsPerSecond": 1000
+                  },
+                  "units": 0
+                }
+              },
+              {
+                "duration": {
+                  "scale": {
+                    "unitsPerSecond": 1000
+                  },
+                  "units": 2000
+                },
+                "index": 1,
+                "keyAligned": true,
+                "packetRange": {
+                  "end": 12,
+                  "start": 8
+                },
+                "start": {
+                  "scale": {
+                    "unitsPerSecond": 1000
+                  },
+                  "units": 4000
+                }
+              }
+            ],
+            "trackIds": [
+              "v0"
+            ]
+          },
+          "videoMode": "copy",
+          "videoTrackId": "v0"
+        },
+        "playlist": null,
+        "segments": [
+          {
+            "audioCodec": "aac",
+            "audioTrackId": "a0",
+            "byteCount": 2422,
+            "decodedVideoFrames": 0,
+            "encodedAudioFrames": 95,
+            "encodedVideoFrames": 0,
+            "firstAudioPtsMs": 4000,
+            "firstVideoPtsMs": 4000,
+            "index": 1,
+            "output": "/var/folders/kr/1mg177b94fnd59scnxq9kpqr0000gn/T/chroma-benchmark-nqcicpxk/seg-00001.m4s",
+            "videoSampleCount": 4,
+            "videoTrackId": "v0"
+          }
+        ],
+        "stats": {
+          "audioMicros": 4788,
+          "clustersVisited": 12,
+          "codecSessionResets": 0,
+          "codecSessionReuses": 0,
+          "decoderBackend": "copy",
+          "encoderBackend": "copy",
+          "indexParses": 1,
+          "muxMicros": 15,
+          "openMicros": 287,
+          "publishMicros": 379,
+          "readMicros": 268,
+          "segmentRequests": 1,
+          "sourceBytesRead": 13014,
+          "sourceOpens": 1,
+          "sourceReadOperations": 1436,
+          "sourceValidations": 1,
+          "videoDecoderSessionsCreated": 0,
+          "videoEncoderSessionsCreated": 0,
+          "videoMicros": 4
+        }
+      },
+      "outputBytes": 2422,
+      "elapsedSeconds": 0.03077266700000003
+    }
+  ],
+  "windowPercentiles": [
+    {
+      "startIndex": 0,
+      "successfulRuns": 5,
+      "p50Seconds": 0.03205512500000002,
+      "p95Seconds": 0.05383195900000001,
+      "p99Seconds": 0.05383195900000001
+    },
+    {
+      "startIndex": 1,
+      "successfulRuns": 5,
+      "p50Seconds": 0.03077266700000003,
+      "p95Seconds": 0.03269983399999998,
+      "p99Seconds": 0.03269983399999998
+    }
+  ]
+}

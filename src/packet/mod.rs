@@ -551,6 +551,7 @@ pub fn plan_copy_seek(
 }
 
 /// Copies packet payload bytes for a range into a contiguous buffer.
+#[cfg(test)]
 pub fn extract_packet_payload(
     source: &[u8],
     packets: &[PacketRef],

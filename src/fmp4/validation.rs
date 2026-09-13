@@ -7,6 +7,7 @@ pub(crate) struct Fmp4MediaValidation {
     pub(crate) payload_bytes: usize,
 }
 
+#[cfg(any(test, feature = "fuzzing"))]
 pub(crate) fn validate_media_fragment(bytes: &[u8]) -> Result<Fmp4MediaValidation> {
     let moof = top_level_box_payload(bytes, b"moof")
         .ok_or_else(|| anyhow::anyhow!("fMP4 media fragment is missing moof"))?;
@@ -21,6 +22,42 @@ pub(crate) fn validate_media_fragment(bytes: &[u8]) -> Result<Fmp4MediaValidatio
         .checked_add(mdat.len())
         .ok_or_else(|| anyhow::anyhow!("fMP4 media fragment mdat length overflowed"))?;
 
+    validate_trafs(moof, mdat_payload_start, mdat_payload_end)
+}
+
+pub(crate) fn validate_fragment_header(
+    header: &[u8],
+    payload_len: usize,
+) -> Result<Fmp4MediaValidation> {
+    let moof =
+        top_level_box_payload(header, b"moof").ok_or_else(|| anyhow::anyhow!("missing moof"))?;
+    let mdat = header
+        .get(header.len().saturating_sub(8)..)
+        .ok_or_else(|| anyhow::anyhow!("missing mdat header"))?;
+    if mdat.len() != 8
+        || &mdat[4..] != b"mdat"
+        || u32::from_be_bytes(mdat[..4].try_into()?) as usize
+            != payload_len
+                .checked_add(8)
+                .ok_or_else(|| anyhow::anyhow!("mdat overflow"))?
+    {
+        bail!("invalid streaming mdat size");
+    }
+    validate_trafs(
+        moof,
+        header.len(),
+        header
+            .len()
+            .checked_add(payload_len)
+            .ok_or_else(|| anyhow::anyhow!("fragment overflow"))?,
+    )
+}
+
+fn validate_trafs(
+    moof: &[u8],
+    mdat_payload_start: usize,
+    mdat_payload_end: usize,
+) -> Result<Fmp4MediaValidation> {
     let trafs = child_box_payloads(moof, b"traf");
     if trafs.is_empty() {
         bail!("fMP4 media fragment moof does not contain any traf boxes");
@@ -184,9 +221,13 @@ fn inspect_trun(payload: &[u8]) -> Option<InspectedTrun> {
         return None;
     }
     let sample_count = u32::from_be_bytes(payload[4..8].try_into().ok()?) as usize;
+    if sample_count > 2_000_000 || sample_count.checked_mul(16)?.checked_add(12)? != payload.len() {
+        return None;
+    }
     let data_offset = i32::from_be_bytes(payload[8..12].try_into().ok()?);
     let mut offset = 12_usize;
-    let mut samples = Vec::with_capacity(sample_count);
+    let mut samples = Vec::new();
+    samples.try_reserve_exact(sample_count).ok()?;
     for _ in 0..sample_count {
         let end = offset.checked_add(16)?;
         if end > payload.len() {

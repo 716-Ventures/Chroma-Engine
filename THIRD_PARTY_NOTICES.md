@@ -126,6 +126,14 @@ NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FO
 DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT
 OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
+## rusty_aac 0.5.0 (Chroma streaming patch)
+
+Copyright Mata Network. Licensed under Apache License 2.0.
+The source, complete license and provenance are retained in
+`third_party/rusty_aac`. Chroma adds a causal, retained AAC streaming encoder;
+the modifications are described in `CHROMA_PATCHES.md` in that directory.
+Release bundles include `rusty-aac-LICENSE`.
+
 Chroma Engine release bundles include the following AV1 components.
 
 ## dav1d

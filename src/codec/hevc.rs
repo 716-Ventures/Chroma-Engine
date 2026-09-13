@@ -102,6 +102,37 @@ pub fn hevc_sample_to_annex_b(
     Ok(out)
 }
 
+/// First coded-picture NAL type in a length-prefixed access unit.
+pub(crate) fn sample_vcl_type(
+    sample: &[u8],
+    length_size: u8,
+) -> Result<Option<u8>, HevcParseError> {
+    if !(1..=4).contains(&length_size) {
+        return Err(HevcParseError::InvalidLengthSize);
+    }
+    let mut remaining = sample;
+    let mut first = None;
+    while !remaining.is_empty() {
+        let prefix = remaining
+            .get(..usize::from(length_size))
+            .ok_or(HevcParseError::TruncatedLengthPrefix)?;
+        let len = prefix
+            .iter()
+            .fold(0usize, |n, b| (n << 8) | usize::from(*b));
+        remaining = &remaining[prefix.len()..];
+        let nal = remaining
+            .get(..len)
+            .filter(|nal| nal.len() >= 2)
+            .ok_or(HevcParseError::TruncatedNalUnit)?;
+        let kind = (nal[0] >> 1) & 63;
+        if kind <= 31 && first.is_none() {
+            first = Some(kind);
+        }
+        remaining = &remaining[len..];
+    }
+    Ok(first)
+}
+
 pub fn hevc_decoder_config_to_annex_b(payload: &[u8]) -> Result<Vec<u8>, HevcParseError> {
     let config = parse_hevc_decoder_config(payload)?;
     Ok(hevc_parameter_sets_to_annex_b(&config))
@@ -166,6 +197,17 @@ fn read_u16(bytes: &[u8], offset: usize) -> Result<u16, HevcParseError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn classifies_random_access_and_leading_pictures_without_copying_payloads() {
+        for kind in [0, 1, 8, 9, 16, 19, 21] {
+            let sample = [0, 0, 0, 2, kind << 1, 1];
+            assert_eq!(sample_vcl_type(&sample, 4), Ok(Some(kind)));
+        }
+        assert_eq!(sample_vcl_type(&[0, 0, 0, 2, 64, 1], 4), Ok(None));
+        assert!(sample_vcl_type(&[0, 0, 0, 3, 42, 1], 4).is_err());
+        assert!(sample_vcl_type(&[0, 0, 0], 4).is_err());
+    }
     use crate::packet::{TimeDelta, TimePoint};
 
     #[test]

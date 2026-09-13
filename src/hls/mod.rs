@@ -3,7 +3,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+mod input;
 mod playlist;
+use input::HlsInput;
 mod transport_stream;
 
 use transport_stream::*;
@@ -284,19 +286,19 @@ pub struct HlsVodPlaylistPlan {
 impl HlsVodPlaylistPlan {
     /// Opens a source and builds playlist metadata without writing segments.
     pub fn open(input: &Path, options: HlsOptions) -> Result<Self> {
-        let source = MappedMediaFile::open(input)?;
+        let source = MappedMediaFile::open_packet_copy(input)?;
         let source_len = source.len();
-        let bytes = source.as_ref();
+        let bytes = &source;
         let segment_target_ms = options.segment_target_ms.max(500);
 
-        if mp4::looks_like_mp4(bytes) {
+        if mp4::looks_like_mp4(bytes.metadata()) {
             hls_playlist_plan_from_mp4(
                 bytes,
                 source_len,
                 options.audio_track_id.as_deref(),
                 segment_target_ms,
             )
-        } else if matroska::looks_like_ebml(bytes) {
+        } else if matroska::looks_like_ebml(bytes.metadata()) {
             hls_playlist_plan_from_matroska(
                 bytes,
                 source_len,
@@ -371,15 +373,28 @@ impl HlsVodPlaylistPlan {
 impl HlsVodPlan {
     /// Opens a source and builds a segment muxing plan.
     pub fn open(input: &Path, options: HlsOptions) -> Result<Self> {
-        let source = MappedMediaFile::open(input)?;
+        let source = MappedMediaFile::open_packet_copy(input)?;
         Self::from_source(source, options)
     }
 
+    /// Opens a retained HLS copy plan with shared resource admission and cancellation.
+    pub fn open_with_runtime(
+        input: &Path,
+        options: HlsOptions,
+        control: crate::WorkControl,
+        runtime: std::sync::Arc<crate::EngineRuntime>,
+    ) -> Result<Self> {
+        Self::from_source(
+            MappedMediaFile::open_with_context(input, runtime, control)?,
+            options,
+        )
+    }
+
     fn from_source(source: MappedMediaFile, options: HlsOptions) -> Result<Self> {
-        let bytes = source.as_ref();
-        let tracks = if mp4::looks_like_mp4(bytes) {
+        let bytes = &source;
+        let tracks = if mp4::looks_like_mp4(bytes.metadata()) {
             hls_tracks_from_mp4(bytes, options.audio_track_id.as_deref())?
-        } else if matroska::looks_like_ebml(bytes) {
+        } else if matroska::looks_like_ebml(bytes.metadata()) {
             hls_tracks_from_matroska(bytes, options.audio_track_id.as_deref())?
         } else {
             bail!("native HLS currently supports MP4/MOV and Matroska/WebM sources");
@@ -475,7 +490,7 @@ impl HlsVodPlan {
             .get(index)
             .copied()
             .ok_or_else(|| anyhow!("HLS segment index {index} is out of range"))?;
-        mux_segment(self.source.as_ref(), &self.tracks, window)
+        mux_segment(&self.source, &self.tracks, window)
     }
 
     /// Writes one MPEG-TS segment to disk.
@@ -543,7 +558,7 @@ impl HlsVodPlan {
             .get(index)
             .copied()
             .ok_or_else(|| anyhow!("HLS segment index {index} is out of range"))?;
-        mux_fmp4_segment(self.source.as_ref(), &self.tracks, window)
+        mux_fmp4_segment(&self.source, &self.tracks, window)
     }
 
     /// Writes one fragmented MP4 media segment to disk.
@@ -777,8 +792,8 @@ pub fn write_hls_fmp4_vod(
     options: HlsOptions,
 ) -> Result<HlsOutput> {
     let source = map_input(input)?;
-    let bytes = source.as_ref();
-    if matroska::looks_like_ebml(bytes) {
+    let bytes = &source;
+    if matroska::looks_like_ebml(bytes.metadata()) {
         source.validate_current()?;
         return write_matroska_hls_fmp4_vod(bytes, output_dir, options);
     }
@@ -821,8 +836,8 @@ pub fn write_hls_fmp4_vod(
 /// Writes only the fragmented MP4 init segment for a source.
 pub fn write_hls_fmp4_init(input: &Path, output: &Path, options: HlsOptions) -> Result<()> {
     let source = map_input(input)?;
-    let bytes = source.as_ref();
-    if matroska::looks_like_ebml(bytes) {
+    let bytes = &source;
+    if matroska::looks_like_ebml(bytes.metadata()) {
         source.validate_current()?;
         return write_matroska_hls_fmp4_init(bytes, output, options);
     }
@@ -846,8 +861,8 @@ pub fn write_hls_fmp4_segment(
     options: HlsOptions,
 ) -> Result<HlsSegmentInfo> {
     let source = map_input(input)?;
-    let bytes = source.as_ref();
-    if matroska::looks_like_ebml(bytes) {
+    let bytes = &source;
+    if matroska::looks_like_ebml(bytes.metadata()) {
         source.validate_current()?;
         return write_matroska_hls_fmp4_segment(bytes, index, output, options);
     }
@@ -871,8 +886,8 @@ pub fn write_hls_fmp4_segments(
         return Ok(Vec::new());
     }
     let source = map_input(input)?;
-    let bytes = source.as_ref();
-    if matroska::looks_like_ebml(bytes) {
+    let bytes = &source;
+    if matroska::looks_like_ebml(bytes.metadata()) {
         source.validate_current()?;
         return write_matroska_hls_fmp4_segments(bytes, output_dir, start_index, count, options);
     }
@@ -885,7 +900,7 @@ pub fn write_hls_fmp4_segments(
 }
 
 fn map_input(input: &Path) -> Result<MappedMediaFile> {
-    Ok(MappedMediaFile::open(input)?)
+    Ok(MappedMediaFile::open_packet_copy(input)?)
 }
 
 /// Writes one MPEG-TS media segment for a source.
@@ -895,9 +910,9 @@ pub fn write_hls_segment(
     output: &Path,
     options: HlsOptions,
 ) -> Result<HlsSegmentInfo> {
-    let source = MappedMediaFile::open(input)?;
-    let bytes = source.as_ref();
-    if matroska::looks_like_ebml(bytes) {
+    let source = MappedMediaFile::open_packet_copy(input)?;
+    let bytes = &source;
+    if matroska::looks_like_ebml(bytes.metadata()) {
         source.validate_current()?;
         return write_matroska_hls_segment(bytes, index, output, options);
     }
@@ -918,14 +933,14 @@ pub fn write_hls_segments(
         return Ok(Vec::new());
     }
 
-    let source = MappedMediaFile::open(input)?;
-    let bytes = source.as_ref();
-    if matroska::looks_like_ebml(bytes) {
+    let source = MappedMediaFile::open_packet_copy(input)?;
+    let bytes = &source;
+    if matroska::looks_like_ebml(bytes.metadata()) {
         source.validate_current()?;
         let segment_target_ms = options.segment_target_ms.max(500);
         let plan = hls_playlist_plan_from_matroska(
             bytes,
-            bytes.len() as u64,
+            bytes.source_len(),
             options.audio_track_id.as_deref(),
             segment_target_ms,
         )?;
@@ -1056,9 +1071,9 @@ pub fn write_hls_fmp4_segment_window(
     start_ms: u64,
     end_ms: u64,
 ) -> Result<HlsSegmentInfo> {
-    let source = MappedMediaFile::open(input)?;
-    let bytes = source.as_ref();
-    if !matroska::looks_like_ebml(bytes) {
+    let source = MappedMediaFile::open_packet_copy(input)?;
+    let bytes = &source;
+    if !matroska::looks_like_ebml(bytes.metadata()) {
         bail!("windowed fMP4 HLS segment currently supports Matroska/WebM sources");
     }
     let window = SegmentWindow {
@@ -1095,10 +1110,10 @@ impl From<MatroskaTrackKind> for HlsTrackKind {
 }
 
 fn hls_tracks_from_mp4(
-    bytes: &[u8],
+    bytes: &(impl HlsInput + ?Sized),
     requested_audio_track_id: Option<&str>,
 ) -> Result<HlsTrackSet> {
-    let meta = mp4::parse_basic_metadata(bytes);
+    let meta = mp4::parse_basic_metadata(bytes.metadata());
     let (video_track_id, video_meta) =
         select_mp4_hls_track(&meta.tracks, Mp4TrackKind::Video, None)
             .ok_or_else(|| anyhow!("native HLS MP4 path currently requires H.264 or HEVC video"))?;
@@ -1115,14 +1130,14 @@ fn hls_tracks_from_mp4(
                         anyhow!("native HLS MP4 path currently requires AAC, AC-3, or E-AC-3 audio")
                     })
             })?;
-    let video_config = mp4::parse_codec_config(bytes, Some(&video_track_id))
+    let video_config = mp4::parse_codec_config(bytes.metadata(), Some(&video_track_id))
         .ok_or_else(|| anyhow!("missing MP4 video decoder config"))?;
-    let audio_config = mp4::parse_codec_config(bytes, Some(&audio_track_id))
+    let audio_config = mp4::parse_codec_config(bytes.metadata(), Some(&audio_track_id))
         .ok_or_else(|| anyhow!("missing MP4 audio decoder config"))?;
-    let video_packets = mp4::parse_packet_track(bytes, Some(&video_track_id))
+    let video_packets = mp4::parse_packet_track(bytes.metadata(), Some(&video_track_id))
         .ok_or_else(|| anyhow!("missing MP4 video packet index"))?
         .packets;
-    let audio_packets = mp4::parse_packet_track(bytes, Some(&audio_track_id))
+    let audio_packets = mp4::parse_packet_track(bytes.metadata(), Some(&audio_track_id))
         .ok_or_else(|| anyhow!("missing MP4 audio packet index"))?
         .packets;
 
@@ -1213,7 +1228,7 @@ fn hls_tracks_from_mp4(
                 .ok_or_else(|| anyhow!("missing MP4 AC-3 packet for dac3"))?;
             let frame = packet_bytes(bytes, first_packet)?;
             Some(Fmp4SampleEntry::Ac3 {
-                dac3: parse_ac3_specific_box(frame)?.dac3_payload(),
+                dac3: parse_ac3_specific_box(&frame)?.dac3_payload(),
                 channel_count: clamped_u16(audio_meta.channels.unwrap_or(2)),
                 sample_rate: audio_meta.sample_rate.unwrap_or(48_000),
             })
@@ -1224,7 +1239,7 @@ fn hls_tracks_from_mp4(
                 .ok_or_else(|| anyhow!("missing MP4 E-AC-3 packet for dec3"))?;
             let access_unit = packet_bytes(bytes, first_packet)?;
             Some(Fmp4SampleEntry::Eac3 {
-                dec3: parse_eac3_specific_box(access_unit)?.dec3_payload(),
+                dec3: parse_eac3_specific_box(&access_unit)?.dec3_payload(),
                 channel_count: clamped_u16(audio_meta.channels.unwrap_or(2)),
                 sample_rate: audio_meta.sample_rate.unwrap_or(48_000),
             })
@@ -1289,10 +1304,10 @@ fn hls_tracks_from_mp4(
 }
 
 fn hls_tracks_from_matroska(
-    bytes: &[u8],
+    bytes: &(impl HlsInput + ?Sized),
     requested_audio_track_id: Option<&str>,
 ) -> Result<HlsTrackSet> {
-    let meta = matroska::parse_basic_metadata(bytes);
+    let meta = matroska::parse_basic_metadata(bytes.metadata());
     let (video_track_id, video) =
         select_matroska_hls_track(&meta.tracks, MatroskaTrackKind::Video, None).ok_or_else(
             || anyhow!("native HLS Matroska path currently requires H.264 or HEVC video"),
@@ -1311,11 +1326,13 @@ fn hls_tracks_from_matroska(
                 anyhow!("native HLS Matroska path currently requires AAC, AC-3, or E-AC-3 audio")
             })
     })?;
-    let video_packets = matroska::parse_packet_track(bytes, Some(&video_track_id))
-        .ok_or_else(|| anyhow!("missing Matroska video packet index"))?
+    let video_packets = bytes
+        .matroska_packets(&[&video_track_id], 0, u64::MAX)?
+        .remove(0)
         .packets;
-    let audio_packets = matroska::parse_packet_track(bytes, Some(&audio_track_id))
-        .ok_or_else(|| anyhow!("missing Matroska audio packet index"))?
+    let audio_packets = bytes
+        .matroska_packets(&[&audio_track_id], 0, u64::MAX)?
+        .remove(0)
         .packets;
     let video_payload = match video.codec.as_str() {
         "h264" => {
@@ -1391,7 +1408,7 @@ fn hls_tracks_from_matroska(
                 .ok_or_else(|| anyhow!("missing Matroska AC-3 packet for dac3"))?;
             let frame = packet_bytes(bytes, first_packet)?;
             Some(Fmp4SampleEntry::Ac3 {
-                dac3: parse_ac3_specific_box(frame)?.dac3_payload(),
+                dac3: parse_ac3_specific_box(&frame)?.dac3_payload(),
                 channel_count: clamped_u16(audio.channels.unwrap_or(2)),
                 sample_rate: audio.sample_rate.unwrap_or(48_000),
             })
@@ -1402,7 +1419,7 @@ fn hls_tracks_from_matroska(
                 .ok_or_else(|| anyhow!("missing Matroska E-AC-3 packet for dec3"))?;
             let access_unit = packet_bytes(bytes, first_packet)?;
             Some(Fmp4SampleEntry::Eac3 {
-                dec3: parse_eac3_specific_box(access_unit)?.dec3_payload(),
+                dec3: parse_eac3_specific_box(&access_unit)?.dec3_payload(),
                 channel_count: clamped_u16(audio.channels.unwrap_or(2)),
                 sample_rate: audio.sample_rate.unwrap_or(48_000),
             })
@@ -1527,7 +1544,7 @@ fn matroska_video_fmp4_sample_entry(
 }
 
 fn matroska_audio_fmp4_sample_entry(
-    bytes: &[u8],
+    bytes: &(impl HlsInput + ?Sized),
     track: &matroska::MatroskaTrack,
     packets: &[PacketRef],
 ) -> Result<Option<Fmp4SampleEntry>> {
@@ -1546,7 +1563,7 @@ fn matroska_audio_fmp4_sample_entry(
                 .ok_or_else(|| anyhow!("missing Matroska AC-3 packet for dac3"))?;
             let frame = packet_bytes(bytes, first_packet)?;
             Ok(Some(Fmp4SampleEntry::Ac3 {
-                dac3: parse_ac3_specific_box(frame)?.dac3_payload(),
+                dac3: parse_ac3_specific_box(&frame)?.dac3_payload(),
                 channel_count: clamped_u16(track.channels.unwrap_or(2)),
                 sample_rate: track.sample_rate.unwrap_or(48_000),
             }))
@@ -1557,7 +1574,7 @@ fn matroska_audio_fmp4_sample_entry(
                 .ok_or_else(|| anyhow!("missing Matroska E-AC-3 packet for dec3"))?;
             let access_unit = packet_bytes(bytes, first_packet)?;
             Ok(Some(Fmp4SampleEntry::Eac3 {
-                dec3: parse_eac3_specific_box(access_unit)?.dec3_payload(),
+                dec3: parse_eac3_specific_box(&access_unit)?.dec3_payload(),
                 channel_count: clamped_u16(track.channels.unwrap_or(2)),
                 sample_rate: track.sample_rate.unwrap_or(48_000),
             }))
@@ -1587,12 +1604,12 @@ fn matroska_audio_fmp4_sample_entry(
 }
 
 fn hls_playlist_plan_from_mp4(
-    bytes: &[u8],
+    bytes: &(impl HlsInput + ?Sized),
     source_len: u64,
     requested_audio_track_id: Option<&str>,
     segment_target_ms: u64,
 ) -> Result<HlsVodPlaylistPlan> {
-    let meta = mp4::parse_basic_metadata(bytes);
+    let meta = mp4::parse_basic_metadata(bytes.metadata());
     let (video_track_id, video_meta) =
         select_mp4_hls_track(&meta.tracks, Mp4TrackKind::Video, None)
             .ok_or_else(|| anyhow!("native HLS MP4 path currently requires H.264 or HEVC video"))?;
@@ -1609,12 +1626,13 @@ fn hls_playlist_plan_from_mp4(
                         anyhow!("native HLS MP4 path currently requires AAC, AC-3, or E-AC-3 audio")
                     })
             })?;
-    let video_config = mp4::parse_codec_config(bytes, Some(&video_track_id))
+    let video_config = mp4::parse_codec_config(bytes.metadata(), Some(&video_track_id))
         .ok_or_else(|| anyhow!("missing MP4 video decoder config"))?;
-    let audio_config = mp4::parse_codec_config(bytes, Some(&audio_track_id))
+    let audio_config = mp4::parse_codec_config(bytes.metadata(), Some(&audio_track_id))
         .ok_or_else(|| anyhow!("missing MP4 audio decoder config"))?;
-    let video_plan = mp4::parse_chunk_plan(bytes, Some(&video_track_id), segment_target_ms)
-        .ok_or_else(|| anyhow!("missing MP4 video chunk plan"))?;
+    let video_plan =
+        mp4::parse_chunk_plan(bytes.metadata(), Some(&video_track_id), segment_target_ms)
+            .ok_or_else(|| anyhow!("missing MP4 video chunk plan"))?;
     hls_playlist_plan_from_chunk_plan(
         video_track_id,
         audio_track_id,
@@ -1631,12 +1649,12 @@ fn hls_playlist_plan_from_mp4(
 }
 
 fn hls_playlist_plan_from_matroska(
-    bytes: &[u8],
+    bytes: &(impl HlsInput + ?Sized),
     source_len: u64,
     requested_audio_track_id: Option<&str>,
     segment_target_ms: u64,
 ) -> Result<HlsVodPlaylistPlan> {
-    let meta = matroska::parse_basic_metadata(bytes);
+    let meta = matroska::parse_basic_metadata(bytes.metadata());
     let (video_track_id, video) =
         select_matroska_hls_track(&meta.tracks, MatroskaTrackKind::Video, None).ok_or_else(
             || anyhow!("native HLS Matroska path currently requires H.264 or HEVC video"),
@@ -1655,8 +1673,7 @@ fn hls_playlist_plan_from_matroska(
                 anyhow!("native HLS Matroska path currently requires AAC, AC-3, or E-AC-3 audio")
             })
     })?;
-    let video_plan = matroska::parse_chunk_plan(bytes, Some(&video_track_id), segment_target_ms)
-        .ok_or_else(|| anyhow!("missing Matroska video chunk plan"))?;
+    let video_plan = bytes.matroska_plan(&video_track_id, segment_target_ms)?;
     hls_playlist_plan_from_chunk_plan(
         video_track_id,
         audio_track_id,
@@ -1669,7 +1686,7 @@ fn hls_playlist_plan_from_matroska(
 }
 
 fn write_matroska_hls_segment(
-    bytes: &[u8],
+    bytes: &(impl HlsInput + ?Sized),
     index: usize,
     output: &Path,
     options: HlsOptions,
@@ -1677,7 +1694,7 @@ fn write_matroska_hls_segment(
     let segment_target_ms = options.segment_target_ms.max(500);
     let plan = hls_playlist_plan_from_matroska(
         bytes,
-        bytes.len() as u64,
+        bytes.source_len(),
         options.audio_track_id.as_deref(),
         segment_target_ms,
     )?;
@@ -1685,7 +1702,7 @@ fn write_matroska_hls_segment(
 }
 
 fn write_matroska_hls_segment_from_plan(
-    bytes: &[u8],
+    bytes: &(impl HlsInput + ?Sized),
     index: usize,
     output: &Path,
     plan: &HlsVodPlaylistPlan,
@@ -1710,14 +1727,14 @@ fn write_matroska_hls_segment_from_plan(
 }
 
 fn write_matroska_hls_fmp4_vod(
-    bytes: &[u8],
+    bytes: &(impl HlsInput + ?Sized),
     output_dir: &Path,
     options: HlsOptions,
 ) -> Result<HlsOutput> {
     let segment_target_ms = options.segment_target_ms.max(500);
     let plan = hls_playlist_plan_from_matroska(
         bytes,
-        bytes.len() as u64,
+        bytes.source_len(),
         options.audio_track_id.as_deref(),
         segment_target_ms,
     )?;
@@ -1756,7 +1773,11 @@ fn write_matroska_hls_fmp4_vod(
     })
 }
 
-fn write_matroska_hls_fmp4_init(bytes: &[u8], output: &Path, options: HlsOptions) -> Result<()> {
+fn write_matroska_hls_fmp4_init(
+    bytes: &(impl HlsInput + ?Sized),
+    output: &Path,
+    options: HlsOptions,
+) -> Result<()> {
     let segment_target_ms = options.segment_target_ms.max(500);
     let tracks = matroska_hls_tracks_for_first_window(
         bytes,
@@ -1766,7 +1787,7 @@ fn write_matroska_hls_fmp4_init(bytes: &[u8], output: &Path, options: HlsOptions
     .or_else(|_| {
         let plan = hls_playlist_plan_from_matroska(
             bytes,
-            bytes.len() as u64,
+            bytes.source_len(),
             options.audio_track_id.as_deref(),
             segment_target_ms,
         )?;
@@ -1786,7 +1807,7 @@ fn write_matroska_hls_fmp4_init(bytes: &[u8], output: &Path, options: HlsOptions
 }
 
 fn write_matroska_hls_fmp4_init_from_plan(
-    bytes: &[u8],
+    bytes: &(impl HlsInput + ?Sized),
     output: &Path,
     plan: &HlsVodPlaylistPlan,
 ) -> Result<()> {
@@ -1806,7 +1827,7 @@ fn write_matroska_hls_fmp4_init_from_plan(
 }
 
 fn write_matroska_hls_fmp4_segment(
-    bytes: &[u8],
+    bytes: &(impl HlsInput + ?Sized),
     index: usize,
     output: &Path,
     options: HlsOptions,
@@ -1814,7 +1835,7 @@ fn write_matroska_hls_fmp4_segment(
     let segment_target_ms = options.segment_target_ms.max(500);
     let plan = hls_playlist_plan_from_matroska(
         bytes,
-        bytes.len() as u64,
+        bytes.source_len(),
         options.audio_track_id.as_deref(),
         segment_target_ms,
     )?;
@@ -1822,7 +1843,7 @@ fn write_matroska_hls_fmp4_segment(
 }
 
 fn write_matroska_hls_fmp4_segments(
-    bytes: &[u8],
+    bytes: &(impl HlsInput + ?Sized),
     output_dir: &Path,
     start_index: usize,
     count: usize,
@@ -1831,7 +1852,7 @@ fn write_matroska_hls_fmp4_segments(
     let segment_target_ms = options.segment_target_ms.max(500);
     let plan = hls_playlist_plan_from_matroska(
         bytes,
-        bytes.len() as u64,
+        bytes.source_len(),
         options.audio_track_id.as_deref(),
         segment_target_ms,
     )?;
@@ -1853,7 +1874,7 @@ fn write_matroska_hls_fmp4_segments(
 }
 
 fn write_matroska_hls_fmp4_segment_from_plan(
-    bytes: &[u8],
+    bytes: &(impl HlsInput + ?Sized),
     index: usize,
     output: &Path,
     plan: &HlsVodPlaylistPlan,
@@ -1881,11 +1902,11 @@ fn write_matroska_hls_fmp4_segment_from_plan(
 }
 
 fn matroska_hls_tracks_for_window(
-    bytes: &[u8],
+    bytes: &(impl HlsInput + ?Sized),
     plan: &HlsVodPlaylistPlan,
     window: SegmentWindow,
 ) -> Result<HlsTrackSet> {
-    let meta = matroska::parse_basic_metadata(bytes);
+    let meta = matroska::parse_basic_metadata(bytes.metadata());
     let (_, video) = select_matroska_hls_track(&meta.tracks, MatroskaTrackKind::Video, None)
         .ok_or_else(|| {
             anyhow!("native HLS Matroska path currently requires H.264 or HEVC video")
@@ -1901,13 +1922,11 @@ fn matroska_hls_tracks_for_window(
             plan.audio_track_id()
         )
     })?;
-    let tracks = matroska::parse_packet_tracks_in_time_window(
-        bytes,
+    let tracks = bytes.matroska_packets(
         &[plan.video_track_id(), plan.audio_track_id()],
         window.start_ms,
         window.end_ms,
-    )
-    .ok_or_else(|| anyhow!("missing Matroska packets for HLS segment window"))?;
+    )?;
     let video_packets = tracks
         .iter()
         .find(|track| track.id == plan.video_track_id())
@@ -1947,7 +1966,7 @@ fn matroska_hls_tracks_for_window(
 }
 
 fn matroska_hls_tracks_for_first_window(
-    bytes: &[u8],
+    bytes: &(impl HlsInput + ?Sized),
     requested_audio_track_id: Option<&str>,
     segment_target_ms: u64,
 ) -> Result<HlsTrackSet> {
@@ -1963,11 +1982,11 @@ fn matroska_hls_tracks_for_first_window(
 }
 
 fn matroska_hls_tracks_for_selected_window(
-    bytes: &[u8],
+    bytes: &(impl HlsInput + ?Sized),
     requested_audio_track_id: Option<&str>,
     window: SegmentWindow,
 ) -> Result<HlsTrackSet> {
-    let meta = matroska::parse_basic_metadata(bytes);
+    let meta = matroska::parse_basic_metadata(bytes.metadata());
     let (video_track_id, video) =
         select_matroska_hls_track(&meta.tracks, MatroskaTrackKind::Video, None).ok_or_else(
             || anyhow!("native HLS Matroska path currently requires H.264 or HEVC video"),
@@ -1986,13 +2005,11 @@ fn matroska_hls_tracks_for_selected_window(
                 anyhow!("native HLS Matroska path currently requires AAC, AC-3, or E-AC-3 audio")
             })
     })?;
-    let tracks = matroska::parse_packet_tracks_in_time_window(
-        bytes,
+    let tracks = bytes.matroska_packets(
         &[video_track_id.as_str(), audio_track_id.as_str()],
         window.start_ms,
         window.end_ms,
-    )
-    .ok_or_else(|| anyhow!("missing Matroska packets for HLS init window"))?;
+    )?;
     let video_packets = tracks
         .iter()
         .find(|track| track.id == video_track_id)
@@ -2220,7 +2237,82 @@ fn track_bytes_by_window(track: &HlsTrack, windows: &[SegmentWindow]) -> Vec<u64
     out
 }
 
-fn mux_segment(bytes: &[u8], tracks: &HlsTrackSet, window: SegmentWindow) -> Result<Vec<u8>> {
+fn check_mux_budget(
+    source: &(impl HlsInput + ?Sized),
+    tracks: &HlsTrackSet,
+    window: SegmentWindow,
+    transport_stream: bool,
+) -> Result<()> {
+    let mut output = 1024usize;
+    let mut compressed = 0usize;
+    for track in [&tracks.video, &tracks.audio] {
+        let (factor, private_bytes) = match &track.payload {
+            PayloadKind::Avc {
+                nalu_length_size,
+                parameter_sets,
+            } => (
+                4usize.div_ceil(usize::from(*nalu_length_size).max(1)),
+                parameter_sets
+                    .sps
+                    .iter()
+                    .chain(&parameter_sets.pps)
+                    .map(|bytes| bytes.len().saturating_add(4))
+                    .sum::<usize>(),
+            ),
+            PayloadKind::Hevc {
+                nalu_length_size,
+                parameter_sets_annex_b,
+            } => (
+                4usize.div_ceil(usize::from(*nalu_length_size).max(1)),
+                parameter_sets_annex_b.len(),
+            ),
+            _ => (1, 7),
+        };
+        for packet in &track.packets {
+            let time = packet.pts.as_millis();
+            if time < window.start_ms || time >= window.end_ms {
+                continue;
+            }
+            compressed = compressed.saturating_add(packet.size as usize);
+            let size = if transport_stream {
+                (packet.size as usize)
+                    .saturating_mul(factor)
+                    .saturating_add(private_bytes)
+                    .saturating_add(64)
+                    .div_ceil(176)
+                    .saturating_mul(188)
+            } else {
+                (packet.size as usize).saturating_add(16)
+            };
+            output = output.saturating_add(size);
+        }
+    }
+    for (resource, requested, limit) in [
+        (
+            "HLS compressed window",
+            compressed,
+            source.compressed_limit(),
+        ),
+        ("HLS output", output, source.output_limit()),
+    ] {
+        if requested > limit {
+            return Err(anyhow::Error::from(crate::ResourceError::Exceeded {
+                resource,
+                requested: requested as u64,
+                limit: limit as u64,
+            })
+            .into());
+        }
+    }
+    Ok(())
+}
+
+fn mux_segment(
+    bytes: &(impl HlsInput + ?Sized),
+    tracks: &HlsTrackSet,
+    window: SegmentWindow,
+) -> Result<Vec<u8>> {
+    check_mux_budget(bytes, tracks, window, true)?;
     let mut mux = TsMuxer::new(
         ts_stream_type(&tracks.video.payload),
         ts_stream_type(&tracks.audio.payload),
@@ -2279,7 +2371,12 @@ fn mux_segment(bytes: &[u8], tracks: &HlsTrackSet, window: SegmentWindow) -> Res
     Ok(mux.into_bytes())
 }
 
-fn mux_fmp4_segment(bytes: &[u8], tracks: &HlsTrackSet, window: SegmentWindow) -> Result<Vec<u8>> {
+fn mux_fmp4_segment(
+    bytes: &(impl HlsInput + ?Sized),
+    tracks: &HlsTrackSet,
+    window: SegmentWindow,
+) -> Result<Vec<u8>> {
+    check_mux_budget(bytes, tracks, window, false)?;
     let video_packets = packets_in_window(&tracks.video.packets, window);
     let audio_packets = packets_in_window(&tracks.audio.packets, window);
     if video_packets.is_empty() {
@@ -2366,27 +2463,12 @@ fn packets_in_window(packets: &[PacketRef], window: SegmentWindow) -> Vec<Packet
         .collect()
 }
 
-fn raw_packet_payload(bytes: &[u8], packets: &[PacketRef]) -> Result<Vec<u8>> {
-    let byte_count = packets
-        .iter()
-        .map(|packet| u64::from(packet.size))
-        .sum::<u64>();
-    let mut out = Vec::with_capacity(usize::try_from(byte_count).unwrap_or(bytes.len()));
-    for packet in packets {
-        out.extend_from_slice(packet_bytes(bytes, packet)?);
-    }
-    Ok(out)
+fn raw_packet_payload(bytes: &(impl HlsInput + ?Sized), packets: &[PacketRef]) -> Result<Vec<u8>> {
+    bytes.payload(packets)
 }
 
-fn packet_bytes<'a>(bytes: &'a [u8], packet: &PacketRef) -> Result<&'a [u8]> {
-    let start = packet.source_offset as usize;
-    let end = start
-        .checked_add(packet.size as usize)
-        .ok_or_else(|| anyhow!("packet range overflows"))?;
-    if end > bytes.len() {
-        bail!("packet range is outside source");
-    }
-    Ok(&bytes[start..end])
+fn packet_bytes(bytes: &(impl HlsInput + ?Sized), packet: &PacketRef) -> Result<Vec<u8>> {
+    bytes.payload(std::slice::from_ref(packet))
 }
 
 fn fallback_video_codec_string(codec: &str) -> String {
@@ -2550,7 +2632,7 @@ mod tests {
     fn test_plan_with_one_window() -> HlsVodPlan {
         let file = tempfile::NamedTempFile::new().expect("tempfile");
         std::fs::write(file.path(), [0_u8]).expect("seed temp file");
-        let source = MappedMediaFile::open(file.path()).expect("map temp file");
+        let source = MappedMediaFile::open_packet_copy(file.path()).expect("open temp file");
         let packet = PacketRef {
             source_offset: 0,
             size: 0,
@@ -3012,6 +3094,7 @@ mod tests {
                 width: None,
                 height: None,
                 pixel_format: None,
+                transfer_characteristics: None,
                 channels: Some(2),
                 sample_rate: Some(48_000),
                 atmos: false,
@@ -3031,6 +3114,7 @@ mod tests {
                 width: None,
                 height: None,
                 pixel_format: None,
+                transfer_characteristics: None,
                 channels: Some(6),
                 sample_rate: Some(48_000),
                 atmos: false,
@@ -3066,6 +3150,7 @@ mod tests {
                 width: None,
                 height: None,
                 pixel_format: None,
+                transfer_characteristics: None,
                 channels: Some(6),
                 sample_rate: Some(48_000),
                 atmos: false,
@@ -3085,6 +3170,7 @@ mod tests {
                 width: None,
                 height: None,
                 pixel_format: None,
+                transfer_characteristics: None,
                 channels: Some(6),
                 sample_rate: Some(48_000),
                 atmos: false,
