@@ -907,7 +907,6 @@ dependencies = [
 [[package]]
 name = "mediaway-encoder"
 version = "0.1.4"
-source = "git+https://github.com/nyxways/mediaway.git?rev=ad056ebf139a624a024016727030365eca9cfa08#ad056ebf139a624a024016727030365eca9cfa08"
 dependencies = [
  "bytes",
  "cros-libva",
