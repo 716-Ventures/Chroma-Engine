@@ -4853,9 +4853,9 @@ SOFTWARE.
 - iso-bmff 0.1.1 — https://github.com/nyxways/mediaway
 - iso-cenc 0.1.1 — https://github.com/nyxways/mediaway
 - mediaway-common 0.1.4 — https://github.com/nyxways/mediaway
-- mediaway-encoder 0.1.4 — https://github.com/nyxways/mediaway
 - mediaway-sw 0.1.4 — https://github.com/nyxways/mediaway
 - mediaway-decoder 0.1.4 — https://github.com/nyxways/mediaway
+- mediaway-encoder 0.1.4 — https://github.com/nyxways/mediaway
 
 
 ```text

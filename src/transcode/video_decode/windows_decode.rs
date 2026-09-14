@@ -655,8 +655,9 @@ mod tests {
     fn hevc_main10_selects_p010_surface() {
         let mut config = [0_u8; 23];
         config[0] = 1;
-        config[13] = 1;
-        config[14] = 2;
+        config[16] = 0xfd; // YUV420 (chroma_format_idc = 1).
+        config[17] = 0xfa; // bit_depth_luma_minus8 = 2.
+        config[18] = 0xfa; // bit_depth_chroma_minus8 = 2.
 
         assert_eq!(
             hevc_surface_format(&config).unwrap(),

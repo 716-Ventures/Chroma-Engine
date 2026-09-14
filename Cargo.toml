@@ -95,7 +95,7 @@ oxideav-nvidia = { version = "=0.0.3", path = "third_party/oxideav-nvidia", opti
 [target.'cfg(target_os = "windows")'.dependencies]
 mediaway-common = { version = "=0.1.4", git = "https://github.com/nyxways/mediaway.git", rev = "ad056ebf139a624a024016727030365eca9cfa08" }
 mediaway-decoder = { version = "=0.1.4", path = "third_party/mediaway-decoder", default-features = false, features = ["video"] }
-mediaway-encoder = { version = "=0.1.4", git = "https://github.com/nyxways/mediaway.git", rev = "ad056ebf139a624a024016727030365eca9cfa08", default-features = false, features = ["video"] }
+mediaway-encoder = { version = "=0.1.4", path = "third_party/mediaway-encoder", default-features = false, features = ["video"] }
 windows = { version = "0.62.2", features = [
     "Win32_Foundation",
     "Win32_Graphics_Direct3D",
