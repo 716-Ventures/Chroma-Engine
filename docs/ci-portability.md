@@ -1,5 +1,8 @@
 # CI platform builds
 
+macOS CI tests and release builds support Apple Silicon only. Intel macOS is
+excluded from both matrices.
+
 The test matrix explicitly selects Rust 1.90.0 (MSRV) and 1.97.1 using
 `RUSTUP_TOOLCHAIN`. This overrides the developer toolchain file. Cache keys
 separate operating systems, architectures, and compiler versions.

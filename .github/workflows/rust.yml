@@ -22,7 +22,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, macos-15-intel, ubuntu-latest, windows-latest]
+        os: [macos-latest, ubuntu-latest, windows-latest]
         toolchain: ["1.90.0", "1.97.1"]
     steps:
       - name: Checkout
@@ -163,8 +163,6 @@ jobs:
       matrix:
         include:
           - os: macos-latest
-            features: ""
-          - os: macos-15-intel
             features: ""
           - os: ubuntu-latest
             features: "--features linux-vaapi,linux-nvidia"
