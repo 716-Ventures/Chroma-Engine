@@ -1,6 +1,6 @@
 use chroma_engine::{
-    ContainerKind, PacketRef, TimeDelta, TimePoint, parse_subrip, plan_fixed_chunks,
-    segment_webvtt, sniff_container,
+    ContainerKind, PacketRef, ResourceError, TimeDelta, TimePoint, parse_subrip, plan_fixed_chunks,
+    segment_webvtt, sniff_container, try_segment_webvtt,
 };
 use proptest::prelude::*;
 
@@ -42,7 +42,9 @@ proptest! {
         cue_count in 1_usize..300,
         cue_duration_ms in 1_u64..4_000,
         gap_ms in 0_u64..1_000,
-        segment_ms in 1_u64..10_000,
+        // Keep the success property within the documented segmentation budgets.
+        // Tiny windows over long tracks are covered by the rejection regression below.
+        segment_ms in 100_u64..10_000,
     ) {
         let source = synthetic_subrip(cue_count, cue_duration_ms, gap_ms);
         let cues = parse_subrip(&source);
@@ -76,6 +78,33 @@ proptest! {
                 | ContainerKind::Webm
                 | ContainerKind::Unknown
         ));
+    }
+}
+
+#[test]
+fn subtitle_segmentation_rejects_ci_regression_over_budget() {
+    let cues = parse_subrip(&synthetic_subrip(119, 2823, 543));
+    assert_eq!(cues.len(), 119);
+    assert!(matches!(
+        try_segment_webvtt(&cues, 1, "s0"),
+        Err(ResourceError::Exceeded {
+            resource: "subtitle segments",
+            requested,
+            limit: 100_000,
+        }) if requested == cues.last().unwrap().end_ms && requested > 100_000
+    ));
+    assert!(segment_webvtt(&cues, 1, "s0").is_empty());
+}
+
+#[test]
+fn subtitle_segmentation_accepts_tiny_windows_within_budget() {
+    let cues = parse_subrip(&synthetic_subrip(1, 3, 0));
+    let segments = try_segment_webvtt(&cues, 1, "s0").unwrap();
+    assert_eq!(segments.len(), 3);
+    for (index, segment) in segments.iter().enumerate() {
+        assert_eq!(segment.start_ms, index as u64);
+        assert_eq!(segment.duration_ms, 1);
+        assert!(segment.body.contains("Caption 1"));
     }
 }
 
