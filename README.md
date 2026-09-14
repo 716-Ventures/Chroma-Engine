@@ -210,3 +210,10 @@ Caches are uncontrolled, and tiny fixtures do not establish movie startup latenc
 ceilings, or tvOS playback quality. See the [audit ledger](docs/audits/2026-09-stability-performance-plan.md)
 for measured evidence and remaining acceptance work, and the
 [implementation checklist](docs/implementation-checklist.md) for the broader feature inventory.
+
+## License
+
+Chroma Engine is licensed under the [Apache License, Version 2.0](LICENSE)
+(`Apache-2.0`). Third-party dependencies and vendored components retain their own
+licenses; see [third-party notices](THIRD_PARTY_NOTICES.md) and the license files
+in `third_party/`.

@@ -178,7 +178,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist/chroma-engine
-          cp README.md THIRD_PARTY_NOTICES.md dist/chroma-engine/
+          cp LICENSE README.md THIRD_PARTY_NOTICES.md dist/chroma-engine/
           cp third_party/rusty_aac/LICENSE dist/chroma-engine/rusty-aac-LICENSE
       - name: Bundle macOS runtime
         if: runner.os == 'macOS'
@@ -312,7 +312,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist/chroma-engine
-          cp README.md THIRD_PARTY_NOTICES.md dist/chroma-engine/
+          cp LICENSE README.md THIRD_PARTY_NOTICES.md dist/chroma-engine/
           cp third_party/rusty_aac/LICENSE dist/chroma-engine/rusty-aac-LICENSE
       - name: Bundle Linux ARM64 runtime
         if: runner.os == 'Linux'

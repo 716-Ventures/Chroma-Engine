@@ -6,9 +6,10 @@ and executes supported native audio/video conversions. It is not a media server,
 player, or FFmpeg command-line compatibility layer.
 
 This guide describes the current source API. The package is version `0.1.0`, is
-not published to crates.io (`publish = false`), and declares a proprietary license.
-Confirm usage and redistribution permissions with the maintainer before embedding
-or shipping it; dependency notices are in [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md).
+not published to crates.io (`publish = false`), and is licensed under the
+[Apache License, Version 2.0](../LICENSE) (`Apache-2.0`). Third-party dependencies
+and vendored components retain their own licenses; dependency notices are in
+[THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md).
 
 ## Philosophy
 
@@ -71,12 +72,14 @@ own Rust worker service around the library; that protocol and lifecycle are host
 
 ### Rust dependency
 
-Use a pinned Git revision or a local checkout. This is a concrete reproducible
-baseline, not a floating “latest” selector:
+Use a Git dependency or a local checkout. This example selects `main`; Cargo.lock
+records the resolved revision. For releases, replace `branch = "main"` with
+`rev = "<tested-commit-sha>"` using a tested commit that includes the Apache-2.0
+license. Check the license in the selected revision before distributing it.
 
 ```toml
 [dependencies]
-chroma-engine = { git = "https://github.com/716-Ventures/Chroma-Engine.git", rev = "3ac906705158154a7c4f9b7f1649ef716990912d" }
+chroma-engine = { git = "https://github.com/716-Ventures/Chroma-Engine.git", branch = "main" }
 ```
 
 For local development, replace that dependency with:
@@ -94,7 +97,7 @@ and [platform support](platform-support.md) for optional GPU features and packag
 
 ### CLI executable
 
-From an authorized checkout:
+From a repository checkout:
 
 ```sh
 cargo build --locked --release

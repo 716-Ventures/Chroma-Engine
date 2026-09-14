@@ -1,5 +1,9 @@
 # Third-Party Notices
 
+Chroma Engine's own code is licensed under the Apache License, Version 2.0; see
+[LICENSE](LICENSE). The third-party components below retain their respective
+licenses and notices. The engine's license does not replace those terms.
+
 ## opus-pure
 
 Copyright 2026 Stephen Berry
