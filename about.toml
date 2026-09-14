@@ -1,0 +1,181 @@
+# Keep compatible with deny.toml. Prefer MIT for dual-licensed dependencies,
+# matching the existing Mediaway notices. No copyleft license is selected.
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "NCSA",
+    "Unicode-3.0",
+    "Unlicense",
+]
+ignore-dev-dependencies = true
+ignore-build-dependencies = false
+ignore-transitive-dependencies = false
+private = { ignore = false }
+targets = [
+    "x86_64-apple-darwin", "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc",
+    "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu",
+]
+
+[vulkanalia.clarify]
+license = "Apache-2.0"
+[[vulkanalia.clarify.git]]
+path = "LICENSE.txt"
+checksum = "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+
+[vulkanalia-sys.clarify]
+license = "Apache-2.0"
+[[vulkanalia-sys.clarify.git]]
+path = "LICENSE.txt"
+checksum = "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+
+# Published packages omit these repository-level license files. Retrieve them
+# at each package's .cargo_vcs_info.json revision and verify their content hashes.
+[cros-libva.clarify]
+license = "BSD-3-Clause"
+[[cros-libva.clarify.git]]
+path = "LICENSE"
+checksum = "3abff8ddf961dfaf4b0cb5dc49a60da7f7c1f40db2c77a82c564349db91a8b04"
+
+[libva.clarify]
+license = "BSD-3-Clause"
+[[libva.clarify.git]]
+path = "LICENSE"
+checksum = "3abff8ddf961dfaf4b0cb5dc49a60da7f7c1f40db2c77a82c564349db91a8b04"
+
+[bitfields.clarify]
+license = "MIT"
+[[bitfields.clarify.git]]
+path = "LICENSE"
+checksum = "20e54144e38eee8d67e970ab43fd4f124519931090ac015be8c7ff1a6b4a5f88"
+
+[bitfields-impl.clarify]
+license = "MIT"
+[[bitfields-impl.clarify.git]]
+path = "LICENSE"
+checksum = "20e54144e38eee8d67e970ab43fd4f124519931090ac015be8c7ff1a6b4a5f88"
+
+[profiling.clarify]
+license = "MIT"
+[[profiling.clarify.git]]
+path = "LICENSE-MIT"
+checksum = "c8167fdeeed46d3f244d3f85c5bf998ce889343691c32be2c61a8bc4b5c08333"
+
+[profiling-procmacros.clarify]
+license = "MIT"
+[[profiling-procmacros.clarify.git]]
+path = "LICENSE-MIT"
+checksum = "c8167fdeeed46d3f244d3f85c5bf998ce889343691c32be2c61a8bc4b5c08333"
+
+# Preserve the additional standards/patent notice as well as the MIT terms.
+[nvenc.clarify]
+license = "MIT"
+[[nvenc.clarify.git]]
+path = "LICENSE.txt"
+checksum = "5a9cca4cd9046e50e3be3d6fb6b984dc846da6eebce94b49b9a5a7e82847d99f"
+
+[windows.clarify]
+license = "MIT"
+[[windows.clarify.files]]
+path = "license-mit"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+
+[windows-collections.clarify]
+license = "MIT"
+[[windows-collections.clarify.files]]
+path = "license-mit"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+
+[windows-core.clarify]
+license = "MIT"
+[[windows-core.clarify.files]]
+path = "license-mit"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+
+[windows-future.clarify]
+license = "MIT"
+[[windows-future.clarify.files]]
+path = "license-mit"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+
+[windows-implement.clarify]
+license = "MIT"
+[[windows-implement.clarify.files]]
+path = "license-mit"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+
+[windows-interface.clarify]
+license = "MIT"
+[[windows-interface.clarify.files]]
+path = "license-mit"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+
+[windows-link.clarify]
+license = "MIT"
+[[windows-link.clarify.files]]
+path = "license-mit"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+
+[windows-numerics.clarify]
+license = "MIT"
+[[windows-numerics.clarify.files]]
+path = "license-mit"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+
+[windows-result.clarify]
+license = "MIT"
+[[windows-result.clarify.files]]
+path = "license-mit"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+
+[windows-strings.clarify]
+license = "MIT"
+[[windows-strings.clarify.files]]
+path = "license-mit"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+
+[windows-sys.clarify]
+license = "MIT"
+[[windows-sys.clarify.files]]
+path = "license-mit"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+
+[windows-threading.clarify]
+license = "MIT"
+[[windows-threading.clarify.files]]
+path = "license-mit"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+
+[iso-bmff.clarify]
+license = "MIT"
+[[iso-bmff.clarify.files]]
+path = "../../LICENSE-MIT"
+checksum = "e395344a73620ed23c4c4fb584faf8ddbd1b6488377006de36064da5cbc57490"
+
+[iso-cenc.clarify]
+license = "MIT"
+[[iso-cenc.clarify.files]]
+path = "../../LICENSE-MIT"
+checksum = "e395344a73620ed23c4c4fb584faf8ddbd1b6488377006de36064da5cbc57490"
+
+[mediaway-common.clarify]
+license = "MIT"
+[[mediaway-common.clarify.files]]
+path = "../../LICENSE-MIT"
+checksum = "e395344a73620ed23c4c4fb584faf8ddbd1b6488377006de36064da5cbc57490"
+
+[mediaway-encoder.clarify]
+license = "MIT"
+[[mediaway-encoder.clarify.files]]
+path = "../../LICENSE-MIT"
+checksum = "e395344a73620ed23c4c4fb584faf8ddbd1b6488377006de36064da5cbc57490"
+
+[mediaway-sw.clarify]
+license = "MIT"
+[[mediaway-sw.clarify.files]]
+path = "../../LICENSE-MIT"
+checksum = "e395344a73620ed23c4c4fb584faf8ddbd1b6488377006de36064da5cbc57490"

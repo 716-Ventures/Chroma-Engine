@@ -4,6 +4,47 @@ Chroma Engine's own code is licensed under the Apache License, Version 2.0; see
 [LICENSE](LICENSE). The third-party components below retain their respective
 licenses and notices. The engine's license does not replace those terms.
 
+The [generated Rust dependency licenses](THIRD_PARTY_LICENSES.md) supplement this
+file with license texts and package/version attribution from the locked dependency
+graph, including optional platform backends and build dependencies. Not every
+listed package is present in every binary. Distribute both documents with releases.
+Native libraries outside Cargo, such as dav1d, are covered separately below.
+
+## Upstream licensing limitations
+
+The generated inventory explicitly labels canonical SPDX text where the published
+crate and inspected upstream revision do not provide a full license file. It lists
+declared package authors separately; these are not inferred copyright statements.
+`packaging/license-fallbacks.json` (bundled as `license-fallbacks.json`) records the
+exact versions and upstream evidence.
+An inventory check passing does not resolve those upstream documentation gaps.
+
+- The OpenH264 Rust wrapper is BSD-2-Clause, attributed upstream to Ralf Biedert;
+  the source-built codec is BSD-2-Clause, copyright Cisco Systems. See the
+  [wrapper's pinned licensing section](https://github.com/ralfbiedert/openh264-rs/blob/34a1c088b9d5196d86e0743596fe1338ed3a3f4d/openh264/README.md#license).
+  The generated inventory retains the codec's source notices.
+- `drm-fourcc` and `simd_helpers` declare MIT but do not supply a complete license
+  text at the inspected revisions; the inventory retains their declared authors
+  and identifies the canonical text rather than inventing upstream attribution.
+- The `objc2` family, `block2`, and `dispatch2` use their declared MIT option.
+  Upstream's [licensing notes](https://github.com/madsmtm/objc2/blob/8852b424193ca41602281b3d7540d7c8ed51e49a/LICENSE.md)
+  explicitly raise questions about Apple SDK-derived bindings. Those questions
+  are not resolved by Apache 2.0 or by our automated license check. Review the
+  applicable Apple SDK agreement before distributing Apple-target bindings or
+  binaries; do not represent this inventory as legal clearance of those terms.
+
+## Codec patents and redistribution
+
+Software-license compatibility is not a patent-clearance assessment. Apache 2.0
+does not grant rights to unrelated third-party codec patents. Distributors must
+separately assess applicable codec patent and royalty obligations for their
+products and territories.
+
+Chroma builds OpenH264 from source. Cisco's royalty coverage for its separately
+distributed binary module does not automatically cover this build; see the
+[OpenH264 FAQ](https://www.openh264.org/faq.html). Do not advertise Chroma's codecs
+as universally royalty-free based on their open-source software licenses.
+
 ## opus-pure
 
 Copyright 2026 Stephen Berry
@@ -36,6 +77,9 @@ OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 Opus is subject to the royalty-free patent licenses listed by the Xiph.Org Foundation, Microsoft
 Corporation, and Broadcom Corporation in the upstream `opus-pure` license.
+The upstream references are [Xiph.Org](https://datatracker.ietf.org/ipr/1524/),
+[Microsoft](https://datatracker.ietf.org/ipr/1914/), and
+[Broadcom](https://datatracker.ietf.org/ipr/1526/); their terms remain separate.
 
 ## mediaway-common, mediaway-decoder, and mediaway-encoder
 
@@ -113,7 +157,7 @@ OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWA
 
 MIT License
 
-Copyright (c) OxideAV contributors
+Copyright (c) 2026 Karpelès Lab Inc.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy of this software and
 associated documentation files (the "Software"), to deal in the Software without restriction,

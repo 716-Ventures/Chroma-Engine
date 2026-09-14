@@ -215,5 +215,7 @@ for measured evidence and remaining acceptance work, and the
 
 Chroma Engine is licensed under the [Apache License, Version 2.0](LICENSE)
 (`Apache-2.0`). Third-party dependencies and vendored components retain their own
-licenses; see [third-party notices](THIRD_PARTY_NOTICES.md) and the license files
-in `third_party/`.
+licenses; see [third-party notices](THIRD_PARTY_NOTICES.md), the
+[generated dependency licenses](THIRD_PARTY_LICENSES.md), and the license files
+in `third_party/`. Software licensing does not establish codec patent clearance;
+see the [codec redistribution notes](THIRD_PARTY_NOTICES.md#codec-patents-and-redistribution).

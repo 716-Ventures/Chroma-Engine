@@ -1,0 +1,114 @@
+[
+  {
+    "name": "block2",
+    "version": "0.6.2",
+    "license": "MIT",
+    "upstream": "https://github.com/madsmtm/objc2/tree/b4167b582b2f75f9a1be75495c41b765344fd03c",
+    "reason": "Upstream LICENSE.md states the MIT option but does not include full MIT text and raises Apple SDK-derived binding questions. Preserve declared package authors; review SDK terms separately."
+  },
+  {
+    "name": "dispatch2",
+    "version": "0.3.1",
+    "license": "MIT",
+    "upstream": "https://github.com/madsmtm/objc2/tree/8852b424193ca41602281b3d7540d7c8ed51e49a",
+    "reason": "Upstream LICENSE.md states the MIT option but does not include full MIT text and raises Apple SDK-derived binding questions. Preserve declared package authors; review SDK terms separately."
+  },
+  {
+    "name": "drm-fourcc",
+    "version": "2.2.0",
+    "license": "MIT",
+    "upstream": "https://github.com/danielzfranklin/drm-fourcc-rs/tree/7b9f80060ffd4b35cd236437e65a17fb517d163c",
+    "reason": "The published crate and inspected upstream tree declare MIT but provide no complete license file. Retain declared package authors; canonical text is explicitly labelled and is not an invented copyright notice."
+  },
+  {
+    "name": "objc2",
+    "version": "0.6.4",
+    "license": "MIT",
+    "upstream": "https://github.com/madsmtm/objc2/tree/8852b424193ca41602281b3d7540d7c8ed51e49a",
+    "reason": "Upstream LICENSE.md states the MIT option but does not include full MIT text and raises Apple SDK-derived binding questions. Preserve declared package authors; review SDK terms separately."
+  },
+  {
+    "name": "objc2-core-audio",
+    "version": "0.3.2",
+    "license": "MIT",
+    "upstream": "https://github.com/madsmtm/objc2/tree/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b",
+    "reason": "Upstream LICENSE.md states the MIT option but does not include full MIT text and raises Apple SDK-derived binding questions. Preserve declared package authors; review SDK terms separately."
+  },
+  {
+    "name": "objc2-core-audio-types",
+    "version": "0.3.2",
+    "license": "MIT",
+    "upstream": "https://github.com/madsmtm/objc2/tree/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b",
+    "reason": "Upstream LICENSE.md states the MIT option but does not include full MIT text and raises Apple SDK-derived binding questions. Preserve declared package authors; review SDK terms separately."
+  },
+  {
+    "name": "objc2-core-foundation",
+    "version": "0.3.2",
+    "license": "MIT",
+    "upstream": "https://github.com/madsmtm/objc2/tree/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b",
+    "reason": "Upstream LICENSE.md states the MIT option but does not include full MIT text and raises Apple SDK-derived binding questions. Preserve declared package authors; review SDK terms separately."
+  },
+  {
+    "name": "objc2-core-graphics",
+    "version": "0.3.2",
+    "license": "MIT",
+    "upstream": "https://github.com/madsmtm/objc2/tree/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b",
+    "reason": "Upstream LICENSE.md states the MIT option but does not include full MIT text and raises Apple SDK-derived binding questions. Preserve declared package authors; review SDK terms separately."
+  },
+  {
+    "name": "objc2-core-media",
+    "version": "0.3.2",
+    "license": "MIT",
+    "upstream": "https://github.com/madsmtm/objc2/tree/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b",
+    "reason": "Upstream LICENSE.md states the MIT option but does not include full MIT text and raises Apple SDK-derived binding questions. Preserve declared package authors; review SDK terms separately."
+  },
+  {
+    "name": "objc2-core-video",
+    "version": "0.3.2",
+    "license": "MIT",
+    "upstream": "https://github.com/madsmtm/objc2/tree/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b",
+    "reason": "Upstream LICENSE.md states the MIT option but does not include full MIT text and raises Apple SDK-derived binding questions. Preserve declared package authors; review SDK terms separately."
+  },
+  {
+    "name": "objc2-encode",
+    "version": "4.1.0",
+    "license": "MIT",
+    "upstream": "https://github.com/madsmtm/objc2/tree/8d214f5477365ffcbcbb7de058c86ed9a518efb7",
+    "reason": "Upstream LICENSE.md states the MIT option but does not include full MIT text and raises Apple SDK-derived binding questions. Preserve declared package authors; review SDK terms separately."
+  },
+  {
+    "name": "objc2-foundation",
+    "version": "0.3.2",
+    "license": "MIT",
+    "upstream": "https://github.com/madsmtm/objc2/tree/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b",
+    "reason": "Upstream LICENSE.md states the MIT option but does not include full MIT text and raises Apple SDK-derived binding questions. Preserve declared package authors; review SDK terms separately."
+  },
+  {
+    "name": "objc2-metal",
+    "version": "0.3.2",
+    "license": "MIT",
+    "upstream": "https://github.com/madsmtm/objc2/tree/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b",
+    "reason": "Upstream LICENSE.md states the MIT option but does not include full MIT text and raises Apple SDK-derived binding questions. Preserve declared package authors; review SDK terms separately."
+  },
+  {
+    "name": "objc2-video-toolbox",
+    "version": "0.3.2",
+    "license": "MIT",
+    "upstream": "https://github.com/madsmtm/objc2/tree/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b",
+    "reason": "Upstream LICENSE.md states the MIT option but does not include full MIT text and raises Apple SDK-derived binding questions. Preserve declared package authors; review SDK terms separately."
+  },
+  {
+    "name": "openh264",
+    "version": "0.9.8",
+    "license": "BSD-2-Clause",
+    "upstream": "https://github.com/ralfbiedert/openh264-rs/tree/34a1c088b9d5196d86e0743596fe1338ed3a3f4d",
+    "reason": "Upstream README attributes the BSD-2-Clause Rust wrapper to Ralf Biedert but supplies no wrapper-specific full license file. Cisco codec notices are collected separately."
+  },
+  {
+    "name": "simd_helpers",
+    "version": "0.1.0",
+    "license": "MIT",
+    "upstream": "https://github.com/lu-zero/simd_helpers/tree/ca1a2f84aa386d758e98f8a609d990263932fb85",
+    "reason": "The published crate and inspected upstream tree declare MIT but provide no complete license file. Retain declared package authors; canonical text is explicitly labelled and is not an invented copyright notice."
+  }
+]

@@ -26,7 +26,8 @@ allow = [
 exceptions = []
 
 [licenses.private]
-ignore = true
+# Also check Chroma itself even though crates.io publication is disabled.
+ignore = false
 
 [bans]
 multiple-versions = "warn"

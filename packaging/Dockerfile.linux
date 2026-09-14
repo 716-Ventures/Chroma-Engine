@@ -41,7 +41,8 @@ RUN CARGO_BUILD_JOBS=1 \
 # graphics libraries or devices. The fixture contains original synthetic media.
 RUN CARGO_BUILD_JOBS=1 CARGO_TARGET_DIR=/tmp/chroma-target \
       cargo run --locked --example make-test-media -- /fixture.mkv 6 \
-    && cp LICENSE THIRD_PARTY_NOTICES.md /runtime/ \
+    && cp LICENSE THIRD_PARTY_NOTICES.md THIRD_PARTY_LICENSES.md /runtime/ \
+    && cp packaging/license-fallbacks.json /runtime/ \
     && cp third_party/rusty_aac/LICENSE /runtime/rusty-aac-LICENSE \
     && printf '%s\n' 'libc=glibc-2.36' 'cpu=generic-x86-64-or-aarch64' \
       'features=linux-vaapi' 'rust=1.90' 'profile=release,lto=false,codegen-units=16,truehd-opt=0' \

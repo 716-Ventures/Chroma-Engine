@@ -1,0 +1,36 @@
+# Rust dependency licenses
+
+Generated with cargo-about 0.9.2 from Cargo.lock. Do not edit by hand.
+See docs/release-policy.md for regeneration instructions.
+
+This inventory includes all enabled optional features and supported release platforms,
+including build dependencies but excluding dev-only dependencies. It is a superset
+of any individual release binary's dependencies, not an assertion that every
+listed package is shipped in every artifact. Local vendored crates are included.
+
+Read this together with LICENSE and THIRD_PARTY_NOTICES.md, which also covers
+native libraries outside Cargo and codec-patent considerations. License selection
+and text collection do not constitute a code-provenance or patent-clearance audit.
+
+{{#each licenses}}
+## {{{name}}}
+
+{{#each used_by}}
+- {{crate.name}} {{crate.version}}{{#if crate.repository}} — {{crate.repository}}{{/if}}
+{{#unless ../source_path}}
+  Declared package authors: {{#each crate.authors}}{{{this}}}; {{/each}}
+{{/unless}}
+{{/each}}
+
+{{#unless source_path}}
+The following is canonical SPDX license text, not a recovered upstream license
+file. Package metadata and the reviewed limitations in license-fallbacks.json
+(under packaging/ in the source repository)
+provide its provenance; see THIRD_PARTY_NOTICES.md for additional attribution.
+{{/unless}}
+
+```text
+{{{text}}}
+```
+
+{{/each}}
