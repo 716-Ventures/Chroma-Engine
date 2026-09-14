@@ -21,3 +21,9 @@ Windows ARM64 retains Media Foundation encoding. The vendored Mediaway encoder
 excludes the x86/x64-only NVENC dependency on ARM64 and uses its existing
 unsupported-backend implementation so automatic selection can fall through.
 See `third_party/mediaway-encoder/CHROMA-PATCHES.md` for the upstream revision.
+
+The Windows CLI reserves an 8 MiB main-thread stack in its executable header;
+the default 1 MiB is insufficient for debug native-codec dispatch. This applies
+to normal builds as well as test subprocesses, with physical pages committed
+on demand. The Mediaway encoder builds only an `rlib`, avoiding output filename
+collisions between the abort and unwind variants used by release integration tests.

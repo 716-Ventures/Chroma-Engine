@@ -40,7 +40,9 @@ vulkanalia = { version = "0.35", default-features = false, features = ["std", "l
 
 
 [lib]
-crate-type = ["cdylib", "rlib"]
+# Chroma consumes the Rust library only. A simultaneous cdylib output gives
+# abort/unwind release-test builds the same rlib filename, causing collisions.
+crate-type = ["rlib"]
 
 [dev-dependencies]
 mediaway-container = { version = "0.1", git = "https://github.com/nyxways/mediaway.git", rev = "ad056ebf139a624a024016727030365eca9cfa08", features = ["full"] }

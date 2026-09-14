@@ -12,3 +12,8 @@ the x86-only nvenc crate. Other encoder backends are unchanged.
 
 The host WebAudio configuration import is gated by the audio feature so the
 video-only dependency remains warning-free when compiled from a local path.
+
+Only the Rust `rlib` is built. The upstream combined `cdylib`/`rlib` target
+produces colliding filenames when release integration tests build both abort
+and unwind variants, causing mismatched Mediaway types. Chroma does not consume
+or distribute the encoder as a standalone DLL.

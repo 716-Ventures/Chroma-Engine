@@ -4,6 +4,18 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=SDKROOT");
     println!("cargo:rerun-if-env-changed=DEVELOPER_DIR");
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        // Windows defaults to a 1 MiB main-thread stack. Debug builds of the
+        // CLI and native codec dispatch can exceed that before handling input.
+        // Reserve 8 MiB for the executable; pages are committed on demand.
+        let stack_arg = if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+            "/STACK:8388608"
+        } else {
+            "-Wl,--stack,8388608"
+        };
+        println!("cargo:rustc-link-arg-bin=chroma-engine={stack_arg}");
+        return;
+    }
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
         return;
     }
