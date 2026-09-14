@@ -2,6 +2,15 @@
 
 Rust media engine for Chroma playback, probing, remuxing, segmentation, and transcoding.
 
+## Support the Project
+
+If Chroma Engine is useful to you, consider supporting its development with a donation.
+Your support helps keep the project moving forward.
+
+[Buy me a coffee](https://buymeacoffee.com/chrisjdavis)
+
+## Overview
+
 New integrations should start with the [adoption and integration guide](docs/adopting-chroma-engine.md),
 covering the engine's philosophy, use cases, public APIs, Rust and CLI examples, and deployment responsibilities.
 
