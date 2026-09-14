@@ -113,6 +113,8 @@ jobs:
     name: Fuzz target smoke
     env:
       RUSTUP_TOOLCHAIN: nightly
+      # Avoid compiling several large instrumented codecs concurrently.
+      CARGO_BUILD_JOBS: "2"
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -132,11 +134,14 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: fuzz-${{ hashFiles('**/Cargo.lock', 'fuzz/Cargo.toml') }}
+            fuzz/target
+          key: fuzz-v2-${{ hashFiles('**/Cargo.lock', 'fuzz/Cargo.toml') }}
       - name: Install cargo-fuzz
         run: cargo +nightly install cargo-fuzz --locked
       - name: Compile fuzz targets
-        run: cargo +nightly check --locked --manifest-path fuzz/Cargo.toml
+        run: |
+          cargo +nightly metadata --locked --manifest-path fuzz/Cargo.toml --format-version 1 > /dev/null
+          cargo +nightly fuzz build
       - name: Seed container and fragment fuzzers with valid synthetic structure
         run: |
           mkdir -p fuzz/corpus/containers fuzz/corpus/fmp4

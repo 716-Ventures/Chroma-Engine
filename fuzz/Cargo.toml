@@ -11,6 +11,11 @@ cargo-fuzz = true
 chroma-engine = { path = "..", features = ["fuzzing"] }
 libfuzzer-sys = "0.4"
 
+# This is a separate Cargo root and does not inherit the engine's profiles.
+# Keep the same memory workaround for truehd's large generated tables here.
+[profile.release.package.truehd]
+opt-level = 0
+
 [[bin]]
 name = "containers"
 path = "fuzz_targets/containers.rs"
