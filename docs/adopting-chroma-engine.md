@@ -13,6 +13,10 @@ and vendored components retain their own licenses; dependency notices are in
 
 ## Philosophy
 
+For a dated summary of CI coverage, remaining qualification work, and publication
+state, see [current status](status.md). API availability alone is not a guarantee
+of real-time performance or client playback correctness.
+
 - **Modern media, deliberately bounded scope.** Focus on finalized MP4/M4V/MOV
   and MKV/WebM, with H.264, HEVC Main/Main10, and AV1 video. Supporting every
   historical format is not a goal. Container, profile, audio, and player support

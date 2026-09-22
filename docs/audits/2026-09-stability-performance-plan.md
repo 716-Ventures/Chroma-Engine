@@ -4,7 +4,7 @@ Date: 2026-09-13
 Reviewed revision: `e8a3e3700c9609f08f96fa3ef1956cd24f16b543`  
 Scope: Chroma Engine, including retained sessions, parsers, codecs, platform adapters, output publication, packaging, tests, and benchmarks. Server and client changes below are integration requirements, not reviewed implementations.
 
-## Assessment
+## Original assessment (reviewed revision, not current status)
 
 The engine has useful foundations: copy-first planning, retained video sessions, borrowed compressed packet inputs, checked plane geometry, immutable output publication, portable codec fallbacks, and a multi-platform CI matrix. These are worth preserving.
 
@@ -16,7 +16,11 @@ Implementation was authorized after this review. The findings below describe the
 
 ## Execution ledger
 
-Implementation continued beyond the initial partial batch. The original findings below remain historical evidence, not a description of the current code. **The complete fleet/performance plan is not closed.** Server/client code has not been deployed or modified by this implementation.
+Implementation continued beyond the initial partial batch. The original findings below remain historical evidence, not a description of the current code. **The complete fleet/performance plan is not closed.** This engine audit does not
+certify current server/client deployments. For the 2026-09-22 implementation and CI
+snapshot, see [current status](../status.md). All 15 jobs for `5db5081` passed,
+including the previously pending x86-64/ARM64 glibc 2.36 NAS jobs; that does not
+close real-appliance or player acceptance work.
 
 | Finding | Implemented and checked locally | Remaining acceptance work |
 | --- | --- | --- |
@@ -29,7 +33,7 @@ Implementation continued beyond the initial partial batch. The original findings
 | CE-SP-07 | ResourcePolicy and shared EngineRuntime admission, small-NAS profile, byte-bounded decode/compressed/output work, CPU-thread ceilings, parser/audio/video cancellation. WorkerSupervisor supplies host-side CLI admission plus hard kill/reap deadlines; watchdog and admission-release tests. | Wire the supervisor/shared runtime into GenusServer; enforce OS/container limits and coordinate separate server processes. Reservations are not a hard RSS guarantee. |
 | CE-SP-08 | Stage/back-end/I/O counters; retained CPU scaler coordinates/storage; streamed fragment publication; retained Core Video surfaces for matching VideoToolbox decode/encode; explicit HDR tone-map rejection reflected in planner/probe. | Linux/Windows native-surface and portable planar optimization remain implementation work, gated on representative stage profiles and correctness/device tests. Measure TrueHD build/runtime optimization variants. |
 | CE-SP-09 | Present malformed timing/sync tables fail rather than default; strict range/sample-count checks also cover fragment validation. | Broader malformed real-media corpus. |
-| CE-SP-10 | Bounded existing-output comparison, early cached filesystem capability checks, Debian 12/glibc 2.36 baseline-specific Docker/CI artifact with no-graphics and 512 MiB worker tests, AAC license distribution. | Execute the new Linux container jobs; this Mac has no running Docker daemon. Actual appliance/CPU/libc/driver qualification remains required. |
+| CE-SP-10 | Bounded existing-output comparison, early cached filesystem capability checks, Debian 12/glibc 2.36 baseline-specific Docker/CI artifact with no-graphics and 512 MiB worker tests, AAC license distribution. | Linux container jobs passed on x86-64 and ARM64 in the 2026-09-22 reviewed CI run. Actual appliance/CPU/libc/driver qualification remains required. |
 | CE-SP-11 | Four 60-second local fuzz campaigns (subtitle crash fixed and rerun); full ARM64 CI suites, generated redistributable H.264/Opus smoke fixture, debug/release lifecycle and mutation tests, portable JSON benchmark with optional worker RSS/CPU/I/O sampling, CI structured fuzz seeds. | Target-device corpus, independent frame/sample validation, 24/72-hour soak/fault/concurrency runs, measured release thresholds. |
 
 See [resource policy and host integration](../resource-policy.md) for APIs, limits, compatibility changes, and what the host must enforce. AAC streaming calls can return no frames while lookahead fills and require a final `finish()`; this is an intentional behavioral change.
@@ -56,7 +60,7 @@ The [post-fix hardware-transcode report](2026-09-matroska-h264-verified.json) pa
 
 Follow-up [copy high-water report](2026-09-macos-copy-highwater.json) and [H.264 high-water report](2026-09-macos-h264-highwater.json) add per-child POSIX RSS high-water/CPU accounting. They measured about 10 MiB and 29 MiB peak RSS respectively on this tiny fixture. This corrects the sampling blind spot for short-lived workers; do not interpret sub-megabyte sampled values in the earlier copy report as actual peaks.
 
-## Evidence and limits
+## Original review evidence and limits
 
 - `cargo test --locked --all-features` passed locally: 238 unit tests and 14 integration/property/snapshot tests; no failures. The doc-test target contains no tests.
 - Two temporary targeted reproduction tests also passed after correcting the harness imports: the existing 32×32 AV1 fixture fails with `dav1d decoded 32x32, expected 16x16` when requested at reduced dimensions; two CPU AAC calls each taking 192,000 samples per channel at 48 kHz emit 193,536 coded samples each. The latter is 32 ms excess per four-second call, confirming that codec delay/padding needs explicit handling. This does not establish the audible effect in a player. The temporary harness was removed after recording the results.

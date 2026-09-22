@@ -8,7 +8,9 @@ Dropping a source session releases admission. Busy admission is a retryable
 `ResourceError::Busy`; an exceeded limit needs a smaller workload or a different
 validated policy, not an immediate retry loop.
 
-Default entrypoints share a process-local runtime. Set `CHROMA_RESOURCE_POLICY`
+Session convenience entrypoints share a process-local runtime. Use
+`probe_media_source_with_runtime` for admission-controlled probing; the lightweight
+`probe_media_source` helper is not a shared admission reservation. Set `CHROMA_RESOURCE_POLICY`
 **before its first use**: `small-nas` selects the copy-first profile, or provide a
 JSON object using the camelCase field names in `ResourcePolicy`. Missing fields
 use desktop defaults. Inconsistent or zero budgets fail before media opens.

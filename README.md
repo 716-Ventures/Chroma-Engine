@@ -57,6 +57,12 @@ See [modern media support](docs/modern-media-support.md) for the detailed bounda
 
 ## Current Status
 
+As of 2026-09-22, the engine is entering production qualification: core modern-media
+functions are implemented, and all 15 jobs for revision `5db5081` passed, including
+ARM64 and glibc 2.36 NAS bundle checks. The first GitHub release remains a draft.
+See [current status and remaining work](docs/status.md) for the dated CI evidence,
+client/hardware qualification gaps, and release limitations.
+
 Portable container/session code and software codec implementations target macOS, Windows,
 Linux, and Linux-based NAS systems on x86-64 and ARM64. Retained OpenH264 handles H.264
 decode/encode, `rust_h265` handles HEVC decode, dav1d handles AV1 decode, and retained native
@@ -106,8 +112,9 @@ Capability status terms are:
 ## Host Integration and Resource Limits
 
 For in-process use, share one `Arc<EngineRuntime>` across sessions and use the
-`open_with_runtime` APIs with a `WorkControl`. Default entrypoints use a process-local shared
-runtime. Set `CHROMA_RESOURCE_POLICY` before first use: `small-nas` selects a copy-first policy,
+`open_with_runtime` APIs with a `WorkControl`. Session convenience entrypoints use a process-local shared
+runtime; use `probe_media_source_with_runtime` for admission-controlled probing.
+Set `CHROMA_RESOURCE_POLICY` before first use: `small-nas` selects a copy-first policy,
 or supply a validated JSON policy. The small-NAS profile reserves 192 MiB per session,
 384 MiB aggregate, permits two sessions, uses one software codec thread, and disables software
 video fallback. Reservations are not measured RSS limits; hosts must leave headroom for codecs,

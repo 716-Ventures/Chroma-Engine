@@ -1,44 +1,64 @@
-# Web Player Test Contract
+# Browser and tvOS Playback Qualification Contract
 
-This is the minimum Chroma Engine contract required before GenusServer should wire a real web-player playback test to the native engine path.
+The initial short-window browser integration milestone has been demonstrated.
+This document defines the ongoing host/player acceptance work; it is not a claim
+that every requirement already passes. See [current status](status.md).
 
-## Readiness Gate
+## Engine and host boundary
 
-Chroma Engine is ready for the first web-player integration test when it can produce, without FFmpeg:
+The engine supplies probe facts, selected-track plans, codec configuration,
+chunk timing, and supported HLS/fMP4 or native compressed output without
+FFmpeg/ffprobe. Raw extracted chunks are not automatically playable MP4 files.
 
-- A probe document for a real MP4 source from `/Volumes/Movies`, `/Volumes/TVShows`, or `/Volumes/TV Shows`.
-- A native playback manifest for the selected video track and at least one selected audio track.
-- Browser-usable codec configuration for the selected tracks.
-- Keyframe-aligned chunk metadata with monotonically increasing DTS and stable PTS offsets.
-- Chunk payload endpoints or files that can be served as either WebCodecs-ready compressed chunks or browser-playable HLS/fMP4 output.
-- Stable error codes from `EngineErrorCode` for all probe, planning, chunk, and mux failures exposed through the server.
+The host owns authentication, authorized source paths, client capability
+selection, session lifetime, work scheduling, cache quotas, HTTP delivery, and
+playback-progress events. A plan is not an executing session. Match the selected
+plan to the appropriate packaging/conversion API.
 
-Do not check the integration milestone until a real MP4 can play video and audio from Chroma Engine output in the web player without falling back to FFmpeg.
+Use engine track IDs within the current source identity. Refresh selections when
+the source changes. Do not use an outdated migration feature flag or assume
+unsupported media has a legacy fallback.
 
-## Server Request
+## Acceptance matrix
 
-The server should treat Chroma Engine as the source of truth for playback facts:
+Use neutral-ID fixtures with recorded container, codec/profile, bit depth,
+resolution, audio layout, subtitle type, and duration. Cover the supported
+combinations that actual clients need, including compatible HDR copy and explicit
+rejection of unsupported HDR conversion or subtitle rendering.
 
-- `probe`: source path, container, tracks, codec families, languages, titles, flags, chapters, bitrate, frame rate, pixel format, dynamic range, and capability hints.
-- `plan`: selected tracks, copy/decode/encode stages, target transport, and required server route family.
-- `manifest`: selected track metadata, codec strings, decoder config hex, chunk target, and chunk list.
-- `chunk`: selected track id plus chunk index, returning payload bytes and sample timing metadata.
-- `hls-plan` / `hls-segment`: browser-playable HLS/fMP4 or TS output when the browser path uses native HLS.
+For each target browser/tvOS device and representative server/NAS class:
 
-## Web Player Requirements
+- Verify video and audio render, with independent checks for color, audio levels,
+  channel order, priming, and A/V synchronization.
+- Measure cold/warm startup, distant resume, and repeated seeks. Record the
+  engine-generation time separately from HTTP delivery and player startup.
+- Verify consecutive fragments preserve timing and decoder continuity.
+- Change audio tracks without losing playback position or leaking abandoned work.
+- Exercise text subtitles, concurrent users, and cancellation.
+- Run full-length playback and multi-day soak tests; measure stalls, drift, CPU,
+  memory growth, and disk use.
+- Test missing segments, source mutation, network interruption, disk exhaustion,
+  worker failure, and eligible backend fallback. Errors must terminate or recover
+  predictably rather than produce indefinite player retries.
 
-The first web-player test must prove:
+Define device-specific latency, stall, drift, concurrency, and resource thresholds
+before measuring. Passing a few seconds of Chromium playback or a synthetic
+engine test does not establish these acceptance criteria.
 
-- Video and audio both render.
-- Playback starts from time zero without an initial blank/black-only failure.
-- Audio remains synchronized with video.
-- Segment or chunk requests stay monotonic during initial playback.
-- Audio track selection uses engine track ids such as `a0`, `a1`, and changing audio preserves the current playback position.
-- Failures show the stable Chroma Engine error code and a concise diagnostic string.
+## Output and error contracts
 
-## Error Shape
+For HLS/fMP4, serve the matching playlist, initialization segment, media fragments,
+and subtitle renditions. A single generated window is not a complete movie.
+Immutable engine publication does not overwrite a changing playlist; the host must
+manage new playlist paths or a dynamic response.
 
-Server-facing failures should preserve this shape:
+Library error types differ by API, and CLI failures are not a guaranteed JSON
+error envelope. `PlaybackSession` exposes engine error codes; native conversion
+and some other entrypoints use `anyhow::Result`. The host should map these into
+its own stable client-facing error contract, preserve a code when available, and
+log sanitized diagnostics. Do not classify failures solely by matching stderr.
+
+An illustrative host response, not a universal engine CLI schema:
 
 ```json
 {
@@ -46,10 +66,12 @@ Server-facing failures should preserve this shape:
   "code": "hls_unsupported",
   "message": "source track combination is not supported by native HLS",
   "context": {
-    "sourcePath": "/Volumes/Movies/example.mp4",
+    "fixtureId": "media-fixture-01",
     "trackIds": ["v0", "a0"]
   }
 }
 ```
 
-The `code` value must come from `EngineErrorCode`; `message` is human-readable and may change.
+Do not expose local source paths or identifying media titles in public reports.
+Use the [audit reporting conventions](audits/README.md) and retain measurements,
+build identities, device details, and explicit limitations.

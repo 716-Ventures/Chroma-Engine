@@ -42,6 +42,8 @@ are optional accelerators:
 - Windows: Media Foundation, Intel Quick Sync, or NVIDIA where runtime probes succeed;
 - Linux/NAS: VA-API, Intel Quick Sync, or NVIDIA where enabled and runtime probes succeed.
 
-When a hardware probe fails, the engine uses the portable implementation. Release bundles must
+When a hardware probe fails, the engine may use the portable implementation if
+resource policy permits it. The small-NAS profile disables software video fallback;
+a rejected hardware path does not authorize bypassing that limit. Release bundles must
 ship the correct native Chroma Engine artifact and its declared runtime libraries for the target;
 they must not add FFmpeg or ffprobe as a fallback.
