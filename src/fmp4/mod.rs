@@ -738,30 +738,9 @@ fn write_hevc_sample_entry(out: &mut Vec<u8>, width: u16, height: u16, codec_con
         be_u16(out, 0x0018);
         be_u16(out, 0xffff);
         write_box(out, *b"hvcC", |out| out.extend_from_slice(codec_config));
-        if hevc_config_is_ten_bit_or_higher(codec_config) {
-            write_nclx_colr(out, 9, 16, 9, false);
-        }
+        // Bit depth does not imply HDR. Preserve the SPS/VUI color signaling
+        // in hvcC instead of overriding 10-bit SDR (or HLG) with HDR10 tags.
         write_pasp(out, 1, 1);
-    });
-}
-
-fn hevc_config_is_ten_bit_or_higher(codec_config: &[u8]) -> bool {
-    codec_config.get(17).is_some_and(|byte| (byte & 0x07) >= 2)
-}
-
-fn write_nclx_colr(
-    out: &mut Vec<u8>,
-    primaries: u16,
-    transfer_characteristics: u16,
-    matrix_coefficients: u16,
-    full_range: bool,
-) {
-    write_box(out, *b"colr", |out| {
-        out.extend_from_slice(b"nclx");
-        be_u16(out, primaries);
-        be_u16(out, transfer_characteristics);
-        be_u16(out, matrix_coefficients);
-        out.push(if full_range { 0x80 } else { 0x00 });
     });
 }
 
@@ -1087,7 +1066,7 @@ mod tests {
         assert!(init.windows(4).any(|w| w == b"hev1"));
         assert!(!init.windows(4).any(|w| w == b"hvc1"));
         assert!(init.windows(4).any(|w| w == b"hvcC"));
-        assert!(init.windows(4).any(|w| w == b"colr"));
+        assert!(!init.windows(4).any(|w| w == b"colr"));
         assert!(init.windows(4).any(|w| w == b"pasp"));
         assert!(init.windows(23).any(|w| {
             w == [

@@ -265,6 +265,7 @@ impl DtsAudioDecoderSession {
                         reason: format!("DTS Core header parse failed: {error}"),
                     }
                 })?;
+                let header = dts_s32_output_header(header)?;
                 let primary_channels = usize::from(header.channel_count().ok_or_else(|| {
                     AudioDecodeError::BackendFailed {
                         reason: format!(
@@ -592,6 +593,23 @@ fn validate_audio_packet_time_scale(
     Ok(())
 }
 
+// oxideav-dts 951b422 reconstructs subbands in its S32 output domain. Its
+// source-PCMR-dependent QMF multiplier applies the source precision a second
+// time (16x for 20-bit, 256x for 24-bit), saturating before we receive PCM.
+// Select the backend's 16-bit calibration for a consistent S32 output scale.
+// This changes only the decode header copy; compressed media stays untouched.
+fn dts_s32_output_header(
+    mut header: oxideav_dts::DtsFrameHeader,
+) -> Result<oxideav_dts::DtsFrameHeader, AudioDecodeError> {
+    if header.source_pcm_bits_per_sample().is_none() {
+        return Err(AudioDecodeError::BackendFailed {
+            reason: "DTS source PCM resolution is reserved".to_string(),
+        });
+    }
+    header.source_pcm_resolution_index = 0;
+    Ok(header)
+}
+
 fn interleave_dts_s32_as_i16(
     planes: &[Vec<i32>],
     amode: u8,
@@ -882,6 +900,40 @@ mod tests {
         assert!(output.format.channels > 0);
         assert_eq!(output.frames[0].timing.pts.as_millis(), 500);
         assert!(output.frames.iter().all(|frame| !frame.samples.is_empty()));
+    }
+
+    #[test]
+    fn dts_source_precision_does_not_amplify_s32_output() {
+        let mut encoder =
+            oxideav_dts::CoreEncoder::new(oxideav_dts::EncoderConfig::new(48_000, 2).unwrap())
+                .unwrap();
+        let tone: Vec<f64> = (0..4096).map(|n| (n as f64 * 0.07).sin() * 0.1).collect();
+        let mut packets = encoder.push(&[&tone, &tone]).unwrap();
+        packets.extend(encoder.flush());
+        let mut baseline = None;
+        for resolution in [0, 1, 2, 3, 5, 6] {
+            let mut decoder = oxideav_dts::CoreStreamDecoder::new(2);
+            let mut samples = Vec::new();
+            for bytes in &packets {
+                let mut header = oxideav_dts::parse_frame_header(bytes).unwrap();
+                header.source_pcm_resolution_index = resolution;
+                let header = dts_s32_output_header(header).unwrap();
+                let planar = decoder.decode_frame(bytes, &header).unwrap();
+                samples.extend(interleave_dts_s32_as_i16(&planar, header.amode, false).unwrap());
+            }
+            assert!(samples.iter().any(|sample| *sample != 0));
+            assert!(samples.iter().all(|sample| sample.unsigned_abs() < 30_000));
+            if let Some(expected) = &baseline {
+                assert_eq!(&samples, expected);
+            } else {
+                baseline = Some(samples);
+            }
+        }
+        for reserved in [4, 7] {
+            let mut header = oxideav_dts::parse_frame_header(&packets[0]).unwrap();
+            header.source_pcm_resolution_index = reserved;
+            assert!(dts_s32_output_header(header).is_err());
+        }
     }
 
     #[test]
