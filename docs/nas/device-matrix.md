@@ -13,7 +13,7 @@ Recommendation sources and years: [2021/2022 two-bay](https://nascompares.com/20
 and [2026 Plex](https://www.androidcentral.com/best-nas-plex).
 Recommendation is evidence of editorial inclusion, not sales or installed base.
 
-For **every** row below, physical access is unavailable and the actual
+Except for the WD EX2 Ultra row, physical access is unavailable and the actual
 userspace bitness/ELF loader, installed firmware, kernel, libc, swap, free
 storage, container-package presence, native-package mechanism, and GPU/API
 access are **unmeasured** unless a cell explicitly says otherwise. The model
@@ -52,7 +52,7 @@ Additional candidates:
 
 | Model | ISA / evidence | Installation evidence | Status |
 | --- | --- | --- | --- |
-| WD My Cloud EX2 Ultra WDBVBZ0120JCH-NESN | ARMv7 ARMADA A385, 1 GiB; [WD model comparison](https://support-en.wd.com/app/answers/detail/a_id/12829), [Marvell ARMv7](https://www.marvell.com/products/infrastructure-processors/armada-38x.html) | [OS 5 eligible](https://support-en.wd.com/app/answers/detailweb/a_id/29230/~/devices-available-and-supported-for-my-cloud-os-5-firmware-upgrade); [manual apps](https://support-en.wd.com/app/answers/detailweb/a_id/29960/~/steps-to-download-and-install-third-party-apps-manually-on-my-cloud-os-5) | blocked: installed firmware, ABI and physical run unavailable |
+| WD My Cloud EX2 Ultra WDBVBZ0120JCH-NESN | Measured `armv7l`, kernel `4.14.22-armada-18.09.3`, glibc 2.31, 1 GiB RAM; [WD model comparison](https://support-en.wd.com/app/answers/detail/a_id/12829) | Measured OS 5 firmware `5.33.102`; Docker/Podman absent; [manual apps](https://support-en.wd.com/app/answers/detailweb/a_id/29960/~/steps-to-download-and-install-third-party-apps-manually-on-my-cloud-os-5) are a possible route, not yet tested | unassessed: read-only preflight obtained 2026-09-23; loader/float ABI and physical server run pending |
 | Synology DS223j | ARM64, 1 GiB; [Synology CPU matrix](https://kb.synology.com/de-de/DSM/tutorial/What_kind_of_CPU_does_my_NAS_have) | DSM Container Manager availability must be checked on exact firmware | unassessed |
 | QNAP TS-233 | ARM64; [QNAP specification](https://www.qnap.com/en/product/ts-233/specs/hardware/TS-233.pdf) | QTS Container Station availability must be checked on exact firmware | unassessed |
 

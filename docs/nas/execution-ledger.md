@@ -17,16 +17,17 @@ The server initially pinned engine `3ac906705158154a7c4f9b7f1649ef716990912d`
 with two local patches. Both patches were verified redundant against the
 current Engine checkout with `git apply --reverse --check`; their SHA-256
 values were `6f3a47b2…` (DTS) and `1dfe5b3b…` (HEVC). The server update is
-tracked separately below. Physical appliance access was deferred by the owner.
+tracked separately below. Physical appliance access was initially deferred; a
+read-only WD preflight was supplied by the owner later on 2026-09-23.
 
 ## Phase status
 
 | Phase | Status | Evidence and next action |
 | --- | --- | --- |
-| N0 inventory/baseline/WD preflight | blocked | Matrix and read-only script exist; owner deferred WD access. Firmware/ABI and server playback baseline on an appliance remain unavailable. |
+| N0 inventory/baseline/WD preflight | in-progress | Owner-supplied WD preflight confirms ARMv7, OS 5 firmware 5.33.102, glibc 2.31, 1 GiB RAM, no container binary or render node. ELF class/loader/float ABI were unavailable because the first script had no BusyBox `od` fallback; rerun version 2. Server playback baseline on an appliance remains unavailable. |
 | N1 server worker boundary | in-progress | Shared admission, finite queue, deadlines/output caps, small-NAS child policy, bounded scanner enumeration, cross-process data-directory lock, graceful SIGTERM, diagnostics, and targeted/workspace tests pass locally. Explicit queued/running cancellation and fault matrix remain. |
 | N2 x86-64/ARM64 images | blocked | Server Docker candidate pins Engine SHA and base digests, removes redundant patches, carries notices/provenance, fixes discovery metadata, and defines synthetic probe/remux plus non-root/persistence/stop CI gates. Server Actions billing and local builder storage failures prevent either final architecture image from executing. |
-| N3 WD ARMv7 | blocked | [Dependency inventory](armv7-investigation.md) and sparse >4 GiB test exist; toolchain/build/load choice requires measured firmware ABI and device access. |
+| N3 WD ARMv7 | blocked | [Dependency inventory](armv7-investigation.md) and sparse >4 GiB test exist. Measured firmware/libc/kernel constrain the toolchain, but ELF class, loader, and float ABI need version 2 preflight output before choosing the target; no binary has been loaded on the WD. |
 | N4 appliance installers | blocked | Provisional vendor routes exist in the server checkout; no published image or accessible appliance. |
 | N5 playback qualification | blocked | Fixture/measurement protocol expanded; fixture rights/hashes and physical browser/tvOS/NAS runs unavailable. |
 | N6 measured optimization | blocked | [Acceleration decision record](hardware-acceleration.md) exists; no N5 baseline, so no hardware backend or optimization claim. |
@@ -91,11 +92,19 @@ tracked separately below. Physical appliance access was deferred by the owner.
   base digests were checked to include amd64 and arm64 with `docker manifest
   inspect`. Server workspace tests and Clippy passed locally; the final image
   checks are still unexecuted.
+- 2026-09-23: Owner supplied sanitized output from the physical WD EX2 Ultra
+  using preflight version 1: `armv7l`, kernel `4.14.22-armada-18.09.3`,
+  firmware `5.33.102`, glibc `2.31`, 1,036,672 KiB RAM (306,496 KiB available
+  at capture), 1,529,792 KiB swap (1,411,008 KiB free), and 32,514 KiB free
+  on the 54,637 KiB root filesystem. Neither Docker nor Podman was present;
+  no render nodes were found. ELF class, loader, and float ABI were unavailable.
+  The preflight made no software, media, or configuration changes. Script
+  version 2 adds a BusyBox `od` fallback for the remaining ABI evidence.
 
 ## Open dependencies
 
-- Physical WD access or sanitized output from `scripts/nas-preflight.sh` and
-  firmware version from its dashboard. Do not request a password in chat.
+- Version 2 sanitized WD ABI output from `scripts/nas-preflight.sh`; do not
+  request or record passwords, addresses, serial numbers, or share paths.
 - Availability of a representative Intel/AMD NAS and ARM64 NAS, or an agreed
   substitute for build testing with appliance qualification left open.
 - User-authorized test fixtures and physical browser/tvOS client for N5.

@@ -17,7 +17,7 @@ command_value() {
     print_value "$1" "$value"
 }
 
-print_value preflight_version 1
+print_value preflight_version 2
 command_value machine uname '-m'
 command_value kernel uname '-r'
 command_value libc getconf 'GNU_LIBC_VERSION'
@@ -46,10 +46,40 @@ if command -v readelf >/dev/null 2>&1; then
     print_value userspace_loader "${loader:-unavailable}"
     float_abi=$(readelf -A /bin/sh 2>/dev/null | sed -n '/Tag_ABI_VFP_args:/s/.*Tag_ABI_VFP_args:[[:space:]]*//p' | sed -n '1p')
     print_value arm_float_abi "${float_abi:-unavailable}"
+elif command -v od >/dev/null 2>&1; then
+    elf_class=$(od -An -tu1 -N 6 /bin/sh 2>/dev/null | awk '$1 == 127 && $2 == 69 && $3 == 76 && $4 == 70 {if ($5 == 1) print "ELF32"; else if ($5 == 2) print "ELF64"}')
+    print_value userspace_elf "${elf_class:-unavailable}"
+    if [ "$elf_class" = ELF32 ]; then
+        elf_machine=$(od -An -tu2 -j 18 -N 2 /bin/sh 2>/dev/null | tr -d '[:space:]')
+        if [ "$elf_machine" = 40 ]; then
+            elf_flags=$(od -An -tu4 -j 36 -N 4 /bin/sh 2>/dev/null | tr -d '[:space:]')
+            if [ -n "$elf_flags" ]; then
+                if [ $((elf_flags & 1024)) -ne 0 ]; then
+                    print_value arm_float_abi hard
+                elif [ $((elf_flags & 512)) -ne 0 ]; then
+                    print_value arm_float_abi soft
+                else
+                    print_value arm_float_abi unspecified
+                fi
+            else
+                print_value arm_float_abi unavailable
+            fi
+        else
+            print_value arm_float_abi not_arm
+        fi
+    else
+        print_value arm_float_abi unavailable
+    fi
+    if [ -r /proc/self/maps ]; then
+        loader=$(awk '$NF ~ /\/ld-linux|\/ld-musl/ {n = split($NF, parts, "/"); print parts[n]; exit}' /proc/self/maps)
+        print_value userspace_loader "${loader:-unavailable}"
+    else
+        print_value userspace_loader unavailable
+    fi
 elif command -v file >/dev/null 2>&1; then
     case "$(file -L /bin/sh 2>/dev/null)" in
-        *32-bit*) print_value userspace_elf ELF32 ;;
-        *64-bit*) print_value userspace_elf ELF64 ;;
+        *ELF*32-bit*) print_value userspace_elf ELF32 ;;
+        *ELF*64-bit*) print_value userspace_elf ELF64 ;;
         *) print_value userspace_elf unavailable ;;
     esac
     print_value userspace_loader unavailable
