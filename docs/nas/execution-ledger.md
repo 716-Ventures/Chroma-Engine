@@ -24,10 +24,10 @@ read-only WD preflight was supplied by the owner later on 2026-09-23.
 
 | Phase | Status | Evidence and next action |
 | --- | --- | --- |
-| N0 inventory/baseline/WD preflight | in-progress | Owner-supplied WD preflight confirms ARMv7, OS 5 firmware 5.33.102, glibc 2.31, 1 GiB RAM, no container binary or render node. ELF class/loader/float ABI were unavailable because the first script had no BusyBox `od` fallback; rerun version 2. Server playback baseline on an appliance remains unavailable. |
+| N0 inventory/baseline/WD preflight | in-progress | Owner-supplied WD preflight confirms ARMv7, OS 5 firmware 5.33.102, glibc 2.31, 1 GiB RAM, no container binary or render node. Host inspection of the NAS `getconf` executable confirms ELF32 ARM EABI5, hard-float, and `/lib/ld-linux-armhf.so.3`. Server playback baseline on an appliance remains unavailable. |
 | N1 server worker boundary | in-progress | Shared admission, finite queue, deadlines/output caps, small-NAS child policy, bounded scanner enumeration, cross-process data-directory lock, graceful SIGTERM, diagnostics, and targeted/workspace tests pass locally. Explicit queued/running cancellation and fault matrix remain. |
 | N2 x86-64/ARM64 images | blocked | Server Docker candidate pins Engine SHA and base digests, removes redundant patches, carries notices/provenance, fixes discovery metadata, and defines synthetic probe/remux plus non-root/persistence/stop CI gates. Server Actions billing and local builder storage failures prevent either final architecture image from executing. |
-| N3 WD ARMv7 | blocked | [Dependency inventory](armv7-investigation.md) and sparse >4 GiB test exist. Measured firmware/libc/kernel constrain the toolchain, but ELF class, loader, and float ABI need version 2 preflight output before choosing the target; no binary has been loaded on the WD. |
+| N3 WD ARMv7 | in-progress | [Dependency inventory](armv7-investigation.md), sparse >4 GiB test, and measured hard-float ABI exist. `armv7-unknown-linux-gnueabihf` is the target candidate, built against glibc 2.31 or older. Cross toolchain and locked engine/server build-and-load spike remain; no Chroma binary has been loaded on the WD. |
 | N4 appliance installers | blocked | Provisional vendor routes exist in the server checkout; no published image or accessible appliance. |
 | N5 playback qualification | blocked | Fixture/measurement protocol expanded; fixture rights/hashes and physical browser/tvOS/NAS runs unavailable. |
 | N6 measured optimization | blocked | [Acceleration decision record](hardware-acceleration.md) exists; no N5 baseline, so no hardware backend or optimization claim. |
@@ -100,10 +100,27 @@ read-only WD preflight was supplied by the owner later on 2026-09-23.
   no render nodes were found. ELF class, loader, and float ABI were unavailable.
   The preflight made no software, media, or configuration changes. Script
   version 2 adds a BusyBox `od` fallback for the remaining ABI evidence.
+- 2026-09-23: Version 2 still could not inspect ELF because the firmware has
+  no `readelf`, `file`, `od`, or `hexdump` command. The owner copied the NAS's
+  `getconf` executable to the development Mac via read-only SSH streaming.
+  Host `file` identified a 32-bit little-endian PIE ARM EABI5 executable,
+  dynamically linked with interpreter `/lib/ld-linux-armhf.so.3`, built for
+  GNU/Linux 3.2. Host `xxd` read ELF `e_flags` bytes `00 04 00 05` at offset
+  36, or `0x05000400` in little-endian order; bit `0x400` is ARM hard-float.
+  This establishes a target candidate but is not a successful cross-build or
+  physical Chroma execution.
+- 2026-09-23: Installed the Rust 1.97.1 standard library for
+  `armv7-unknown-linux-gnueabihf` on the development Mac. A locked
+  `CARGO_BUILD_JOBS=2 cargo check --target armv7-unknown-linux-gnueabihf`
+  progressed through common dependencies but made extremely slow progress
+  before reaching codec/native build steps; it was interrupted with exit 130.
+  This is an incomplete check, not an ARMv7 compiler failure or proof of
+  support. No matching C cross compiler or glibc sysroot is installed yet.
 
 ## Open dependencies
 
-- Version 2 sanitized WD ABI output from `scripts/nas-preflight.sh`; do not
+- A matching ARMv7 hard-float C cross toolchain and glibc 2.31-or-older
+  sysroot; the Rust target is installed but no C cross toolchain is. Do not
   request or record passwords, addresses, serial numbers, or share paths.
 - Availability of a representative Intel/AMD NAS and ARM64 NAS, or an agreed
   substitute for build testing with appliance qualification left open.

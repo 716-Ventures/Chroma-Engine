@@ -52,7 +52,7 @@ Additional candidates:
 
 | Model | ISA / evidence | Installation evidence | Status |
 | --- | --- | --- | --- |
-| WD My Cloud EX2 Ultra WDBVBZ0120JCH-NESN | Measured `armv7l`, kernel `4.14.22-armada-18.09.3`, glibc 2.31, 1 GiB RAM; [WD model comparison](https://support-en.wd.com/app/answers/detail/a_id/12829) | Measured OS 5 firmware `5.33.102`; Docker/Podman absent; [manual apps](https://support-en.wd.com/app/answers/detailweb/a_id/29960/~/steps-to-download-and-install-third-party-apps-manually-on-my-cloud-os-5) are a possible route, not yet tested | unassessed: read-only preflight obtained 2026-09-23; loader/float ABI and physical server run pending |
+| WD My Cloud EX2 Ultra WDBVBZ0120JCH-NESN | Measured `armv7l`, ELF32 ARM EABI5 hard-float, loader `/lib/ld-linux-armhf.so.3`, kernel `4.14.22-armada-18.09.3`, glibc 2.31, 1 GiB RAM; [WD model comparison](https://support-en.wd.com/app/answers/detail/a_id/12829) | Measured OS 5 firmware `5.33.102`; Docker/Podman absent; [manual apps](https://support-en.wd.com/app/answers/detailweb/a_id/29960/~/steps-to-download-and-install-third-party-apps-manually-on-my-cloud-os-5) are a possible route, not yet tested | unassessed: read-only preflight and host ELF inspection obtained 2026-09-23; physical server run pending |
 | Synology DS223j | ARM64, 1 GiB; [Synology CPU matrix](https://kb.synology.com/de-de/DSM/tutorial/What_kind_of_CPU_does_my_NAS_have) | DSM Container Manager availability must be checked on exact firmware | unassessed |
 | QNAP TS-233 | ARM64; [QNAP specification](https://www.qnap.com/en/product/ts-233/specs/hardware/TS-233.pdf) | QTS Container Station availability must be checked on exact firmware | unassessed |
 

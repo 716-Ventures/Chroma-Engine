@@ -3,8 +3,11 @@
 Status: dependency inventory plus physical read-only preflight, 2026-09-23.
 This is not a build result or a declaration of support or impossibility.
 The owner-supplied preflight measured OS 5 firmware `5.33.102`, ARMv7 kernel
-`4.14.22-armada-18.09.3`, and glibc 2.31. Executable loader and float ABI
-remain unknown because version 1 of the preflight could not extract them. No upload or
+`4.14.22-armada-18.09.3`, and glibc 2.31. The firmware lacks `readelf`,
+`file`, `od`, and `hexdump`, so both preflight versions could not read the
+executable ABI locally. A read-only copy of the NAS `getconf` executable was
+inspected on the development Mac: ELF32 little-endian ARM EABI5, hard-float
+flag `0x400`, dynamic loader `/lib/ld-linux-armhf.so.3`. No Chroma upload or
 firmware modification was attempted.
 
 ## Build boundary
@@ -19,11 +22,13 @@ firmware modification was attempted.
 - `cargo tree --locked -p chroma-engine --target armv7-unknown-linux-gnueabihf
   --depth 2` resolves the Rust graph. This does **not** prove that the C code
   compiles, links, loads, or runs on the appliance.
-- No ARMv7 Rust target or cross C toolchain was installed on the development
-  host at the initial checkpoint. Do not choose
-  `armv7-unknown-linux-gnueabihf` until the version 2 preflight confirms
-  hard-float ABI and a compatible loader. Build against glibc 2.31 or older,
-  not the existing Debian 12/glibc 2.36 bundle baseline.
+- The Rust 1.97.1 ARMv7 hard-float standard library is installed locally, but
+  no matching C cross toolchain or glibc sysroot is installed. A locked
+  cross-target `cargo check` was interrupted before reaching native codec
+  build steps because it progressed too slowly to yield a useful result; it
+  is not a build failure. The measured ELF ABI supports
+  `armv7-unknown-linux-gnueabihf` as the target candidate. Build against
+  glibc 2.31 or older, not the existing Debian 12/glibc 2.36 bundle baseline.
 - The current `linux-vaapi` feature is not a Rockchip or ARMADA hardware-video
   backend. The safe initial claim, if the full build and device tests pass, is
   copy/remux plus separately measured audio conversion, not video conversion.
@@ -48,11 +53,11 @@ firmware modification was attempted.
 
 ## Next gate
 
-Obtain sanitized version 2 `scripts/nas-preflight.sh` output to resolve ELF
-class, interpreter, and float ABI with BusyBox `od`, then choose a matching
-toolchain. Confirm a safe, approved data-volume staging directory and the
+Prepare a matching cross toolchain and sysroot, then attempt a locked minimal
+build of both the engine and server off-device. Confirm a safe, approved
+data-volume staging directory and the
 actual OS 5 app/startup mechanism before any upload. Attempt a locked minimal
-build-and-load spike for **both** engine and server off-device. Isolate any
+load spike for **both** engine and server on the device. Isolate any
 codec failure with its exact command and linker or loader output. A reduced
 copy-first media contract requires a separate scope decision; no codec is
 silently removed here.
