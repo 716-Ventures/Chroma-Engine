@@ -42,14 +42,22 @@ done
 
 if command -v readelf >/dev/null 2>&1; then
     print_value userspace_elf "$(readelf -h /bin/sh 2>/dev/null | sed -n '/Class:/s/.*Class:[[:space:]]*//p' | sed -n '1p')"
+    loader=$(readelf -l /bin/sh 2>/dev/null | sed -n 's/.*Requesting program interpreter: \([^]]*\)].*/\1/p' | sed -n '1p')
+    print_value userspace_loader "${loader:-unavailable}"
+    float_abi=$(readelf -A /bin/sh 2>/dev/null | sed -n '/Tag_ABI_VFP_args:/s/.*Tag_ABI_VFP_args:[[:space:]]*//p' | sed -n '1p')
+    print_value arm_float_abi "${float_abi:-unavailable}"
 elif command -v file >/dev/null 2>&1; then
     case "$(file -L /bin/sh 2>/dev/null)" in
         *32-bit*) print_value userspace_elf ELF32 ;;
         *64-bit*) print_value userspace_elf ELF64 ;;
         *) print_value userspace_elf unavailable ;;
     esac
+    print_value userspace_loader unavailable
+    print_value arm_float_abi unavailable
 else
     print_value userspace_elf unavailable
+    print_value userspace_loader unavailable
+    print_value arm_float_abi unavailable
 fi
 
 if [ -r /proc/meminfo ]; then
@@ -94,7 +102,7 @@ fi
 if [ -r /proc/net/tcp ] || [ -r /proc/net/udp ]; then
     for table in tcp tcp6 udp udp6; do
         if [ -r "/proc/net/$table" ]; then
-            awk -v kind="$table" 'NR>1 {split($2, local, ":"); if (kind ~ /^udp/ || $4 == "0A") print kind "_port: " sprintf("%d", "0x" local[length(local)])}' "/proc/net/$table" | sort -u
+            awk -v kind="$table" 'NR>1 {split($2, local, ":"); if (kind ~ /^udp/ || $4 == "0A") print kind "_port_hex: " local[length(local)]}' "/proc/net/$table" | sort -u
         fi
     done
 else

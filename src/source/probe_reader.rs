@@ -256,6 +256,25 @@ mod tests {
     }
 
     #[test]
+    fn finds_metadata_after_sparse_payload_above_four_gib() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(&[
+            0, 0, 0, 16, b'f', b't', b'y', b'p', b'i', b's', b'o', b'm', 0, 0, 0, 0,
+        ])
+        .unwrap();
+        let payload_box_size = 5_u64 * 1024 * 1024 * 1024 + 16;
+        file.write_all(&1_u32.to_be_bytes()).unwrap();
+        file.write_all(b"mdat").unwrap();
+        file.write_all(&payload_box_size.to_be_bytes()).unwrap();
+        file.seek(SeekFrom::Start(16 + payload_box_size)).unwrap();
+        file.write_all(&[0, 0, 0, 8, b'm', b'o', b'o', b'v'])
+            .unwrap();
+        let (len, metadata) = read_metadata(file.path()).unwrap();
+        assert_eq!(len, 24 + payload_box_size);
+        assert_eq!(metadata.len(), 24);
+    }
+
+    #[test]
     fn ebml_size_reader_rejects_truncation_and_handles_unknown_segment_size() {
         let mut file = tempfile::NamedTempFile::new().unwrap();
         file.write_all(&[0x18, 0x53, 0x80, 0x67, 0xff]).unwrap();
