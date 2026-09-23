@@ -1,8 +1,9 @@
 # Off-device WD EX2 Ultra pilot build
 
 This recipe targets the measured OS 5 firmware 5.33.102 ABI: ARMv7 EABI5
-hard-float, `/lib/ld-linux-armhf.so.3`, glibc 2.31. It builds a test bundle,
-not a vendor-installable `.bin`. Run on a development Mac with Rust 1.97.1,
+hard-float, `/lib/ld-linux-armhf.so.3`, glibc 2.31. It builds a test bundle;
+`packaging/wd/os5/build.py` then wraps it in a dashboard-installable `.bin`.
+Run on a development Mac with Rust 1.97.1,
 Zig 0.16, `cargo-zigbuild` 0.23.4, Meson, Ninja, pkg-config, and LLVM 21.
 Use an absolute `SERVER_REPO` path to the GenusServer checkout.
 
@@ -48,6 +49,7 @@ SERVER_BINARY="$CARGO_TARGET_DIR/armv7-unknown-linux-gnueabihf/release/chroma-se
 npm run build -w @chroma-server/admin-spa
 cd -
 packaging/wd/build-pilot-bundle.sh "$ENGINE_BINARY" "$SERVER_BINARY" "$SERVER_REPO"
+python3 packaging/wd/os5/build.py
 ```
 
 The first Server cross-build on the development Mac failed to load its newly
@@ -55,5 +57,6 @@ created host `sqlx-macros` dylib (`mis-aligned LINKEDIT string pool`). The
 pilot binary was linked after reusing a previously valid host macro dylib
 from the same Server revision. Until a clean build passes, this recipe is
 documented as an attempted build path, **not** a verified reproducible release
-procedure. Never distribute an artifact solely because it passes these build
-commands; validate both executables and the app lifecycle on the NAS first.
+procedure. The `.bin` format has been checked against a known-good package,
+but never treat that as physical device qualification. Validate both
+executables and the app lifecycle on the NAS before wider distribution.

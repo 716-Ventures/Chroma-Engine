@@ -27,7 +27,7 @@ read-only WD preflight was supplied by the owner later on 2026-09-23.
 | N0 inventory/baseline/WD preflight | in-progress | Owner-supplied WD preflight confirms ARMv7, OS 5 firmware 5.33.102, glibc 2.31, 1 GiB RAM, no container binary or render node. Host inspection of the NAS `getconf` executable confirms ELF32 ARM EABI5, hard-float, and `/lib/ld-linux-armhf.so.3`. Server playback baseline on an appliance remains unavailable. |
 | N1 server worker boundary | in-progress | Shared admission, finite queue, deadlines/output caps, small-NAS child policy, bounded scanner enumeration, cross-process data-directory lock, graceful SIGTERM, diagnostics, and targeted/workspace tests pass locally. Explicit queued/running cancellation and fault matrix remain. |
 | N2 x86-64/ARM64 images | blocked | Server Docker candidate pins Engine SHA and base digests, removes redundant patches, carries notices/provenance, fixes discovery metadata, and defines synthetic probe/remux plus non-root/persistence/stop CI gates. Server Actions billing and local builder storage failures prevent either final architecture image from executing. |
-| N3 WD ARMv7 | in-progress | [Dependency inventory and cross-build](armv7-investigation.md), sparse >4 GiB test, measured hard-float ABI, and off-device Engine/Server ELF32 binaries exist. The 9.3 MiB pilot bundle has not been uploaded or run on the WD. Server cross-build required a host SQLx macro workaround; clean reproducibility and physical load/behavior remain open. |
+| N3 WD ARMv7 | in-progress | [Dependency inventory and cross-build](armv7-investigation.md), sparse >4 GiB test, measured hard-float ABI, off-device Engine/Server ELF32 binaries, and a locally validated EX2 Ultra OS 5 `.bin` exist. Earlier app packages installed and showed On, but the Configure path returned WD's HTTP 404 and the Chroma API port refused connections. A 0.1.2 diagnostic package is built but untried on-device. Server clean-build reproducibility and physical load/behavior remain open. |
 | N4 appliance installers | blocked | Provisional vendor routes exist in the server checkout; no published image or accessible appliance. |
 | N5 playback qualification | blocked | Fixture/measurement protocol expanded; fixture rights/hashes and physical browser/tvOS/NAS runs unavailable. |
 | N6 measured optimization | blocked | [Acceleration decision record](hardware-acceleration.md) exists; no N5 baseline, so no hardware backend or optimization claim. |
@@ -125,6 +125,16 @@ read-only WD preflight was supplied by the owner later on 2026-09-23.
   clean-build reproducibility remains open. Admin SPA was rebuilt. The pilot
   archive contains both binaries, SPA, Engine notices, and checksums; its
   two binary hashes verify after assembly. No NAS upload or execution occurred.
+- 2026-09-23: An owner-supplied EX2 Ultra OS 5 package was inspected as data,
+  not executed. It established the 204-byte `GrandTeZ` header, model fields,
+  payload length/XOR checksum, encrypted app-name signature, archive layout,
+  and app lifecycle interface. Chroma's own `.bin` was built from Chroma-only
+  files and its header, signature, archive, binary ABI, and shell syntax passed
+  local checks. The owner subsequently installed Chroma packages 0.1.0 and
+  0.1.1; the WD dashboard reported Chroma On, but Configure returned WD's
+  HTTP 404 and the API port refused connections. No Engine/Server runtime or
+  rollback result exists. Version 0.1.2 relaxes the hard-coded volume mount
+  assumption and exposes a minimal startup-status page if Configure resolves.
 
 ## Open dependencies
 

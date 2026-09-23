@@ -18,5 +18,6 @@ executables' loader behavior on the NAS, then `/ready` with a fresh test data
 directory, and only then a small authorized media fixture. Watch RSS, swap,
 CPU, and startup time. Stop on OOM, sustained swapping, or load errors.
 
-The intended distributable for this model remains an off-device-built native
-My Cloud OS 5 `.bin` app. This bundle is a qualification step toward it.
+The native My Cloud OS 5 `.bin` app is built separately with
+`packaging/wd/os5/build.py`. This bundle remains a load-test artifact; neither
+artifact has yet run on the NAS.

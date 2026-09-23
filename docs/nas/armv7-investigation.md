@@ -58,12 +58,19 @@ firmware modification was attempted.
 
 ## Next gate
 
-The off-device binaries and a 9.3 MiB pilot archive are at
-`target/wd-ex2-ultra-armv7-pilot.tar.gz`. This is deliberately not an OS 5
-`.bin` app. Confirm a safe, approved data-volume staging directory and cleanup
-plan before any upload. Attempt a minimal load spike for **both** Engine and
-Server on the device; isolate any codec failure with its exact command and
-loader output. Then measure startup, `/ready`, RSS, swap, and small authorized
-fixture playback before building a vendor-native `.bin` installer. A reduced
+The off-device binaries are in a 9.3 MiB pilot archive at
+`target/wd-ex2-ultra-armv7-pilot.tar.gz`. A separate
+`target/wd-os5/MyCloudEX2Ultra_chromaserver_0.1.2.bin` was assembled for the
+WD dashboard using the EX2 Ultra OS 5 package format and lifecycle hooks.
+Its header, signature, tar payload, ARM ABI, and scripts passed local checks
+against an owner-supplied known-good package. The owner installed earlier
+versions and the WD dashboard reported the app On, but the Configure path
+returned WD's HTTP 404 and the Chroma API port refused connections. That is
+not a successful Engine or Server load. Version 0.1.2 removes a hard-coded
+volume path and adds a minimal Configure startup-status page; it has not yet
+been tried on the NAS. Attempt a minimal load spike for **both** Engine and Server
+on the device; isolate any codec failure with its exact command and loader
+output. Then measure startup, `/ready`, RSS, swap, and small authorized
+fixture playback. A reduced
 copy-first media contract requires a separate scope decision; no codec is
 silently removed here.

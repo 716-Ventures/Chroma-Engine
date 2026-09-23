@@ -1,0 +1,20 @@
+Package:            chromaserver
+Section:            Addon
+Version:            0.1.2
+Packager:           716 Ventures
+Email:
+Homepage:           https://github.com/716-Ventures/GenusServer
+Description:        Chroma Server for personal media libraries.
+AddonShowName:      Chroma Server
+Icon:
+AddonIndexPage:     index.php
+AddonUsedPort:
+InstDepend:
+InstConflict:
+StartDepend:
+StartConflict:
+CenterType:         0
+UserControl:        1
+MinFWVer:           5.33.102
+MaxFWVer:
+IndividualFlag:     1
