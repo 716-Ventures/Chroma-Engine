@@ -1,6 +1,6 @@
 # Current implementation and release status
 
-Reviewed 2026-09-22 against `5db50813b9ddf8c19c416ebc1fe43845d48e279e`.
+Reviewed 2026-09-23 against `526db7a529f8c58b2f89852355dd964f9e4ca8dc`.
 This is a dated evidence snapshot; consult subsequent CI runs and release notes
 before assuming it describes a newer revision.
 
@@ -16,7 +16,7 @@ tvOS device, GPU, or NAS. Do not calculate readiness from checked feature counts
 
 ## Verified automated evidence
 
-All 15 jobs in [CI run 35770722559](https://github.com/716-Ventures/Chroma-Engine/actions/runs/35770722559)
+All 15 jobs in [CI run 35876158547](https://github.com/716-Ventures/Chroma-Engine/actions/runs/35876158547)
 passed for the reviewed commit:
 
 - macOS ARM64 and Windows/Linux x86-64 test matrices using Rust 1.90 and 1.97.1.
@@ -30,9 +30,9 @@ or release-artifact coverage. Hosted GPU availability also does not qualify all
 hardware backends. Synthetic memory-limit tests do not establish full-length
 4K playback performance on actual appliances.
 
-The reviewed commit fixes DTS output scaling and stops treating all high-bit-depth
-HEVC streams as HDR10. Those corrections still need independent player/audio/video
-validation across the representative media matrix.
+The current revision retains the DTS scaling and HEVC color-signaling fixes,
+and adds a sparse >4 GiB metadata regression. These still need independent
+player/audio/video validation across the representative media matrix.
 
 ## Known functional limits
 
@@ -45,7 +45,13 @@ validation across the representative media matrix.
 ## Next milestone: production qualification
 
 For appliance installation and qualification work across Engine and Server, follow
-the [NAS deployment execution plan](nas-deployment-execution-plan.md).
+the [NAS deployment execution plan](nas-deployment-execution-plan.md) and its
+[execution ledger](nas/execution-ledger.md). The Server candidate pins this Engine
+revision and has bounded worker and image-smoke scaffolding, but **neither
+x86-64 nor ARM64 final server image has passed execution**. Private Server
+Actions were stopped by an account billing/spending-limit block before runners
+started; the local container builder was blocked by host storage exhaustion.
+WD ARMv7 firmware/ABI and physical NAS qualification remain open.
 
 Use neutral fixture IDs and test the actual server-to-browser/tvOS path. Establish
 device-specific startup, resume, stall, A/V drift, memory, and concurrency targets;

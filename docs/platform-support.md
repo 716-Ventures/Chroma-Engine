@@ -18,7 +18,7 @@ Opus-to-AAC is also supported within the declared layouts. See the
 
 The new `Linux-ARCH-glibc236` NAS bundle is built in Debian 12 with generic x86-64/AArch64 CPU targeting, glibc 2.36, Rust 1.90 and runtime-optional VA-API. It is not a musl/static binary and is not compatible with older NAS libc installations by assertion. CI executes the bundle in Debian 12 without GPU libraries/devices, including a tiny generated workload under a 512 MiB container cap. Both NAS architecture jobs passed in the [2026-09-22 reviewed run](https://github.com/716-Ventures/Chroma-Engine/actions/runs/35770722559); real-appliance qualification remains required. The artifact records its distinct low-build-memory release settings in `BUILD-BASELINE.txt`.
 
-Hosted Ubuntu release bundles retain their runner's libc baseline and must not be substituted for the glibc-2.36 artifact on an older appliance. NVIDIA is enabled in the hosted Linux x64 bundle, not the generic NAS Docker bundle. No 32-bit NAS, musl, or older-glibc support is advertised by this change.
+Hosted Ubuntu release bundles retain their runner's libc baseline and must not be substituted for the glibc-2.36 artifact on an older appliance. NVIDIA is enabled in the hosted Linux x64 bundle, not the generic NAS Docker bundle. No 32-bit NAS, musl, or older-glibc support is advertised by this change. The [WD ARMv7 investigation](nas/armv7-investigation.md) is blocked on firmware/ABI preflight; ARM64 artifacts cannot run on that device.
 
 Chroma Engine separates portable container/session code, software codecs, and platform hardware adapters. A successful build does not imply that every transcode stage is executable on that host.
 

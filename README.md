@@ -57,9 +57,10 @@ See [modern media support](docs/modern-media-support.md) for the detailed bounda
 
 ## Current Status
 
-As of 2026-09-22, the engine is entering production qualification: core modern-media
-functions are implemented, and all 15 jobs for revision `5db5081` passed, including
-ARM64 and glibc 2.36 NAS bundle checks. The first GitHub release remains a draft.
+As of 2026-09-23, the engine is entering production qualification: core modern-media
+functions are implemented, and all 15 jobs for revision `526db7a` passed, including
+ARM64 and glibc 2.36 NAS bundle checks. Complete Chroma Server NAS images and
+physical appliance playback are not yet qualified. The first GitHub release remains a draft.
 See [current status and remaining work](docs/status.md) for the dated CI evidence,
 client/hardware qualification gaps, and release limitations.
 

@@ -24,8 +24,8 @@ tracked separately below. Physical appliance access was deferred by the owner.
 | Phase | Status | Evidence and next action |
 | --- | --- | --- |
 | N0 inventory/baseline/WD preflight | blocked | Matrix and read-only script exist; owner deferred WD access. Firmware/ABI and server playback baseline on an appliance remain unavailable. |
-| N1 server worker boundary | in-progress | Server change shares one admission pool, adds finite queue, deadlines/output caps, small-NAS child policy, a data-directory lock, diagnostics, and targeted tests. Full launch-site and cancellation tests plus whole-workspace gates remain. |
-| N2 x86-64/ARM64 images | in-progress | Server Docker candidate pins current Engine SHA, removes redundant patches, carries notices and fixes discovery metadata; Docker daemon unavailable locally, so neither final architecture image is tested. |
+| N1 server worker boundary | in-progress | Shared admission, finite queue, deadlines/output caps, small-NAS child policy, bounded scanner enumeration, cross-process data-directory lock, graceful SIGTERM, diagnostics, and targeted/workspace tests pass locally. Explicit queued/running cancellation and fault matrix remain. |
+| N2 x86-64/ARM64 images | blocked | Server Docker candidate pins Engine SHA and base digests, removes redundant patches, carries notices/provenance, fixes discovery metadata, and defines synthetic probe/remux plus non-root/persistence/stop CI gates. Server Actions billing and local builder storage failures prevent either final architecture image from executing. |
 | N3 WD ARMv7 | blocked | [Dependency inventory](armv7-investigation.md) and sparse >4 GiB test exist; toolchain/build/load choice requires measured firmware ABI and device access. |
 | N4 appliance installers | blocked | Provisional vendor routes exist in the server checkout; no published image or accessible appliance. |
 | N5 playback qualification | blocked | Fixture/measurement protocol expanded; fixture rights/hashes and physical browser/tvOS/NAS runs unavailable. |
@@ -58,7 +58,39 @@ tracked separately below. Physical appliance access was deferred by the owner.
   certify Linux images, the WD, or client playback.
 - 2026-09-23: Server targeted tests passed for bounded process timeout, output
   flood, permit reuse, and single data-directory lock; integration provisioning
-  tests passed 6/6. Final server commit/CI and real image tests remain pending.
+  tests passed 6/6. Final server image and appliance tests remain pending.
+- 2026-09-23: Engine milestone `526db7a529f8c58b2f89852355dd964f9e4ca8dc`
+  pushed to `origin/main`. Server worker commit `4628966` and image candidate
+  commit `d91330b87a197380b5ee0624db723bd1477de93b` pushed to
+  `origin/feat/apple-inspired-admin`. Server `cargo test --locked --workspace`,
+  `cargo clippy --locked --workspace --all-targets -- -D warnings`,
+  `cargo fmt --all -- --check`, `npm run test:engine-integration`, and admin SPA
+  typecheck/build passed locally on macOS ARM64.
+- 2026-09-23: Server [CI run 35876466774](https://github.com/716-Ventures/GenusServer/actions/runs/35876466774)
+  failed before any runner started. GitHub's job annotation says recent account
+  payments failed or the spending limit must be increased. This is a billing
+  block, **not** a code/test result; both architecture image jobs have no
+  execution evidence. Engine [CI run 35876158547](https://github.com/716-Ventures/Chroma-Engine/actions/runs/35876158547)
+  subsequently completed successfully with all 15 jobs, including x86-64 and
+  ARM64 Linux NAS bundle jobs, macOS, Windows, security, fuzz, and release
+  builds. Those are Engine-only gates, not complete server-image results.
+- 2026-09-23: Local ARM64 server image build attempted in an existing Colima
+  profile. Package extraction, npm, Cargo certificate loading, and BuildKit
+  metadata all failed with `Input/output error`; the VM was returned to its
+  original stopped state without deleting images/volumes. A fresh isolated
+  Colima profile could not download its base image because the macOS system
+  volume had about 118 MiB free (`No space left on device`). Only its 29 MiB
+  incomplete download was removed; the existing profile was untouched.
+  Neither attempt produced a usable image or an image-test result.
+- 2026-09-23: Server follow-up commit
+  `42f0dd1e3792cee654c628d1c6133154b5430d15` pushed to
+  `origin/feat/apple-inspired-admin`. It adds a bounded scan cap, explicit
+  lock release and second-process test, SIGTERM handling, pinned multiarch
+  base indexes, a synthetic `nas-smoke` Docker target, and CI checks for
+  read-only media, resource limits, persistence, and graceful restart. The
+  base digests were checked to include amd64 and arm64 with `docker manifest
+  inspect`. Server workspace tests and Clippy passed locally; the final image
+  checks are still unexecuted.
 
 ## Open dependencies
 
@@ -68,3 +100,6 @@ tracked separately below. Physical appliance access was deferred by the owner.
   substitute for build testing with appliance qualification left open.
 - User-authorized test fixtures and physical browser/tvOS client for N5.
 - Permission/credentials for publishing any private server image or native app.
+- GitHub Actions billing/spending-limit resolution for private server CI.
+- Sufficient free space on a compatible local builder, or another approved
+  amd64/arm64 builder; do not delete existing Colima data to make room.
