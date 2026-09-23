@@ -44,6 +44,9 @@ validation across the representative media matrix.
 
 ## Next milestone: production qualification
 
+For appliance installation and qualification work across Engine and Server, follow
+the [NAS deployment execution plan](nas-deployment-execution-plan.md).
+
 Use neutral fixture IDs and test the actual server-to-browser/tvOS path. Establish
 device-specific startup, resume, stall, A/V drift, memory, and concurrency targets;
 then measure cold starts, distant seeks, track changes, full-length playback,
