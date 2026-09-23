@@ -13,6 +13,16 @@ Recommendation sources and years: [2021/2022 two-bay](https://nascompares.com/20
 and [2026 Plex](https://www.androidcentral.com/best-nas-plex).
 Recommendation is evidence of editorial inclusion, not sales or installed base.
 
+For **every** row below, physical access is unavailable and the actual
+userspace bitness/ELF loader, installed firmware, kernel, libc, swap, free
+storage, container-package presence, native-package mechanism, and GPU/API
+access are **unmeasured** unless a cell explicitly says otherwise. The model
+ISA is a manufacturer hardware fact, not a measured installed ABI. Linked
+package descriptions are possible routes, not a check on a particular unit.
+The evidence review date for this inventory is 2026-09-23; qualification dates
+remain unset. These fields must be replaced with per-device preflight evidence
+before any `appliance-qualified` status can be recorded.
+
 | Model | ISA, memory and OS family | Manufacturer hardware/deployment evidence | Recommendation year | Status |
 | --- | --- | --- | --- | --- |
 | Synology DS220j | ARM64, 512 MiB, DSM | [64-bit RTD1296 and RAM](https://www.synology.com/en-uk/store/Refurbished%20DS220j) | 2021/2022 | unassessed; low RAM may block server |
@@ -42,7 +52,7 @@ Additional candidates:
 
 | Model | ISA / evidence | Installation evidence | Status |
 | --- | --- | --- | --- |
-| WD My Cloud EX2 Ultra WDBVBZ0120JCH-NESN | ARMv7 ARMADA 385; [Marvell ARMv7](https://www.marvell.com/products/infrastructure-processors/armada-38x.html) | [OS 5 eligible](https://support-en.wd.com/app/answers/detailweb/a_id/29230/~/devices-available-and-supported-for-my-cloud-os-5-firmware-upgrade); [manual apps](https://support-en.wd.com/app/answers/detailweb/a_id/29960/~/steps-to-download-and-install-third-party-apps-manually-on-my-cloud-os-5) | blocked: installed firmware, ABI and physical run unavailable |
+| WD My Cloud EX2 Ultra WDBVBZ0120JCH-NESN | ARMv7 ARMADA A385, 1 GiB; [WD model comparison](https://support-en.wd.com/app/answers/detail/a_id/12829), [Marvell ARMv7](https://www.marvell.com/products/infrastructure-processors/armada-38x.html) | [OS 5 eligible](https://support-en.wd.com/app/answers/detailweb/a_id/29230/~/devices-available-and-supported-for-my-cloud-os-5-firmware-upgrade); [manual apps](https://support-en.wd.com/app/answers/detailweb/a_id/29960/~/steps-to-download-and-install-third-party-apps-manually-on-my-cloud-os-5) | blocked: installed firmware, ABI and physical run unavailable |
 | Synology DS223j | ARM64, 1 GiB; [Synology CPU matrix](https://kb.synology.com/de-de/DSM/tutorial/What_kind_of_CPU_does_my_NAS_have) | DSM Container Manager availability must be checked on exact firmware | unassessed |
 | QNAP TS-233 | ARM64; [QNAP specification](https://www.qnap.com/en/product/ts-233/specs/hardware/TS-233.pdf) | QTS Container Station availability must be checked on exact firmware | unassessed |
 
