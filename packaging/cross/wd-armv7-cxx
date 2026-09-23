@@ -1,0 +1,5 @@
+#!/bin/sh
+# Use the shared wrapper implementation with C++ mode selected by the name.
+CHROMA_CROSS_CXX=1
+export CHROMA_CROSS_CXX
+exec "$(dirname "$0")/wd-armv7-cc" "$@"

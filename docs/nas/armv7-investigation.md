@@ -1,7 +1,7 @@
 # WD EX2 Ultra ARMv7 investigation
 
-Status: dependency inventory plus physical read-only preflight, 2026-09-23.
-This is not a build result or a declaration of support or impossibility.
+Status: off-device ARMv7 cross-build plus physical read-only preflight,
+2026-09-23. This is not a successful device load or a declaration of support.
 The owner-supplied preflight measured OS 5 firmware `5.33.102`, ARMv7 kernel
 `4.14.22-armada-18.09.3`, and glibc 2.31. The firmware lacks `readelf`,
 `file`, `od`, and `hexdump`, so both preflight versions could not read the
@@ -14,7 +14,7 @@ firmware modification was attempted.
 
 - Engine declares Rust 1.90 and edition 2024. Its unconditional media dependencies
   include `dav1d`/`dav1d-sys`, `openh264`/`openh264-sys2`, `rust_h265`, AAC,
-  Opus, AC-3/DTS, and TrueHD crates. The dav1d shared library and any C/C++
+  Opus, AC-3/DTS, and TrueHD crates. The dav1d library and any C/C++
   build steps must be produced for the measured WD ABI, not copied from the
   Debian 12 ARM64 or x86-64 bundle.
 - The server additionally depends on Tokio, SQLx/SQLite, TLS and native build
@@ -22,13 +22,18 @@ firmware modification was attempted.
 - `cargo tree --locked -p chroma-engine --target armv7-unknown-linux-gnueabihf
   --depth 2` resolves the Rust graph. This does **not** prove that the C code
   compiles, links, loads, or runs on the appliance.
-- The Rust 1.97.1 ARMv7 hard-float standard library is installed locally, but
-  no matching C cross toolchain or glibc sysroot is installed. A locked
-  cross-target `cargo check` was interrupted before reaching native codec
-  build steps because it progressed too slowly to yield a useful result; it
-  is not a build failure. The measured ELF ABI supports
-  `armv7-unknown-linux-gnueabihf` as the target candidate. Build against
-  glibc 2.31 or older, not the existing Debian 12/glibc 2.36 bundle baseline.
+- The Rust 1.97.1 ARMv7 hard-float standard library and Zig 0.16 toolchain
+  cross-built dav1d 1.5.3 as a static library and linked locked release Engine
+  and Server binaries for `armv7-unknown-linux-gnueabihf.2.31`. Both are
+  ELF32 little-endian ARM EABI5 hard-float with the measured NAS loader
+  `/lib/ld-linux-armhf.so.3` and flag `0x05000400`. Their highest required
+  glibc symbol version is 2.30, below the NAS's measured glibc 2.31. This is
+  link/ABI evidence only; no ARM binary has executed on the NAS.
+- The Server build is not yet cleanly reproducible: a newly generated macOS
+  host-side SQLx macro dylib failed to load with a `mis-aligned LINKEDIT string
+  pool` error. Reusing the same revision's previously built, loadable macro
+  dylib allowed the ARMv7 Server link to finish. Resolve this host build issue
+  before treating the result as a releasable package.
 - The current `linux-vaapi` feature is not a Rockchip or ARMADA hardware-video
   backend. The safe initial claim, if the full build and device tests pass, is
   copy/remux plus separately measured audio conversion, not video conversion.
@@ -53,11 +58,12 @@ firmware modification was attempted.
 
 ## Next gate
 
-Prepare a matching cross toolchain and sysroot, then attempt a locked minimal
-build of both the engine and server off-device. Confirm a safe, approved
-data-volume staging directory and the
-actual OS 5 app/startup mechanism before any upload. Attempt a locked minimal
-load spike for **both** engine and server on the device. Isolate any
-codec failure with its exact command and linker or loader output. A reduced
+The off-device binaries and a 9.3 MiB pilot archive are at
+`target/wd-ex2-ultra-armv7-pilot.tar.gz`. This is deliberately not an OS 5
+`.bin` app. Confirm a safe, approved data-volume staging directory and cleanup
+plan before any upload. Attempt a minimal load spike for **both** Engine and
+Server on the device; isolate any codec failure with its exact command and
+loader output. Then measure startup, `/ready`, RSS, swap, and small authorized
+fixture playback before building a vendor-native `.bin` installer. A reduced
 copy-first media contract requires a separate scope decision; no codec is
 silently removed here.

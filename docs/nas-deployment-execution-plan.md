@@ -16,7 +16,14 @@ Do not add FFmpeg/ffprobe fallback, unsupported HDR tone mapping, or bitmap
 subtitle burn-in to make this effort pass. Preserve macOS and Windows behavior.
 
 Success means an operator can install, configure, start, test, update, and roll
-back the server without a Rust/Node compiler on the appliance. A successful
+back the server without a Rust/Node/C compiler on the appliance. Build both
+Engine and Server off-device and deliver tested, versioned artifacts. For NAS
+models with a supported container manager, publish architecture-specific OCI
+images and a vendor-appropriate deployment profile. For the WD EX2 Ultra,
+deliver a native My Cloud OS 5 `.bin` app package as the primary installation
+path; do not require Docker or an SSH-only manual pilot for normal operation.
+Other native vendor packages may be added where model support and user demand
+justify them. A successful
 cross-build, emulator test, or constrained container is not appliance qualification.
 
 ## Read this before implementation
@@ -233,14 +240,17 @@ N2 once those dependencies exist; do not treat ARM64 as a substitute.
    advertise unavailable conversion truthfully, and fail unsupported requests.
    Do not silently delete codecs or ship stub implementations. Obtain a scope
    decision for any reduced media contract.
-5. Build off-device and first run from an approved temporary directory. Validate
+5. Build off-device and first run from an approved data-volume staging directory. Validate
    executable loading, probe, plan, cache publication, remux, and a small server
    test library before installing a startup service.
-6. Package for the documented WD app mechanism where viable; otherwise use a
-   clearly labeled supervised pilot bundle with explicit start/stop instructions.
-   A manual pilot does not satisfy production boot persistence. Use a dedicated
-   data directory/account where supported; document rather than conceal firmware
-   privilege constraints. Never overwrite system files or other apps.
+6. Produce a My Cloud OS 5 app `.bin` for the EX2 Ultra, containing prebuilt
+   Engine and Server binaries, runtime libraries, SPA assets, notices, manifest,
+   and lifecycle hooks. Verify the OS 5 package format and model identifier
+   against the actual firmware. First test a clearly labeled supervised pilot
+   bundle before installing the package; the pilot is a test gate, not the
+   supported delivery mechanism. The package must preserve a dedicated data
+   directory, integrate start/stop/restart with the WD app manager, and never
+   overwrite system files or other apps. Document firmware privilege constraints.
 7. Implement upgrade, restart, uninstall, and rollback without deleting media or
    user data. Qualify low-memory behavior before running a full library scan.
 
@@ -265,9 +275,12 @@ resource limits actually enforced by that runtime, LAN URL, discovery behavior,
 health/logs, first scan, update, backup, rollback, stop, and data-preserving uninstall.
 Give users a prebuilt artifact, not a source-build command.
 
-For devices without a supported container route, investigate native packaging
-separately (for example DSM SPK or QNAP QPKG). Do not fabricate vendor approval or
-count a package scaffold as a working installer. Restricted appliances remain
+For devices without a supported container route, provide a tested native package
+where the vendor documents a third-party app path; WD OS 5 is the first required
+case. For container-capable devices, native packages (for example DSM SPK or
+QNAP QPKG) are a separate usability track, not a prerequisite for OCI support.
+Do not fabricate vendor approval or count a package scaffold as a working
+installer. Restricted appliances remain
 blocked until a documented third-party path is established; do not bypass their
 security controls. Native store publication/signing needs separate authorization.
 

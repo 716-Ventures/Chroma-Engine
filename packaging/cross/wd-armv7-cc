@@ -1,0 +1,23 @@
+#!/bin/sh
+# cc-rs adds the Rust target triple to C/C++ invocations. Zig needs its own
+# equivalent target spelling and glibc baseline, so replace only that flag.
+set -eu
+
+if [ "${CHROMA_CROSS_CXX:-0}" = 1 ]; then
+    compiler=c++
+else
+    compiler=cc
+fi
+
+remaining=$#
+while [ "$remaining" -gt 0 ]; do
+    argument=$1
+    shift
+    case "$argument" in
+        --target=armv7-unknown-linux-gnueabihf*) ;;
+        *) set -- "$@" "$argument" ;;
+    esac
+    remaining=$((remaining - 1))
+done
+
+exec zig "$compiler" -target arm-linux-gnueabihf.2.31 "$@"

@@ -27,7 +27,7 @@ read-only WD preflight was supplied by the owner later on 2026-09-23.
 | N0 inventory/baseline/WD preflight | in-progress | Owner-supplied WD preflight confirms ARMv7, OS 5 firmware 5.33.102, glibc 2.31, 1 GiB RAM, no container binary or render node. Host inspection of the NAS `getconf` executable confirms ELF32 ARM EABI5, hard-float, and `/lib/ld-linux-armhf.so.3`. Server playback baseline on an appliance remains unavailable. |
 | N1 server worker boundary | in-progress | Shared admission, finite queue, deadlines/output caps, small-NAS child policy, bounded scanner enumeration, cross-process data-directory lock, graceful SIGTERM, diagnostics, and targeted/workspace tests pass locally. Explicit queued/running cancellation and fault matrix remain. |
 | N2 x86-64/ARM64 images | blocked | Server Docker candidate pins Engine SHA and base digests, removes redundant patches, carries notices/provenance, fixes discovery metadata, and defines synthetic probe/remux plus non-root/persistence/stop CI gates. Server Actions billing and local builder storage failures prevent either final architecture image from executing. |
-| N3 WD ARMv7 | in-progress | [Dependency inventory](armv7-investigation.md), sparse >4 GiB test, and measured hard-float ABI exist. `armv7-unknown-linux-gnueabihf` is the target candidate, built against glibc 2.31 or older. Cross toolchain and locked engine/server build-and-load spike remain; no Chroma binary has been loaded on the WD. |
+| N3 WD ARMv7 | in-progress | [Dependency inventory and cross-build](armv7-investigation.md), sparse >4 GiB test, measured hard-float ABI, and off-device Engine/Server ELF32 binaries exist. The 9.3 MiB pilot bundle has not been uploaded or run on the WD. Server cross-build required a host SQLx macro workaround; clean reproducibility and physical load/behavior remain open. |
 | N4 appliance installers | blocked | Provisional vendor routes exist in the server checkout; no published image or accessible appliance. |
 | N5 playback qualification | blocked | Fixture/measurement protocol expanded; fixture rights/hashes and physical browser/tvOS/NAS runs unavailable. |
 | N6 measured optimization | blocked | [Acceleration decision record](hardware-acceleration.md) exists; no N5 baseline, so no hardware backend or optimization claim. |
@@ -116,12 +116,22 @@ read-only WD preflight was supplied by the owner later on 2026-09-23.
   before reaching codec/native build steps; it was interrupted with exit 130.
   This is an incomplete check, not an ARMv7 compiler failure or proof of
   support. No matching C cross compiler or glibc sysroot is installed yet.
+- 2026-09-23: Zig 0.16 cross-built pinned dav1d 1.5.3 (assembly disabled)
+  statically, then linked locked release Engine and Server binaries for
+  ARMv7 hard-float with a glibc 2.31 baseline. Both have EABI5 hard-float
+  flag `0x05000400`, loader `/lib/ld-linux-armhf.so.3`, and no required glibc
+  symbol above 2.30. The Server link required reusing a previously valid
+  macOS host SQLx macro dylib after a newly generated one failed to load;
+  clean-build reproducibility remains open. Admin SPA was rebuilt. The pilot
+  archive contains both binaries, SPA, Engine notices, and checksums; its
+  two binary hashes verify after assembly. No NAS upload or execution occurred.
 
 ## Open dependencies
 
-- A matching ARMv7 hard-float C cross toolchain and glibc 2.31-or-older
-  sysroot; the Rust target is installed but no C cross toolchain is. Do not
-  request or record passwords, addresses, serial numbers, or share paths.
+- An approved NAS data-volume staging location and test window for the pilot
+  load test, followed by clean Server build reproducibility and a tested OS 5
+  `.bin` lifecycle. Do not request or record passwords, addresses, serial
+  numbers, or share paths.
 - Availability of a representative Intel/AMD NAS and ARM64 NAS, or an agreed
   substitute for build testing with appliance qualification left open.
 - User-authorized test fixtures and physical browser/tvOS client for N5.
