@@ -91,9 +91,15 @@ had no field for it. Version 0.1.7 was built as an off-device candidate with
 a private setup secret and matching form, but rejected because normal setup
 would require SSH. Version 0.1.8 instead opts this WD package in to
 password-only owner setup from a direct private-LAN peer, with public and
-proxy-trusted requests still requiring a configured secret. The ARM Server
-binary and SPA must both be rebuilt for this change. Package installation
-and owner setup on the NAS remain unverified for 0.1.8.
+proxy-trusted requests still requiring a configured secret. The owner
+installed 0.1.8 and completed owner setup through the browser. On that build,
+the first TV scan progressed from 166 to 170 of 1,507 files during the
+observed window but was too slow for this NAS; metadata matching had not
+started because scan completion is its prerequisite. The UI's zero TV count
+and disappearing post-refresh progress row were separate reporting defects.
+Version 0.1.9 is a local candidate to skip eager per-file probing on the
+small-NAS profile, compute live counts, and persist scan history. Its device
+installation, completed scan, and metadata follow-up are not yet verified.
 
 Authenticated dashboard Off/On remains unverified: an unauthenticated local
 call to WD's `cgi_apps_set` returned HTTP 403. The Chroma hook-level stop/start

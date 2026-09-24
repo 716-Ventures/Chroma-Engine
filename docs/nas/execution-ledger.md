@@ -159,8 +159,15 @@ read-only WD preflight was supplied by the owner later on 2026-09-23.
   required SSH to complete ordinary first-run setup. The 0.1.8 candidate
   instead permits password-only owner setup from a direct private-LAN peer on
   this opted-in NAS package; public and proxy-trusted peers still require a
-  configured secret. Local tests pass; device installation and owner creation
-  remain unverified.
+  configured secret. Local tests passed. The owner installed 0.1.8 and
+  completed owner setup through the browser.
+- 2026-09-24: On 0.1.8, the first TV scan was observed at 166/1,507 files,
+  then 170/1,507, with no metadata match yet. The scan was progressing but
+  native per-file probes made it impractically slow on this small NAS. The UI
+  also showed zero TV items during partial import and lost its live progress
+  row on refresh. A 0.1.9 candidate skips eager probe on the small-NAS
+  profile, computes live item and distinct-series counts, and persists scan
+  history. Device validation of the new scan and metadata follow-up is open.
 
 ## Open dependencies
 

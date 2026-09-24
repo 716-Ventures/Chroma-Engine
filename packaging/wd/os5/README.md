@@ -3,8 +3,8 @@
 This is a model-specific, off-device-built WD OS 5 package for Chroma Server.
 It was installed and upgraded on a My Cloud EX2 Ultra running firmware
 `5.33.102` on 2026-09-24. The last device-tested package is
-`target/wd-os5/MyCloudEX2Ultra_chromaserver_0.1.6.bin` (SHA-256
-`a963edce2f919759325f96cfff68dc06fbe2257dafd949cd5dfb2df8bbc9814a`).
+`target/wd-os5/MyCloudEX2Ultra_chromaserver_0.1.8.bin` (SHA-256
+`8bbbbe0c74d9f19761abfb5aeb96ed9db1aeac67d178f0ff4b376e568c35a6bd`).
 It contains the ARMv7 diagnostic pilot Engine and Server binaries and the
 administration SPA. No compiler, Rust, Node, or container runtime is needed on
 the NAS. The pilot's SQLx build workaround remains a release-reproducibility
@@ -28,7 +28,7 @@ SPA's `dist` directory with `--admin-dir`:
 docker build --platform linux/amd64 -t chroma-wd-os5-builder:bookworm \
   -f packaging/wd/os5/Dockerfile packaging/wd/os5
 python3 packaging/wd/os5/build.py \
-  --pilot-dir /absolute/path/to/wd-ex2-ultra-armv7-pilot-0.1.8 \
+  --pilot-dir /absolute/path/to/wd-ex2-ultra-armv7-pilot-0.1.9 \
   --admin-dir /absolute/path/to/GenusServer/apps/admin-spa/dist
 CHROMA_WD_DOCKER_CONTEXT=default python3 -m unittest \
   packaging/wd/os5/test_build.py packaging/wd/os5/test_install.py -v
@@ -62,7 +62,7 @@ are in the same private data directory. The short `startup-status.txt` in the
 app directory can be shown by Configure if startup fails. Keep port 32410 on
 the trusted LAN; do not forward it to the internet.
 
-Version 0.1.8 changes first-run setup on this WD package: from a direct
+Version 0.1.8 changed first-run setup on this WD package: from a direct
 private-LAN connection, enter and confirm an owner password of at least 12
 characters. SSH and a separate setup code are not required. The package opts
 in to this narrow API allowance. Public or proxy-trusted connections still
@@ -70,8 +70,18 @@ require a separately configured setup secret; this package does not create
 one. Keep the NAS on a trusted LAN during initial setup because another LAN
 client could otherwise claim an unconfigured server first. The rejected 0.1.7
 candidate required SSH for the setup secret and should not be installed.
-Version 0.1.8 remains unverified on the appliance until owner setup succeeds
-there; local build/tests are not device acceptance.
+The owner successfully installed 0.1.8 and completed owner setup on the NAS.
+
+Version 0.1.9 is a candidate to correct the first large TV scan: the 0.1.8
+scan reached only about 170 of 1,507 files during the observed test window
+because it probes every file before metadata matching can start. In the
+small-NAS profile, 0.1.9 imports files first and leaves technical probing for
+on-demand playback. This avoids serial probe delays during indexing, but a
+file's first playback can still pay the probe cost. TV counts are computed
+from imported rows while the scan is running; the sidebar counts distinct
+series, not episode files. Scan progress and failures are persisted so Activity
+can show them after a page refresh. The 0.1.9 scan and subsequent metadata
+matching remain unverified on the appliance until the owner tests this build.
 
 The 0.1.4 dashboard registration was metadata-only: it did not install the
 payload. Versions 0.1.5 and 0.1.6 installed and started through WD's manager;
