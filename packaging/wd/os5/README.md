@@ -11,11 +11,12 @@ the NAS. The pilot's SQLx build workaround remains a release-reproducibility
 issue; this is not general NAS or playback qualification.
 
 The current off-device-tested candidate is
-`target/wd-os5/MyCloudEX2Ultra_chromaserver_0.1.11.bin`
-(SHA-256 `f4d3fd559823b532b9df33ccf4262a87b826eed5bff630efbc8c6077f8355792`).
-Its Engine source is `78814a2e97f652746a7d73dd1cc69b2d85dbf67e` and Server
-source is `924d261f7f836010c0b0cc83c3baff4b45ecbab8`. It adds owner-controlled
-scan cancellation to the API and admin UI. The owner has not yet installed this
+`target/wd-os5/MyCloudEX2Ultra_chromaserver_0.1.12.bin`
+(SHA-256 `24cee52317f7a344316f0b265fc8330456d39c33ad31e598bc884997a43d1b88`).
+Its Engine source is `bb566f4e16f9a3c6e8fda93ab3b5313816753fa5` and Server
+source is `d80ea59e596dce08ec1ec4d209f31650d73caa29`. It adds metadata
+job cancellation, interrupted-history reconciliation, and clean-uninstall
+behavior while retaining upgrade data. The owner has not yet installed this
 candidate, so package inspection is not device acceptance. The `target/`
 artifact is local and is not committed to Git.
 
@@ -37,7 +38,7 @@ SPA's `dist` directory with `--admin-dir`:
 docker build --platform linux/amd64 -t chroma-wd-os5-builder:bookworm \
   -f packaging/wd/os5/Dockerfile packaging/wd/os5
 python3 packaging/wd/os5/build.py \
-  --pilot-dir /absolute/path/to/wd-ex2-ultra-armv7-pilot-0.1.11 \
+  --pilot-dir /absolute/path/to/wd-ex2-ultra-armv7-pilot-0.1.12 \
   --admin-dir /absolute/path/to/GenusServer/apps/admin-spa/dist
 CHROMA_WD_DOCKER_CONTEXT=default python3 -m unittest \
   packaging/wd/os5/test_build.py packaging/wd/os5/test_install.py -v
@@ -55,8 +56,13 @@ flow. On the tested firmware, WD's reinstall handler stages
 `_install/chromaserver`, invokes `install.sh` with that path and the `Nas_Prog`
 parent, then runs `init.sh` and `start.sh`. It leaves app files in
 `Nas_Prog/chromaserver` and Chroma's private data in the sibling
-`Nas_Prog/chromaserver-data`. Chroma's removal hook preserves that data
-directory. Do not manually delete it during an update. The verified internal
+`Nas_Prog/chromaserver-data`. Starting with 0.1.12, the preinstall hook marks
+an upgrade so the removal hook preserves this data. On a true uninstall, the
+removal hook moves the private data directory to a timestamped
+`chromaserver-data-uninstalled-*` backup; reinstalling then starts fresh. This
+backup is private and recoverable, but still consumes NAS storage. Packages
+older than 0.1.12 preserve the active data directory even on uninstall. Do
+not manually delete it during an update. The verified internal
 WD CLI reinstall requires the upload **basename** plus `-r`, `-f 1`, and
 `-g 1`; a path or omitted `-g` did not install anything despite exit code 0.
 Use the dashboard for normal operation.
@@ -110,6 +116,14 @@ action clears any queued rescan for that run; later filesystem changes may
 still start a new scan when folder watching is enabled. The WD package has
 passed off-device package inspection and hook tests, but scan cancellation
 has not yet been exercised on the appliance.
+
+Version 0.1.12 adds stop controls for library-wide metadata matching jobs and
+reconciles interrupted metadata history with the durable queue on restart, so
+orphaned rows no longer display as running indefinitely. It also distinguishes
+upgrade from uninstall in the WD hooks: an upgrade retains the active library
+database, while uninstall moves it aside for a clean reinstall. The database
+backup is not automatically erased. These lifecycle changes passed local
+contract tests but have not yet been verified on the physical NAS.
 
 The 0.1.4 dashboard registration was metadata-only: it did not install the
 payload. Versions 0.1.5 and 0.1.6 installed and started through WD's manager;
