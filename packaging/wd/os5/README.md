@@ -28,7 +28,7 @@ SPA's `dist` directory with `--admin-dir`:
 docker build --platform linux/amd64 -t chroma-wd-os5-builder:bookworm \
   -f packaging/wd/os5/Dockerfile packaging/wd/os5
 python3 packaging/wd/os5/build.py \
-  --pilot-dir /absolute/path/to/wd-ex2-ultra-armv7-pilot-0.1.9 \
+  --pilot-dir /absolute/path/to/wd-ex2-ultra-armv7-pilot-0.1.10 \
   --admin-dir /absolute/path/to/GenusServer/apps/admin-spa/dist
 CHROMA_WD_DOCKER_CONTEXT=default python3 -m unittest \
   packaging/wd/os5/test_build.py packaging/wd/os5/test_install.py -v
@@ -84,11 +84,15 @@ series, not episode files. Scan progress and failures are persisted so Activity
 can show them after a page refresh. The 0.1.9 scan and subsequent metadata
 matching were not verified on the appliance.
 
-Complete technical analysis is required for unplayed files too. Follow the
+Version 0.1.10 restores mandatory full technical analysis through bounded,
+durable per-file probe and metadata stages. Discovery and metadata can advance
+while a probe is slow; playback reuses the same versioned full probe snapshot.
+Activity reports discovered, analyzed, and metadata-checked counts separately
+and offers a retry for failed work. Existing catalogs imported under 0.1.9 are
+scheduled for backfill on upgrade. This is an off-device-built candidate, not a
+physical performance qualification. Follow the
 [staged scanner execution plan](../../../docs/nas/staged-scanner-execution-plan.md)
-to restore mandatory probes, share the full probe result with playback, and
-measure actual NAS performance. The replacement is planned, not implemented;
-0.1.9 must not be presented as the completed scanning fix.
+and its evidence for the remaining NAS acceptance gates.
 
 The 0.1.4 dashboard registration was metadata-only: it did not install the
 payload. Versions 0.1.5 and 0.1.6 installed and started through WD's manager;

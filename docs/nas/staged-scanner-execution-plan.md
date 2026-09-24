@@ -1,6 +1,6 @@
 # Complete, efficient library scanning: execution plan for GPT-6 Sol
 
-Prepared 2026-09-24. Status: **planned; implementation and device acceptance pending**.
+Prepared 2026-09-24. Status: **local implementation underway; physical device acceptance pending**.
 
 This plan supersedes the small-NAS probe-skipping behavior introduced in WD
 candidate 0.1.9. It retains the live TV count and durable Activity fixes from
@@ -479,15 +479,15 @@ revisions, and artifacts; do not replace a failed gate with narrative reassuranc
 
 | Phase | Status | Evidence / remaining work |
 | --- | --- | --- |
-| S0 Baseline | Not started | Planning source review is recorded above; execution baseline pending. |
-| S1 Measurement | Not started | No timed physical probe baseline yet. |
-| S2 Native probe | Not started | Indexed metadata-read implementation and validation pending. |
-| S3 Shared cache | Not started | Full snapshot persistence/invalidation pending. |
-| S4 Staged execution | Not started | Durable independent consumers and mandatory probes pending. |
-| S5 Metadata | Not started | Incremental matching and failure isolation pending. |
-| S6 Progress | Not started | Stage-aware contracts, UI, and retry operation pending. |
-| S7 Verification | Not started | Automated and physical measurements pending. |
-| S8 Delivery | Not started | New binaries, package, push, and device acceptance pending. |
+| S0 Baseline | Complete | Source state and failed SSH authentication recorded in [execution evidence](staged-scanner-execution-evidence.md). |
+| S1 Measurement | Partial | Opt-in timings/read counters and synthetic benchmark added; physical baseline and representative 20-file sample pending. |
+| S2 Native probe | Locally implemented | Indexed SeekHead path, bounded fallback, read-count regression and macOS suite pass; WD timing pending. |
+| S3 Shared cache | Locally implemented | Versioned full snapshot, source fencing, reuse, invalidation, singleflight; broader device proof pending. |
+| S4 Staged execution | Locally implemented | Durable bounded discovery/probe/metadata stages and upgrade backfill; physical throughput pending. |
+| S5 Metadata | Locally implemented | Per-file matching, bounded series cache and retryable unavailable state; live provider test pending. |
+| S6 Progress | Locally implemented | Durable API/UI stage counts and owner retry; final browser rerun pending. |
+| S7 Verification | Partial | Local Rust/admin suites passing; final full run, CI and device measurement pending. |
+| S8 Delivery | In progress | ARMv7 cross-builds passed; final package/provenance/push and physical acceptance pending. |
 
 ## Handoff instruction
 
