@@ -35,6 +35,10 @@ container memory ceiling**, with headroom. The small-NAS CI workload runs under
 The wider index ceiling is a bounded interim accommodation for long MP4 sample
 tables, not a guarantee that all large files fit. Some real files exceed the
 metadata, index, or per-track sample ceilings and require a lower-memory parser.
+An MP4 track above the per-track sample ceiling is rejected if selected for
+packet indexing; it no longer makes unrelated video or alternate audio tracks
+fail source probing. This matters for files with very large lossless-audio or
+PCM tracks alongside a smaller compatible track.
 
 The portable H.264 encoder retains its intermediate YUV allocation across frames,
 and the scaler retains coordinates/output storage. These pools reduce allocator

@@ -24,7 +24,10 @@ pub(crate) fn validate_metadata_budget(bytes: &[u8], limits: ParseLimits) -> any
             if &atom.kind == b"stsz" && atom.payload.len() >= 12 {
                 let samples = read_u32(&atom.payload[8..12]).unwrap_or(0) as usize;
                 if samples > limits.max_samples_per_track {
-                    anyhow::bail!("sample resource limit exceeded");
+                    // Index builders reject this track before allocating its
+                    // sample arrays. Do not reject the entire source here: a
+                    // different video/audio track may still be playable.
+                    continue;
                 }
                 // Retained packet indexes accumulate across tracks; table/timing
                 // expansion is sequential, so its scratch peak is the largest
@@ -2193,6 +2196,25 @@ mod tests {
         assert!(validate_metadata_budget(&metadata, limits).is_ok());
         limits.max_index_bytes -= 1;
         assert!(validate_metadata_budget(&metadata, limits).is_err());
+    }
+
+    #[test]
+    fn oversized_unselected_track_does_not_reject_other_tracks() {
+        let mut oversized = vec![0; 12];
+        oversized[4..8].copy_from_slice(&1u32.to_be_bytes());
+        oversized[8..12].copy_from_slice(&2_000_001u32.to_be_bytes());
+        let mut playable = vec![0; 12];
+        playable[4..8].copy_from_slice(&1u32.to_be_bytes());
+        playable[8..12].copy_from_slice(&100u32.to_be_bytes());
+        let mut metadata = atom(b"stsz", &oversized);
+        metadata.extend_from_slice(&atom(b"stsz", &playable));
+        let limits = ParseLimits {
+            max_index_bytes: 24 + 100 * std::mem::size_of::<PacketRef>() + 100 * 48,
+            ..ParseLimits::default()
+        };
+        assert!(validate_metadata_budget(&metadata, limits).is_ok());
+        assert!(parse_stsz(&oversized, limits).is_none());
+        assert_eq!(parse_stsz(&playable, limits).unwrap().len(), 100);
     }
 
     #[test]
