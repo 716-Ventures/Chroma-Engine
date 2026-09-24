@@ -11,13 +11,15 @@ the NAS. The pilot's SQLx build workaround remains a release-reproducibility
 issue; this is not general NAS or playback qualification.
 
 The current off-device-tested candidate is
-`target/wd-os5/MyCloudEX2Ultra_chromaserver_0.1.14.bin`. It retains the
+`target/wd-os5/MyCloudEX2Ultra_chromaserver_0.1.14.bin` (SHA-256
+`61649e588a3a923bdd58b1309a2f04d29e2d4f8f9d5a4d72c49435df7a0529eb`). It retains the
 0.1.13 Engine's 24 MiB bounded NAS metadata ceiling and adds an Activity
 issue view for failed scans. Each scan can show paginated per-file probe and
 metadata errors, with the path, stage, reason, and attempt count. The Engine
 binary remains based on `f8ff9e490b0e1f132ef102473b719ebfd9b792b2`;
-the Server source is `49b6a38`. The package SHA-256 is recorded after
-packaging. This candidate has not been tested on the appliance. The `target/`
+the package provenance records Engine `6a1b375c468721d515ce38bee3bc389321e11e93`
+and Server `49b6a3879ee756d00f694e91796b50201cefc13d`. This candidate has
+not been tested on the appliance. The `target/`
 artifact is local and is not committed to Git.
 
 The package must be built on Linux amd64 using the pinned OS 5 `mksapkg-OS5`
