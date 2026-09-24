@@ -17,10 +17,10 @@ use desktop defaults. Inconsistent or zero budgets fail before media opens.
 
 | Ceiling | Desktop default | Small NAS |
 | --- | --- | --- |
-| Session reservation | 1536 MiB | 192 MiB |
+| Session reservation | 1536 MiB | 224 MiB |
 | Aggregate reservations | 3072 MiB | 384 MiB |
-| Simultaneous sessions | 2 | 2 |
-| Metadata / expanded index | 64 / 256 MiB | 24 / 64 MiB |
+| Simultaneous sessions | 2 | 1 |
+| Metadata / expanded index | 64 / 256 MiB | 24 / 96 MiB |
 | Compressed window / decoded batch | 64 / 64 MiB | 32 / 8 MiB |
 | Output fragment | 128 MiB | 64 MiB |
 | Configurable software codec threads | 2 | 1 |
@@ -32,6 +32,9 @@ reject a resolution below the absolute 8K pixel ceiling. Opaque codec/driver
 allocations, executable pages, and OS cache require an **external process or
 container memory ceiling**, with headroom. The small-NAS CI workload runs under
 512 MiB; it is a tiny synthetic fixture, not 4K movie qualification.
+The wider index ceiling is a bounded interim accommodation for long MP4 sample
+tables, not a guarantee that all large files fit. Some real files exceed the
+metadata, index, or per-track sample ceilings and require a lower-memory parser.
 
 The portable H.264 encoder retains its intermediate YUV allocation across frames,
 and the scaler retains coordinates/output storage. These pools reduce allocator

@@ -116,8 +116,8 @@ For in-process use, share one `Arc<EngineRuntime>` across sessions and use the
 `open_with_runtime` APIs with a `WorkControl`. Session convenience entrypoints use a process-local shared
 runtime; use `probe_media_source_with_runtime` for admission-controlled probing.
 Set `CHROMA_RESOURCE_POLICY` before first use: `small-nas` selects a copy-first policy,
-or supply a validated JSON policy. The small-NAS profile reserves 192 MiB per session,
-384 MiB aggregate, permits two sessions, uses one software codec thread, and disables software
+or supply a validated JSON policy. The small-NAS profile reserves 224 MiB per session,
+384 MiB aggregate, permits one session, uses one software codec thread, and disables software
 video fallback. Reservations are not measured RSS limits; hosts must leave headroom for codecs,
 drivers, and OS resources and enforce process/container limits separately.
 

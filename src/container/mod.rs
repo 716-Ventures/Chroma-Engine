@@ -58,12 +58,32 @@ impl ParseBudget {
             .bytes
             .checked_add(bytes)
             .ok_or_else(|| anyhow::anyhow!("parser memory overflow"))?;
-        if depth > self.limits.max_depth
-            || self.boxes > self.limits.max_boxes
-            || self.tracks > self.limits.max_tracks
-            || self.bytes > self.limits.max_index_bytes
-        {
-            anyhow::bail!("container resource limit exceeded");
+        if depth > self.limits.max_depth {
+            anyhow::bail!(
+                "container nesting depth requires {depth} but the configured limit is {}",
+                self.limits.max_depth
+            );
+        }
+        if self.boxes > self.limits.max_boxes {
+            anyhow::bail!(
+                "container elements require {} but the configured limit is {}",
+                self.boxes,
+                self.limits.max_boxes
+            );
+        }
+        if self.tracks > self.limits.max_tracks {
+            anyhow::bail!(
+                "container tracks require {} but the configured limit is {}",
+                self.tracks,
+                self.limits.max_tracks
+            );
+        }
+        if self.bytes > self.limits.max_index_bytes {
+            anyhow::bail!(
+                "container index budget requires {} bytes but the configured limit is {}",
+                self.bytes,
+                self.limits.max_index_bytes
+            );
         }
         Ok(())
     }

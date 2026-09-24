@@ -299,8 +299,8 @@ contiguous window, but another invocation cannot reuse that process's state.
 
 ## Resource limits, cancellation, and failures
 
-The small-NAS policy reserves 192 MiB per session and 384 MiB aggregate, permits
-two simultaneous sessions, uses one configurable software codec thread, and
+The small-NAS policy reserves 224 MiB per session and 384 MiB aggregate, permits
+one simultaneous session, uses one configurable software codec thread, and
 disables software video fallback. These reservations are not measured RSS limits.
 Opaque codec/driver allocations and OS caches need additional headroom and an
 external process/container memory ceiling. See [resource policy](resource-policy.md)

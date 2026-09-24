@@ -77,10 +77,10 @@ impl ResourcePolicy {
     /// Low-memory, copy-first policy. Software video fallback is disabled.
     pub fn small_nas() -> Self {
         Self {
-            session_memory_bytes: 192 * 1024 * 1024,
+            session_memory_bytes: 224 * 1024 * 1024,
             aggregate_memory_bytes: 384 * 1024 * 1024,
             metadata_bytes: 24 * 1024 * 1024,
-            index_bytes: 64 * 1024 * 1024,
+            index_bytes: 96 * 1024 * 1024,
             compressed_window_bytes: 32 * 1024 * 1024,
             decoded_batch_bytes: 8 * 1024 * 1024,
             output_bytes: 64 * 1024 * 1024,
@@ -236,12 +236,10 @@ mod tests {
     fn shared_admission_releases_on_drop_and_rejects_invalid_limits() {
         let runtime = EngineRuntime::new(ResourcePolicy::small_nas()).unwrap();
         let first = runtime.admit().unwrap();
-        let second = runtime.clone().admit().unwrap();
         assert!(matches!(runtime.admit(), Err(ResourceError::Busy)));
         drop(first);
-        assert_eq!(runtime.active_sessions(), 1);
+        assert_eq!(runtime.active_sessions(), 0);
         let replacement = runtime.admit().unwrap();
-        drop(second);
         drop(replacement);
         assert_eq!(runtime.active_sessions(), 0);
         assert!(
