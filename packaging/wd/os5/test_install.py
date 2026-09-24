@@ -143,7 +143,7 @@ class InstallContractTests(unittest.TestCase):
         self.assertEqual((self.programs / "chromaserver-data/lan-setup-flag").read_text(),
                          "1\n")
 
-    def test_removal_preserves_data(self):
+    def test_uninstall_starts_fresh_and_keeps_recoverable_data_backup(self):
         installed = self.programs / "chromaserver"
         make_stage(installed)
         data = self.programs / "chromaserver-data"
@@ -151,7 +151,42 @@ class InstallContractTests(unittest.TestCase):
         (data / "keep.db").write_text("persistent", encoding="utf-8")
         subprocess.run(["sh", str(installed / "remove.sh"), str(installed)], check=True)
         self.assertFalse(installed.exists())
+        self.assertFalse(data.exists())
+        backups = list(self.programs.glob("chromaserver-data-uninstalled-*"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual((backups[0] / "keep.db").read_text(), "persistent")
+        staged = self.programs / "_install/chromaserver"
+        make_stage(staged)
+        self.run_install(staged, self.programs)
+        self.assertTrue(data.is_dir())
+        self.assertFalse((data / "keep.db").exists())
+
+    def test_upgrade_preserves_active_data_without_backup(self):
+        installed = self.programs / "chromaserver"
+        make_stage(installed)
+        data = self.programs / "chromaserver-data"
+        data.mkdir()
+        (data / "keep.db").write_text("persistent", encoding="utf-8")
+        subprocess.run(["sh", str(installed / "preinst.sh"), str(installed)], check=True)
+        self.assertTrue((data / ".upgrade-preserve-data").exists())
+        subprocess.run(["sh", str(installed / "remove.sh"), str(installed)], check=True)
+        self.assertFalse(installed.exists())
         self.assertEqual((data / "keep.db").read_text(), "persistent")
+        self.assertFalse((data / ".upgrade-preserve-data").exists())
+        self.assertFalse(list(self.programs.glob("chromaserver-data-uninstalled-*")))
+
+    def test_uninstall_rejects_symlinked_data_directory(self):
+        installed = self.programs / "chromaserver"
+        make_stage(installed)
+        outside = pathlib.Path(self.temporary.name) / "outside"
+        outside.mkdir()
+        (outside / "keep.db").write_text("persistent", encoding="utf-8")
+        (self.programs / "chromaserver-data").symlink_to(outside)
+        result = subprocess.run(["sh", str(installed / "remove.sh"), str(installed)],
+                                capture_output=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(installed.exists())
+        self.assertEqual((outside / "keep.db").read_text(), "persistent")
 
     @unittest.skipUnless(os.environ.get("CHROMA_WD_DOCKER_CONTEXT"),
                          "set CHROMA_WD_DOCKER_CONTEXT for Linux web-root test")
@@ -165,10 +200,18 @@ class InstallContractTests(unittest.TestCase):
             "test \"$(readlink /var/www/apps/chromaserver/index.php)\" = "
             "/tmp/Nas_Prog/chromaserver/index.php"
         )
-        subprocess.run(["docker", "--context", os.environ["CHROMA_WD_DOCKER_CONTEXT"],
-                        "run", "--rm", "--platform", "linux/amd64", "-v",
-                        f"{REPO}:/work:ro", "chroma-wd-os5-builder:bookworm",
-                        "sh", "-ec", script], check=True, capture_output=True)
+        # Colima and Docker Desktop may not share the repository's volume.
+        # Stage only the hook inputs under the home directory for this test.
+        with tempfile.TemporaryDirectory(prefix="chroma-wd-hook-",
+                                         dir=pathlib.Path.home()) as shared:
+            hook_dir = pathlib.Path(shared) / "packaging/wd/os5"
+            hook_dir.mkdir(parents=True)
+            for name in ("index.php", "init.sh"):
+                shutil.copy2(HERE / name, hook_dir / name)
+            subprocess.run(["docker", "--context", os.environ["CHROMA_WD_DOCKER_CONTEXT"],
+                            "run", "--rm", "--platform", "linux/amd64", "-v",
+                            f"{shared}:/work:ro", "chroma-wd-os5-builder:bookworm",
+                            "sh", "-ec", script], check=True, capture_output=True)
 
 
 if __name__ == "__main__":
