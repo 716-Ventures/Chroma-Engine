@@ -11,11 +11,12 @@ the NAS. The pilot's SQLx build workaround remains a release-reproducibility
 issue; this is not general NAS or playback qualification.
 
 The current off-device-tested candidate is
-`target/wd-os5/MyCloudEX2Ultra_chromaserver_0.1.13.bin`. It raises the
+`target/wd-os5/MyCloudEX2Ultra_chromaserver_0.1.13.bin` (SHA-256
+`0789bce358cb7d52ea9c602db80db4ccf7047803fb1505eb0f538031e0b38e07`). It raises the
 small-NAS container metadata ceiling from 8 to 24 MiB so that valid MP4/MKV
 headers larger than 8 MiB can be probed, while preserving the existing
-allocation and index limits. Its Engine source revision and SHA-256 are
-recorded after packaging; the Server source remains
+allocation and index limits. Its Engine source is
+`f8ff9e490b0e1f132ef102473b719ebfd9b792b2`; the Server source remains
 `d80ea59e596dce08ec1ec4d209f31650d73caa29`. This candidate has not
 been tested on the appliance. The `target/` artifact is local and is not
 committed to Git.
