@@ -485,9 +485,9 @@ revisions, and artifacts; do not replace a failed gate with narrative reassuranc
 | S3 Shared cache | Locally implemented | Versioned full snapshot, source fencing, reuse, invalidation, singleflight; broader device proof pending. |
 | S4 Staged execution | Locally implemented | Durable bounded discovery/probe/metadata stages and upgrade backfill; physical throughput pending. |
 | S5 Metadata | Locally implemented | Per-file matching, bounded series cache and retryable unavailable state; live provider test pending. |
-| S6 Progress | Locally implemented | Durable API/UI stage counts and owner retry; final browser rerun pending. |
-| S7 Verification | Partial | Local Rust/admin suites passing; final full run, CI and device measurement pending. |
-| S8 Delivery | In progress | ARMv7 cross-builds passed; final package/provenance/push and physical acceptance pending. |
+| S6 Progress | Locally verified | Durable API/UI stage counts, owner retry, and Playwright refresh/retry smoke passed. |
+| S7 Verification | Local checks passed; device pending | Final Engine/Server Rust, admin/unit/browser/build checks passed; CI and physical measurements pending. |
+| S8 Delivery | Candidate delivered; device pending | `0.1.10` `.bin` built and inspected, 18 package/install tests passed, both source repos pushed. Owner installation and physical acceptance pending. |
 
 ## Handoff instruction
 

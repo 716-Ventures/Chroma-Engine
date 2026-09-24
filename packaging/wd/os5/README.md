@@ -10,6 +10,14 @@ administration SPA. No compiler, Rust, Node, or container runtime is needed on
 the NAS. The pilot's SQLx build workaround remains a release-reproducibility
 issue; this is not general NAS or playback qualification.
 
+The current off-device-tested candidate is
+`target/wd-os5/MyCloudEX2Ultra_chromaserver_0.1.10.bin`
+(SHA-256 `6bdc95263f06b8c74b52ecdc279e938d979d71dcf4320dc932ec655b78328d9d`).
+Its Engine source is `9e0d56b0d789dab4951ec00168d0e074716f87e1` and Server
+source is `8d40dd0092720cb0732dd7f37fa9d703c6cedbb4`. The owner has not yet
+installed this candidate, so successful package inspection is not device
+acceptance. The `target/` artifact is local and is not committed to Git.
+
 The package must be built on Linux amd64 using the pinned OS 5 `mksapkg-OS5`
 tool. `Dockerfile` supplies the Linux dependencies and OpenSSL legacy provider
 required by WD's compatibility signature. The mirrored tool's SHA-256 is
