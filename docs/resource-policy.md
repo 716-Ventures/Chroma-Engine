@@ -20,7 +20,7 @@ use desktop defaults. Inconsistent or zero budgets fail before media opens.
 | Session reservation | 1536 MiB | 192 MiB |
 | Aggregate reservations | 3072 MiB | 384 MiB |
 | Simultaneous sessions | 2 | 2 |
-| Metadata / expanded index | 64 / 256 MiB | 8 / 64 MiB |
+| Metadata / expanded index | 64 / 256 MiB | 24 / 64 MiB |
 | Compressed window / decoded batch | 64 / 64 MiB | 32 / 8 MiB |
 | Output fragment | 128 MiB | 64 MiB |
 | Configurable software codec threads | 2 | 1 |

@@ -514,6 +514,34 @@ mod tests {
     }
 
     #[test]
+    fn small_nas_accepts_large_bounded_mp4_metadata() {
+        const MOOV_SIZE: u32 = 11_344_195;
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(&[
+            0, 0, 0, 16, b'f', b't', b'y', b'p', b'i', b's', b'o', b'm', 0, 0, 0, 0,
+        ])
+        .unwrap();
+        file.write_all(&MOOV_SIZE.to_be_bytes()).unwrap();
+        file.write_all(b"moov").unwrap();
+        file.write_all(&(MOOV_SIZE - 8).to_be_bytes()).unwrap();
+        file.write_all(b"free").unwrap();
+        file.as_file().set_len(16 + u64::from(MOOV_SIZE)).unwrap();
+
+        let policy = crate::ResourcePolicy::small_nas();
+        let (_, metadata) =
+            read_metadata_with_context(file.path(), &policy, &crate::WorkControl::default())
+                .unwrap();
+        assert_eq!(metadata.len(), 16 + MOOV_SIZE as usize);
+
+        let mut old_policy = policy;
+        old_policy.metadata_bytes = 8 * 1024 * 1024;
+        let error =
+            read_metadata_with_context(file.path(), &old_policy, &crate::WorkControl::default())
+                .unwrap_err();
+        assert!(error.to_string().contains("container metadata requires"));
+    }
+
+    #[test]
     fn finds_metadata_after_sparse_payload_above_four_gib() {
         let mut file = tempfile::NamedTempFile::new().unwrap();
         file.write_all(&[

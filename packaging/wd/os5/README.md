@@ -11,14 +11,14 @@ the NAS. The pilot's SQLx build workaround remains a release-reproducibility
 issue; this is not general NAS or playback qualification.
 
 The current off-device-tested candidate is
-`target/wd-os5/MyCloudEX2Ultra_chromaserver_0.1.12.bin`
-(SHA-256 `24cee52317f7a344316f0b265fc8330456d39c33ad31e598bc884997a43d1b88`).
-Its Engine source is `bb566f4e16f9a3c6e8fda93ab3b5313816753fa5` and Server
-source is `d80ea59e596dce08ec1ec4d209f31650d73caa29`. It adds metadata
-job cancellation, interrupted-history reconciliation, and clean-uninstall
-behavior while retaining upgrade data. The owner has not yet installed this
-candidate, so package inspection is not device acceptance. The `target/`
-artifact is local and is not committed to Git.
+`target/wd-os5/MyCloudEX2Ultra_chromaserver_0.1.13.bin`. It raises the
+small-NAS container metadata ceiling from 8 to 24 MiB so that valid MP4/MKV
+headers larger than 8 MiB can be probed, while preserving the existing
+allocation and index limits. Its Engine source revision and SHA-256 are
+recorded after packaging; the Server source remains
+`d80ea59e596dce08ec1ec4d209f31650d73caa29`. This candidate has not
+been tested on the appliance. The `target/` artifact is local and is not
+committed to Git.
 
 The package must be built on Linux amd64 using the pinned OS 5 `mksapkg-OS5`
 tool. `Dockerfile` supplies the Linux dependencies and OpenSSL legacy provider
@@ -38,7 +38,7 @@ SPA's `dist` directory with `--admin-dir`:
 docker build --platform linux/amd64 -t chroma-wd-os5-builder:bookworm \
   -f packaging/wd/os5/Dockerfile packaging/wd/os5
 python3 packaging/wd/os5/build.py \
-  --pilot-dir /absolute/path/to/wd-ex2-ultra-armv7-pilot-0.1.12 \
+  --pilot-dir /absolute/path/to/wd-ex2-ultra-armv7-pilot-0.1.13 \
   --admin-dir /absolute/path/to/GenusServer/apps/admin-spa/dist
 CHROMA_WD_DOCKER_CONTEXT=default python3 -m unittest \
   packaging/wd/os5/test_build.py packaging/wd/os5/test_install.py -v

@@ -79,7 +79,7 @@ impl ResourcePolicy {
         Self {
             session_memory_bytes: 192 * 1024 * 1024,
             aggregate_memory_bytes: 384 * 1024 * 1024,
-            metadata_bytes: 8 * 1024 * 1024,
+            metadata_bytes: 24 * 1024 * 1024,
             index_bytes: 64 * 1024 * 1024,
             compressed_window_bytes: 32 * 1024 * 1024,
             decoded_batch_bytes: 8 * 1024 * 1024,
