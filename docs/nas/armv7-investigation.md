@@ -58,19 +58,18 @@ firmware modification was attempted.
 
 ## Next gate
 
-The off-device binaries are in a 9.3 MiB pilot archive at
-`target/wd-ex2-ultra-armv7-pilot.tar.gz`. A separate
-`target/wd-os5/MyCloudEX2Ultra_chromaserver_0.1.2.bin` was assembled for the
-WD dashboard using the EX2 Ultra OS 5 package format and lifecycle hooks.
-Its header, signature, tar payload, ARM ABI, and scripts passed local checks
-against an owner-supplied known-good package. The owner installed earlier
-versions and the WD dashboard reported the app On, but the Configure path
-returned WD's HTTP 404 and the Chroma API port refused connections. That is
-not a successful Engine or Server load. Version 0.1.2 removes a hard-coded
-volume path and adds a minimal Configure startup-status page; it has not yet
-been tried on the NAS. Attempt a minimal load spike for **both** Engine and Server
-on the device; isolate any codec failure with its exact command and loader
-output. Then measure startup, `/ready`, RSS, swap, and small authorized
-fixture playback. A reduced
-copy-first media contract requires a separate scope decision; no codec is
-silently removed here.
+The off-device binaries remain in the 9.3 MiB diagnostic pilot archive at
+`target/wd-ex2-ultra-armv7-pilot.tar.gz`. The current WD app package is
+`target/wd-os5/MyCloudEX2Ultra_chromaserver_0.1.6.bin`, built with the Linux
+OS 5 packager rather than a handwritten serializer. The old 0.1.4 package
+registered metadata without installing a payload. On 2026-09-24, WD's manager
+installed 0.1.5 and upgraded it to 0.1.6 on firmware 5.33.102. The Engine
+loaded, Server reached `/ready` in about one second, Configure redirected to
+the UI, and persistent server identity survived the upgrade. Chroma-specific
+stop/start/repeated-start checks passed. See
+[device evidence](wd-os5-install-recovery-evidence.md) for the exact scope.
+
+Next, finish authenticated dashboard Off/On, a real authorized-library scan
+and fixture playback, sustained RSS/swap and large-file testing, and clean
+Server build reproducibility. A reduced copy-first media contract requires a
+separate scope decision; no codec is silently removed here.

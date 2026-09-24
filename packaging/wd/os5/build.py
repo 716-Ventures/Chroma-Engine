@@ -1,206 +1,192 @@
 #!/usr/bin/env python3
-"""Build a My Cloud OS 5 EX2 Ultra app from the off-device ARMv7 pilot."""
+"""Build the EX2 Ultra app with the OS 5 mksapkg tool, then inspect it."""
 
 from __future__ import annotations
 
 import argparse
-import datetime
 import hashlib
 import io
 import pathlib
 import shutil
 import struct
 import subprocess
+import sys
 import tarfile
 import tempfile
 import xml.etree.ElementTree as ET
 
-
 APP = "chromaserver"
-VERSION = "0.1.2"
-MAGIC = b"GrandTeZ"
+PACKAGE_RC = pathlib.Path(__file__).resolve().parent / "apkg.rc"
+VERSION = next(line.split(":", 1)[1].strip() for line in PACKAGE_RC.read_text().splitlines()
+               if line.startswith("Version:"))
 HEADER_SIZE = 204
-MODEL_FIELDS = (2, 0, 20, 1, 9, 1)
-# My Cloud's public manual-app format uses this compatibility passphrase.
+MODEL_FIELDS = (2, 0, 20, 1, 9, 1)  # Observed OS 5 mksapkg output for EX2 Ultra.
+PACKAGER_SHA256 = "62340b1d0eb0433fffa7ceb1a5b6d4886e69b93e6e60297b2f984f5f3557e67a"
 SIGN_KEY = "Lidho.mdk3K3h"
-SCRIPT_NAMES = (
-    "install.sh", "init.sh", "preinst.sh", "start.sh", "stop.sh",
-    "clean.sh", "remove.sh",
-)
+HOOKS = ("install.sh", "init.sh", "preinst.sh", "start.sh", "stop.sh",
+         "clean.sh", "remove.sh")
 
 
 def xor_checksum(payload: bytes) -> int:
-    # OS 5 ignores the last one to three bytes, rather than zero-padding them.
     result = 0
     for offset in range(0, len(payload) - len(payload) % 4, 4):
         result ^= struct.unpack_from("<I", payload, offset)[0]
     return result
 
 
-def header_for(payload: bytes) -> bytes:
-    header = bytearray(HEADER_SIZE)
-    header[:8] = MAGIC
-    header[8:8 + len(APP)] = APP.encode("ascii")
-    header[72:72 + len(VERSION)] = VERSION.encode("ascii")
-    struct.pack_into("<6I", header, 112, *MODEL_FIELDS)
-    struct.pack_into("<II", header, 196, xor_checksum(payload), len(payload))
-    return bytes(header)
-
-
-def inspect_package(path: pathlib.Path, expected_app: str):
+def inspect_package(path: pathlib.Path, expected_app: str,
+                    expected_version: str | None = None) -> tuple[str, str, int]:
     with path.open("rb") as stream:
-        header = stream.read(HEADER_SIZE)
-        payload = stream.read()
-    if len(header) != HEADER_SIZE or header[:8] != MAGIC:
-        raise ValueError("not a My Cloud EX2 Ultra OS 5 package")
-    name = header[8:72].split(b"\0", 1)[0].decode("ascii")
-    version = header[72:112].split(b"\0", 1)[0].decode("ascii")
-    model_fields = struct.unpack_from("<6I", header, 112)
+        header, payload = stream.read(HEADER_SIZE), stream.read()
+    if len(header) != HEADER_SIZE or header[:8] != b"GrandTeZ":
+        raise ValueError("invalid OS 5 EX2 Ultra package header")
+    # Independent of the producer: OS 5 mksapkg puts version at byte 76.
+    name = header[8:76].split(b"\0", 1)[0].decode("ascii")
+    version = header[76:112].split(b"\0", 1)[0].decode("ascii")
+    if name != expected_app or not version or (expected_version and version != expected_version):
+        raise ValueError("header name/version mismatch")
+    if struct.unpack_from("<6I", header, 112) != MODEL_FIELDS:
+        raise ValueError("EX2 Ultra model fields mismatch")
     checksum, length = struct.unpack_from("<II", header, 196)
-    if name != expected_app or model_fields != MODEL_FIELDS:
-        raise ValueError("package identity or EX2 Ultra model fields do not match")
     if length != len(payload) or checksum != xor_checksum(payload):
-        raise ValueError("package length or checksum does not match payload")
+        raise ValueError("package payload length/checksum mismatch")
     with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as archive:
-        names = set(archive.getnames())
-        for member in archive.getmembers():
-            if member.name != expected_app and not member.name.startswith(expected_app + "/"):
-                raise ValueError("archive member escapes package root")
-            if member.issym() or member.islnk():
-                raise ValueError("archive contains a link")
-        required = {f"{expected_app}/{name}" for name in SCRIPT_NAMES}
+        listing = archive.getmembers()
+        members = {member.name: member for member in listing}
+        if len(members) != len(listing):
+            raise ValueError("duplicate archive path")
+        for member in members.values():
+            parts = pathlib.PurePosixPath(member.name)
+            if (parts.is_absolute() or ".." in parts.parts or parts.parts[0] != expected_app
+                    or not (member.isfile() or member.isdir())):
+                raise ValueError("unsafe package archive member")
+        required = {f"{expected_app}/{entry}" for entry in HOOKS}
         required.update({f"{expected_app}/apkg.rc", f"{expected_app}/apkg.xml",
                          f"{expected_app}/apkg.sign"})
-        if not required.issubset(names):
-            raise ValueError("package lacks required app metadata or scripts")
-        sign_member = archive.extractfile(f"{expected_app}/apkg.sign")
-        if sign_member is None:
-            raise ValueError("missing package signature")
-        signature = sign_member.read()
         if expected_app == APP:
-            rc_member = archive.extractfile(f"{APP}/apkg.rc")
-            xml_member = archive.extractfile(f"{APP}/apkg.xml")
-            if rc_member is None or xml_member is None:
-                raise ValueError("missing Chroma package metadata")
-            rc_fields = dict(line.split(":", 1) for line in
-                             rc_member.read().decode("utf-8").splitlines() if ":" in line)
-            xml_item = ET.fromstring(xml_member.read()).find("./apkg/item")
-            if (rc_fields.get("Version", "").strip() != VERSION
-                    or rc_fields.get("AddonUsedPort", "").strip()
-                    or xml_item is None
-                    or xml_item.findtext("url_port") not in (None, "")):
-                raise ValueError("Configure metadata must use the dashboard PHP redirect")
-    decrypted = subprocess.run(
-        ["openssl", "bf-cbc", "-d", "-md", "sha256", "-k", SIGN_KEY],
-        input=signature, capture_output=True, check=True,
-    ).stdout
-    if decrypted != (expected_app + "\n").encode("ascii"):
-        raise ValueError("package signature does not match app name")
-    return name, version, len(payload)
+            required.update({f"{APP}/chroma-server", f"{APP}/resources/bin/chroma-engine",
+                             f"{APP}/resources/admin/index.html", f"{APP}/index.php"})
+        if not required.issubset(members):
+            raise ValueError("package is missing required files")
+        executable = HOOKS + (("chroma-server", "resources/bin/chroma-engine")
+                              if expected_app == APP else ())
+        for entry in executable:
+            member = members[f"{expected_app}/{entry}"]
+            if not member.isfile() or not member.mode & 0o111:
+                raise ValueError(f"required executable has wrong mode: {entry}")
+        rc = archive.extractfile(members[f"{expected_app}/apkg.rc"])
+        xml = archive.extractfile(members[f"{expected_app}/apkg.xml"])
+        sign = archive.extractfile(members[f"{expected_app}/apkg.sign"])
+        if rc is None or xml is None or sign is None:
+            raise ValueError("metadata/signature is not a regular file")
+        fields = dict(line.split(":", 1) for line in rc.read().decode().splitlines()
+                      if ":" in line)
+        item = ET.fromstring(xml.read()).find("./apkg/item")
+        if (fields.get("Package", "").strip() != expected_app
+                or fields.get("Version", "").strip() != version or item is None
+                or item.findtext("name") != expected_app or item.findtext("version") != version):
+            raise ValueError("header and metadata disagree")
+        if (expected_app == APP and
+                (fields.get("AddonUsedPort", "").strip()
+                 or item.findtext("url_port") not in (None, "")
+                 or item.findtext("url") != "index.php")):
+            raise ValueError("Configure metadata mismatch")
+        signature = sign.read()
+    commands = (["openssl", "bf-cbc", "-d", "-md", "sha256", "-k", SIGN_KEY],
+                ["openssl", "bf-cbc", "-d", "-md", "sha256", "-k", SIGN_KEY,
+                 "-provider", "default", "-provider", "legacy"])
+    result = None
+    for command in commands:
+        result = subprocess.run(command, input=signature, capture_output=True)
+        if result.returncode == 0:
+            break
+    if result is None or result.returncode:
+        raise ValueError("signature cannot be decrypted")
+    if result.stdout != (expected_app + "\n").encode("ascii"):
+        raise ValueError("signature does not match package name")
+    return name, version, length
 
 
-def validate_arm_binary(path: pathlib.Path):
+def validate_arm_binary(path: pathlib.Path) -> None:
     data = path.read_bytes()
-    if len(data) < 52 or data[:6] != b"\x7fELF\x01\x01":
-        raise ValueError(f"not an ELF32 little-endian binary: {path}")
-    if struct.unpack_from("<H", data, 18)[0] != 40:
-        raise ValueError(f"not ARM: {path}")
-    if struct.unpack_from("<I", data, 36)[0] & 0x400 != 0x400:
-        raise ValueError(f"not ARM hard-float: {path}")
-    if b"/lib/ld-linux-armhf.so.3" not in data:
-        raise ValueError(f"unexpected Linux loader: {path}")
+    if (len(data) < 52 or data[:6] != b"\x7fELF\x01\x01"
+            or struct.unpack_from("<H", data, 18)[0] != 40
+            or struct.unpack_from("<I", data, 36)[0] & 0x400 != 0x400
+            or b"/lib/ld-linux-armhf.so.3" not in data):
+        raise ValueError(f"not an ARMv7 hard-float binary for the NAS: {path}")
 
 
-def write_xml(path: pathlib.Path):
-    root = ET.Element("config")
-    apkg = ET.SubElement(root, "apkg")
-    item = ET.SubElement(apkg, "item")
-    fields = {
-        "procudt_id": "0", "custom_id": "20", "model_id": "1",
-        "app_id": "9", "user_control": "1", "center_type": "0",
-        "individual_flag": "1", "name": APP, "show": "Chroma Server",
-        "enable": "0", "version": VERSION,
-        "date": datetime.date.today().strftime("%Y%m%d"), "inst_date": "",
-        "path": "", "ps_name": "", "url": "index.php",
-        "url_port": "", "apkg_version": "2",
-        "packager": "716 Ventures", "email": "",
-        "homepage": "https://github.com/716-Ventures/GenusServer",
-        "inst_depend": "", "inst_conflict": "", "start_depend": "",
-        "start_conflict": "", "description": "Chroma Server for personal media libraries.",
-        "icon": "", "MinFWVer": "5.33.102", "MaxFWVer": "", "Hidden": "",
-    }
-    for key, value in fields.items():
-        ET.SubElement(item, key).text = value
-    ET.ElementTree(root).write(path, encoding="utf-8", xml_declaration=True)
-
-
-def normalized_tar_info(info: tarfile.TarInfo):
-    info.uid = 0
-    info.gid = 0
-    info.uname = "root"
-    info.gname = "root"
-    return info
-
-
-def build(pilot_dir: pathlib.Path, output: pathlib.Path, reference: pathlib.Path | None):
-    source_dir = pathlib.Path(__file__).resolve().parent
+def build(pilot_dir: pathlib.Path, output: pathlib.Path, packager: pathlib.Path,
+          docker_context: str | None, reference: pathlib.Path | None) -> pathlib.Path:
+    source = pathlib.Path(__file__).resolve().parent
     if reference:
-        inspect_package(reference, "plexmediaserver")
-    validate_arm_binary(pilot_dir / "chroma-server")
-    validate_arm_binary(pilot_dir / "resources/bin/chroma-engine")
-    sums = (pilot_dir / "SHA256SUMS").read_text(encoding="ascii").splitlines()
-    expected = {}
-    for line in sums:
-        digest, relative = line.split(maxsplit=1)
-        expected[relative] = digest
+        inspect_package(reference, "plexmediaserver", "1.43.4.10903")
+    if hashlib.sha256(packager.read_bytes()).hexdigest() != PACKAGER_SHA256:
+        raise ValueError("OS 5 packager hash mismatch")
+    expected = {relative: digest for digest, relative in
+                (line.split(maxsplit=1) for line in
+                 (pilot_dir / "SHA256SUMS").read_text(encoding="ascii").splitlines())}
     for relative in ("chroma-server", "resources/bin/chroma-engine"):
-        actual = hashlib.sha256((pilot_dir / relative).read_bytes()).hexdigest()
-        if expected.get(relative) != actual:
+        binary = pilot_dir / relative
+        validate_arm_binary(binary)
+        if hashlib.sha256(binary.read_bytes()).hexdigest() != expected.get(relative):
             raise ValueError(f"pilot checksum mismatch: {relative}")
     if not (pilot_dir / "resources/admin/index.html").is_file():
         raise ValueError("pilot lacks admin SPA")
     if output.exists():
         raise FileExistsError(f"refusing to overwrite {output}")
     output.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="chroma-wd-os5-") as temp:
-        app_dir = pathlib.Path(temp) / APP
+    with tempfile.TemporaryDirectory(prefix="chroma-wd-os5-", dir=output.parent) as temp:
+        stage = pathlib.Path(temp)
+        app_dir = stage / APP
         app_dir.mkdir()
-        shutil.copy2(pilot_dir / "chroma-server", app_dir / "chroma-server")
+        tool = stage / "mksapkg-OS5"
+        shutil.copy2(packager, tool)
+        tool.chmod(0o755)
+        shutil.copy2(pilot_dir / "chroma-server", app_dir)
         shutil.copytree(pilot_dir / "resources", app_dir / "resources")
-        for name in ("SHA256SUMS", "BUILD-PROVENANCE.txt"):
-            shutil.copy2(pilot_dir / name, app_dir / name)
-        for name in SCRIPT_NAMES:
-            shutil.copy2(source_dir / name, app_dir / name)
-            (app_dir / name).chmod(0o755)
-        shutil.copy2(source_dir / "index.php", app_dir / "index.php")
-        shutil.copy2(source_dir / "apkg.rc", app_dir / "apkg.rc")
-        write_xml(app_dir / "apkg.xml")
-        sign = subprocess.run(
-            ["openssl", "bf-cbc", "-md", "sha256", "-k", SIGN_KEY],
-            input=(APP + "\n").encode("ascii"), capture_output=True, check=True,
-        ).stdout
-        (app_dir / "apkg.sign").write_bytes(sign)
-
-        compressed = io.BytesIO()
-        with tarfile.open(fileobj=compressed, mode="w:gz", format=tarfile.GNU_FORMAT) as archive:
-            archive.add(app_dir, arcname=APP, filter=normalized_tar_info)
-        payload = compressed.getvalue()
-        output.write_bytes(header_for(payload) + payload)
-    inspect_package(output, APP)
+        for entry in ("SHA256SUMS", "BUILD-PROVENANCE.txt"):
+            shutil.copy2(pilot_dir / entry, app_dir)
+        for entry in HOOKS:
+            shutil.copy2(source / entry, app_dir)
+            (app_dir / entry).chmod(0o755)
+        shutil.copy2(source / "index.php", app_dir)
+        shutil.copy2(source / "apkg.rc", app_dir)
+        command = ["docker"]
+        if docker_context:
+            command.extend(["--context", docker_context])
+        command.extend(["run", "--rm", "--platform", "linux/amd64", "-v",
+                        f"{stage}:/work:rw", "-w", "/work/chromaserver",
+                        "chroma-wd-os5-builder:bookworm", "/work/mksapkg-OS5",
+                        "-E", "-s", "-m", "MyCloudEX2Ultra"])
+        result = subprocess.run(command, text=True, capture_output=True, check=False)
+        print(result.stdout, end="")
+        print(result.stderr, end="", file=sys.stderr)
+        if result.returncode:
+            raise RuntimeError(f"OS 5 packager failed (exit {result.returncode})")
+        candidates = list(stage.glob(f"MyCloudEX2Ultra_{APP}_{VERSION}.bin(*)"))
+        if len(candidates) != 1:
+            raise ValueError("packager did not create exactly one expected artifact")
+        inspect_package(candidates[0], APP, VERSION)
+        shutil.move(candidates[0], output)
+    inspect_package(output, APP, VERSION)
     return output
 
 
-def main():
+def main() -> None:
     repo = pathlib.Path(__file__).resolve().parents[3]
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--pilot-dir", type=pathlib.Path,
                         default=repo / "target/wd-ex2-ultra-armv7-pilot")
     parser.add_argument("--output", type=pathlib.Path,
-                        default=repo / "target/wd-os5/MyCloudEX2Ultra_chromaserver_0.1.2.bin")
-    parser.add_argument("--reference", type=pathlib.Path,
-                        help="optional known-good EX2 Ultra OS 5 .bin for format cross-check")
+                        default=repo / f"target/wd-os5/MyCloudEX2Ultra_{APP}_{VERSION}.bin")
+    parser.add_argument("--packager", type=pathlib.Path,
+                        default=repo / "target/wd-os5/mksapkg-OS5")
+    parser.add_argument("--docker-context")
+    parser.add_argument("--reference", type=pathlib.Path)
     args = parser.parse_args()
-    print(build(args.pilot_dir, args.output, args.reference))
+    print(build(args.pilot_dir, args.output, args.packager, args.docker_context,
+                args.reference))
 
 
 if __name__ == "__main__":

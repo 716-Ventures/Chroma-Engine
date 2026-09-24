@@ -3,6 +3,12 @@
 Prepared 2026-09-23 for execution by GPT-6 Sol. This document is a plan, not a
 claim of completed appliance support or permission to deploy onto user hardware.
 
+The WD EX2 Ultra OS 5 installer recovery is documented in the
+[2026-09-24 installation recovery plan](nas/wd-os5-install-recovery-plan.md)
+and [device evidence](nas/wd-os5-install-recovery-evidence.md). Version 0.1.6
+installs and opens the administration UI on the tested appliance; media,
+authenticated dashboard Off/On, reboot and broader NAS qualification remain.
+
 ## Objective and scope
 
 Deliver installable, reproducible Chroma Server distributions containing Chroma

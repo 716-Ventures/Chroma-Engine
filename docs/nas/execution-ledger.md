@@ -27,7 +27,7 @@ read-only WD preflight was supplied by the owner later on 2026-09-23.
 | N0 inventory/baseline/WD preflight | in-progress | Owner-supplied WD preflight confirms ARMv7, OS 5 firmware 5.33.102, glibc 2.31, 1 GiB RAM, no container binary or render node. Host inspection of the NAS `getconf` executable confirms ELF32 ARM EABI5, hard-float, and `/lib/ld-linux-armhf.so.3`. Server playback baseline on an appliance remains unavailable. |
 | N1 server worker boundary | in-progress | Shared admission, finite queue, deadlines/output caps, small-NAS child policy, bounded scanner enumeration, cross-process data-directory lock, graceful SIGTERM, diagnostics, and targeted/workspace tests pass locally. Explicit queued/running cancellation and fault matrix remain. |
 | N2 x86-64/ARM64 images | blocked | Server Docker candidate pins Engine SHA and base digests, removes redundant patches, carries notices/provenance, fixes discovery metadata, and defines synthetic probe/remux plus non-root/persistence/stop CI gates. Server Actions billing and local builder storage failures prevent either final architecture image from executing. |
-| N3 WD ARMv7 | in-progress | [Dependency inventory and cross-build](armv7-investigation.md), sparse >4 GiB test, measured hard-float ABI, off-device Engine/Server ELF32 binaries, and a locally validated EX2 Ultra OS 5 `.bin` exist. Earlier app packages installed and showed On, but the Configure path returned WD's HTTP 404 and the Chroma API port refused connections. A 0.1.2 diagnostic package is built but untried on-device. Server clean-build reproducibility and physical load/behavior remain open. |
+| N3 WD ARMv7 | in-progress | [Dependency inventory and cross-build](armv7-investigation.md), sparse >4 GiB test, hard-float binaries, and a Linux OS 5 tool-produced package exist. [EX2 Ultra device evidence](wd-os5-install-recovery-evidence.md) confirms WD-managed 0.1.5 install and 0.1.6 upgrade, `/ready`, Configure redirect, UI assets, persistence, and Chroma hook stop/start. Authenticated dashboard Off/On, media load/performance, reboot, and Server clean-build reproducibility remain open. |
 | N4 appliance installers | blocked | Provisional vendor routes exist in the server checkout; no published image or accessible appliance. |
 | N5 playback qualification | blocked | Fixture/measurement protocol expanded; fixture rights/hashes and physical browser/tvOS/NAS runs unavailable. |
 | N6 measured optimization | blocked | [Acceleration decision record](hardware-acceleration.md) exists; no N5 baseline, so no hardware backend or optimization claim. |
@@ -131,17 +131,35 @@ read-only WD preflight was supplied by the owner later on 2026-09-23.
   and app lifecycle interface. Chroma's own `.bin` was built from Chroma-only
   files and its header, signature, archive, binary ABI, and shell syntax passed
   local checks. The owner subsequently installed Chroma packages 0.1.0 and
-  0.1.1; the WD dashboard reported Chroma On, but Configure returned WD's
+  0.1.1 and 0.1.2; the WD dashboard reported Chroma On, but Configure returned WD's
   HTTP 404 and the API port refused connections. No Engine/Server runtime or
   rollback result exists. Version 0.1.2 relaxes the hard-coded volume mount
   assumption and exposes a minimal startup-status page if Configure resolves.
+  WD's documented install hook passes an `_install` source directory; our
+  earlier hook rejected that source. Version 0.1.3 accepted it but still
+  required the destination not to exist. Read-only SSH inspection after
+  installation found that the NAS had created the destination with only
+  `apkg.xml`; it had no Chroma payload, web link, or process. Version 0.1.4
+  copies into the existing destination and resolves no-argument lifecycle
+  hooks from their script paths. Local tests passed at that time; that
+  artifact was not a successful device installation.
+- 2026-09-24: Replaced the manual WD package serializer with the OS 5 tool,
+  verified its format against the known-good reference, and installed 0.1.5
+  through WD's manager. Hook traces established the actual staged-app and
+  destination arguments. The Server and Engine loaded and `/ready` returned
+  200. Configure initially failed because PHP URL streams were disabled on
+  the NAS; 0.1.6 used PHP cURL for readiness. WD-managed upgrade to 0.1.6
+  completed, preserved server identity, and Configure redirected to the
+  working administration UI. Details and remaining gates are in
+  [the sanitized evidence report](wd-os5-install-recovery-evidence.md).
 
 ## Open dependencies
 
-- An approved NAS data-volume staging location and test window for the pilot
-  load test, followed by clean Server build reproducibility and a tested OS 5
-  `.bin` lifecycle. Do not request or record passwords, addresses, serial
-  numbers, or share paths.
+- A test window for authorized-library playback/performance, authenticated
+  dashboard Off/On and reboot persistence, plus clean Server build
+  reproducibility. The OS 5 install/upgrade/Configure path is proven for this
+  EX2 Ultra only. Do not record passwords, addresses, serial numbers, or
+  share paths in public reports.
 - Availability of a representative Intel/AMD NAS and ARM64 NAS, or an agreed
   substitute for build testing with appliance qualification left open.
 - User-authorized test fixtures and physical browser/tvOS client for N5.
