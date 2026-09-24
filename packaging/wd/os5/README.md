@@ -11,12 +11,13 @@ the NAS. The pilot's SQLx build workaround remains a release-reproducibility
 issue; this is not general NAS or playback qualification.
 
 The current off-device-tested candidate is
-`target/wd-os5/MyCloudEX2Ultra_chromaserver_0.1.10.bin`
-(SHA-256 `6bdc95263f06b8c74b52ecdc279e938d979d71dcf4320dc932ec655b78328d9d`).
-Its Engine source is `9e0d56b0d789dab4951ec00168d0e074716f87e1` and Server
-source is `8d40dd0092720cb0732dd7f37fa9d703c6cedbb4`. The owner has not yet
-installed this candidate, so successful package inspection is not device
-acceptance. The `target/` artifact is local and is not committed to Git.
+`target/wd-os5/MyCloudEX2Ultra_chromaserver_0.1.11.bin`
+(SHA-256 `f4d3fd559823b532b9df33ccf4262a87b826eed5bff630efbc8c6077f8355792`).
+Its Engine source is `78814a2e97f652746a7d73dd1cc69b2d85dbf67e` and Server
+source is `924d261f7f836010c0b0cc83c3baff4b45ecbab8`. It adds owner-controlled
+scan cancellation to the API and admin UI. The owner has not yet installed this
+candidate, so package inspection is not device acceptance. The `target/`
+artifact is local and is not committed to Git.
 
 The package must be built on Linux amd64 using the pinned OS 5 `mksapkg-OS5`
 tool. `Dockerfile` supplies the Linux dependencies and OpenSSL legacy provider
@@ -36,7 +37,7 @@ SPA's `dist` directory with `--admin-dir`:
 docker build --platform linux/amd64 -t chroma-wd-os5-builder:bookworm \
   -f packaging/wd/os5/Dockerfile packaging/wd/os5
 python3 packaging/wd/os5/build.py \
-  --pilot-dir /absolute/path/to/wd-ex2-ultra-armv7-pilot-0.1.10 \
+  --pilot-dir /absolute/path/to/wd-ex2-ultra-armv7-pilot-0.1.11 \
   --admin-dir /absolute/path/to/GenusServer/apps/admin-spa/dist
 CHROMA_WD_DOCKER_CONTEXT=default python3 -m unittest \
   packaging/wd/os5/test_build.py packaging/wd/os5/test_install.py -v
@@ -101,6 +102,14 @@ scheduled for backfill on upgrade. This is an off-device-built candidate, not a
 physical performance qualification. Follow the
 [staged scanner execution plan](../../../docs/nas/staged-scanner-execution-plan.md)
 and its evidence for the remaining NAS acceptance gates.
+
+Version 0.1.11 lets the owner stop a queued or running library scan from the
+library controls or Activity. It cancels unfinished discovery, probe, and
+metadata work while retaining catalog entries already imported. The stop
+action clears any queued rescan for that run; later filesystem changes may
+still start a new scan when folder watching is enabled. The WD package has
+passed off-device package inspection and hook tests, but scan cancellation
+has not yet been exercised on the appliance.
 
 The 0.1.4 dashboard registration was metadata-only: it did not install the
 payload. Versions 0.1.5 and 0.1.6 installed and started through WD's manager;
