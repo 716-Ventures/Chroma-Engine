@@ -69,7 +69,7 @@ class PackageInspectorTests(unittest.TestCase):
             self.assertEqual(BUILD.inspect_package(pathlib.Path(REFERENCE), "plexmediaserver",
                                                    "1.43.4.10903")[1], "1.43.4.10903")
 
-    def test_packaged_setup_form_and_secret_hook_agree(self):
+    def test_packaged_private_lan_setup_contract(self):
         with tarfile.open(fileobj=io.BytesIO(self.good[204:]), mode="r:gz") as archive:
             start = archive.extractfile("chromaserver/start.sh").read()
             scripts = [member for member in archive.getmembers()
@@ -77,9 +77,11 @@ class PackageInspectorTests(unittest.TestCase):
                        and member.name.endswith(".js")]
             self.assertEqual(len(scripts), 1)
             spa = archive.extractfile(scripts[0]).read()
-        self.assertIn(b"openssl rand -hex 32", start)
-        self.assertIn(b"CHROMA_OWNER_SETUP_SECRET", start)
-        self.assertIn(b"One-time setup secret", spa)
+        self.assertIn(b"CHROMA_OWNER_SETUP_ALLOW_PRIVATE_LAN=1", start)
+        self.assertNotIn(b"openssl rand -hex 32", start)
+        self.assertNotIn(b"One-time setup secret", spa)
+        self.assertNotIn(b"through SSH", spa)
+        self.assertIn(b"Setup code", spa)
         self.assertIn(b"x-chroma-setup-secret", spa)
 
     def test_old_version_offset_is_rejected(self):

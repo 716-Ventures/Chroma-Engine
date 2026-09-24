@@ -48,8 +48,11 @@ cargo +1.97.1 zigbuild --locked --release \
 SERVER_BINARY="$CARGO_TARGET_DIR/armv7-unknown-linux-gnueabihf/release/chroma-server"
 npm run build -w @chroma-server/admin-spa
 cd -
-packaging/wd/build-pilot-bundle.sh "$ENGINE_BINARY" "$SERVER_BINARY" "$SERVER_REPO"
-python3 packaging/wd/os5/build.py
+packaging/wd/build-pilot-bundle.sh "$ENGINE_BINARY" "$SERVER_BINARY" "$SERVER_REPO" \
+  "$PWD/target/wd-ex2-ultra-armv7-pilot-0.1.8"
+python3 packaging/wd/os5/build.py \
+  --pilot-dir "$PWD/target/wd-ex2-ultra-armv7-pilot-0.1.8" \
+  --admin-dir "$SERVER_REPO/apps/admin-spa/dist"
 ```
 
 The first Server cross-build on the development Mac failed to load its newly

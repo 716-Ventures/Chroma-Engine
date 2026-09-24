@@ -139,7 +139,7 @@ def build(pilot_dir: pathlib.Path, output: pathlib.Path, packager: pathlib.Path,
     admin_source = admin_dir or pilot_dir / "resources/admin"
     if not any(b"x-chroma-setup-secret" in asset.read_bytes()
                for asset in (admin_source / "assets").glob("index-*.js")):
-        raise ValueError("admin SPA lacks owner setup secret field; pass --admin-dir")
+        raise ValueError("admin SPA lacks setup-code fallback support; pass --admin-dir")
     if output.exists():
         raise FileExistsError(f"refusing to overwrite {output}")
     output.parent.mkdir(parents=True, exist_ok=True)

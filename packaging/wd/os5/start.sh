@@ -17,33 +17,9 @@ mkdir -p "$data_dir/tmp"
 chmod 700 "$data_dir" "$data_dir/tmp"
 printf 'start entered app=%s\n' "$app_dir" >> "$data_dir/install-hooks.log"
 pid_file=$data_dir/chroma-server.pid
-setup_secret_file=$data_dir/owner-setup-secret
-if [ -f "$data_dir/owner-auth.json" ]; then
-    [ ! -L "$setup_secret_file" ] || exit 1
-    rm -f "$setup_secret_file"
-    unset CHROMA_OWNER_SETUP_SECRET
-else
-    [ ! -L "$setup_secret_file" ] || exit 1
-    if [ ! -e "$setup_secret_file" ]; then
-        if ! openssl rand -hex 32 > "$setup_secret_file.new.$$"; then
-            rm -f "$setup_secret_file.new.$$"
-            write_status setup-secret-failed
-            exit 1
-        fi
-        chmod 600 "$setup_secret_file.new.$$"
-        mv "$setup_secret_file.new.$$" "$setup_secret_file"
-    fi
-    [ -f "$setup_secret_file" ] || exit 1
-    chmod 600 "$setup_secret_file"
-    CHROMA_OWNER_SETUP_SECRET=$(cat "$setup_secret_file")
-    case "$CHROMA_OWNER_SETUP_SECRET" in
-        ''|*[!0123456789abcdef]*) write_status setup-secret-invalid; exit 1 ;;
-    esac
-    [ "${#CHROMA_OWNER_SETUP_SECRET}" -eq 64 ] || {
-        write_status setup-secret-invalid; exit 1;
-    }
-    export CHROMA_OWNER_SETUP_SECRET
-fi
+[ ! -L "$data_dir/owner-setup-secret" ] || exit 1
+rm -f "$data_dir/owner-setup-secret"
+unset CHROMA_OWNER_SETUP_SECRET
 
 if [ -f "$pid_file" ]; then
     old_pid=$(cat "$pid_file")
@@ -71,6 +47,7 @@ export CHROMA_ADMIN_STATIC="$app_dir/resources/admin"
 export CHROMA_NAS_PROFILE=small
 export CHROMA_RESOURCE_POLICY=small-nas
 export CHROMA_LAN_ACCESS=1
+export CHROMA_OWNER_SETUP_ALLOW_PRIVATE_LAN=1
 export TMPDIR="$data_dir/tmp"
 ulimit -s 3000
 cd "$app_dir"

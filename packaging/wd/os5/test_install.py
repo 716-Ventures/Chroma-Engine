@@ -105,22 +105,16 @@ class InstallContractTests(unittest.TestCase):
         self.assertEqual((installed / "startup-status.txt").read_text(),
                          "engine-load-failed\n")
         secret = self.programs / "chromaserver-data/owner-setup-secret"
-        first_secret = secret.read_text().strip()
-        self.assertEqual(len(first_secret), 64)
-        self.assertEqual(secret.stat().st_mode & 0o777, 0o600)
-        subprocess.run(["sh", str(installed / "start.sh")],
-                       cwd=self.temporary.name, capture_output=True)
-        self.assertEqual(secret.read_text().strip(), first_secret)
+        self.assertFalse(secret.exists())
         subprocess.run(["sh", str(installed / "stop.sh")],
                        cwd=self.temporary.name, check=True)
 
-    def test_configured_owner_removes_bootstrap_secret_on_restart(self):
+    def test_prior_candidate_bootstrap_secret_is_removed_on_upgrade_start(self):
         installed = self.programs / "chromaserver"
         make_stage(installed)
         data = self.programs / "chromaserver-data"
         data.mkdir()
         (data / "owner-setup-secret").write_text("a" * 64 + "\n", encoding="ascii")
-        (data / "owner-auth.json").write_text("{}", encoding="utf-8")
         subprocess.run(["sh", str(installed / "start.sh")], capture_output=True)
         self.assertFalse((data / "owner-setup-secret").exists())
 
@@ -130,7 +124,9 @@ class InstallContractTests(unittest.TestCase):
         engine = installed / "resources/bin/chroma-engine"
         engine.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         server = installed / "chroma-server"
-        server.write_text("#!/bin/sh\nsleep 10\n", encoding="utf-8")
+        server.write_text(
+            '#!/bin/sh\nprintf "%s\\n" "$CHROMA_OWNER_SETUP_ALLOW_PRIVATE_LAN" '
+            '> "$CHROMA_DATA_DIR/lan-setup-flag"\nsleep 10\n', encoding="utf-8")
         fake_bin = pathlib.Path(self.temporary.name) / "bin"
         fake_bin.mkdir()
         curl = fake_bin / "curl"
@@ -144,6 +140,8 @@ class InstallContractTests(unittest.TestCase):
         self.assertEqual((installed / "startup-status.txt").read_text(),
                          "server-not-ready\n")
         self.assertFalse((self.programs / "chromaserver-data/chroma-server.pid").exists())
+        self.assertEqual((self.programs / "chromaserver-data/lan-setup-flag").read_text(),
+                         "1\n")
 
     def test_removal_preserves_data(self):
         installed = self.programs / "chromaserver"

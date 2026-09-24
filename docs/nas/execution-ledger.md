@@ -154,9 +154,13 @@ read-only WD preflight was supplied by the owner later on 2026-09-23.
   [the sanitized evidence report](wd-os5-install-recovery-evidence.md).
 - 2026-09-24: The first 0.1.6 owner-password submission was rejected because
   LAN-enabled setup requires a one-time secret, but the NAS hook did not
-  provide one and the SPA had no input. A 0.1.7 package candidate now generates
-  a private per-device secret and carries the matching SPA form. Local tests
-  pass; device installation and owner creation remain unverified.
+  provide one and the SPA had no input. A 0.1.7 package candidate added a
+  private per-device secret and matching form, but was rejected because it
+  required SSH to complete ordinary first-run setup. The 0.1.8 candidate
+  instead permits password-only owner setup from a direct private-LAN peer on
+  this opted-in NAS package; public and proxy-trusted peers still require a
+  configured secret. Local tests pass; device installation and owner creation
+  remain unverified.
 
 ## Open dependencies
 

@@ -3,8 +3,8 @@
 # This is not a WD My Cloud OS 5 .bin installer.
 set -eu
 
-if [ "$#" -ne 3 ]; then
-    echo "usage: $0 ENGINE_BINARY SERVER_BINARY SERVER_REPOSITORY" >&2
+if [ "$#" -lt 3 ] || [ "$#" -gt 4 ]; then
+    echo "usage: $0 ENGINE_BINARY SERVER_BINARY SERVER_REPOSITORY [OUTPUT_DIRECTORY]" >&2
     exit 2
 fi
 
@@ -12,7 +12,7 @@ engine_binary=$1
 server_binary=$2
 server_repository=$3
 engine_repository=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
-output_directory="$engine_repository/target/wd-ex2-ultra-armv7-pilot"
+output_directory=${4:-$engine_repository/target/wd-ex2-ultra-armv7-pilot}
 
 for required_file in "$engine_binary" "$server_binary" \
     "$server_repository/apps/admin-spa/dist/index.html" \
