@@ -84,6 +84,16 @@ performed. Do not use `apkg -h` as a help command on this firmware.
 
 ## Remaining acceptance
 
+The first browser setup attempt after 0.1.6 returned HTTP 403: "Remote owner
+setup requires the one-time setup secret." The network-enabled API requires
+`CHROMA_OWNER_SETUP_SECRET`, while the 0.1.6 hook did not set it and the SPA
+had no field for it. Version 0.1.7 is an off-device-built candidate that
+generates a private per-device secret and packages a matching setup form.
+Local package/lifecycle tests and the Server's remote-setup integration test
+pass. The rebuilt SPA source is GenusServer `3b1e277` (the ARM binary itself
+is unchanged). Version 0.1.7 installation and owner setup on the NAS are not
+yet verified.
+
 Authenticated dashboard Off/On remains unverified: an unauthenticated local
 call to WD's `cgi_apps_set` returned HTTP 403. The Chroma hook-level stop/start
 check is not a substitute for the dashboard toggle. A whole-NAS reboot,

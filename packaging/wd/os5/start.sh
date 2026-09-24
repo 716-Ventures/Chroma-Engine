@@ -17,6 +17,33 @@ mkdir -p "$data_dir/tmp"
 chmod 700 "$data_dir" "$data_dir/tmp"
 printf 'start entered app=%s\n' "$app_dir" >> "$data_dir/install-hooks.log"
 pid_file=$data_dir/chroma-server.pid
+setup_secret_file=$data_dir/owner-setup-secret
+if [ -f "$data_dir/owner-auth.json" ]; then
+    [ ! -L "$setup_secret_file" ] || exit 1
+    rm -f "$setup_secret_file"
+    unset CHROMA_OWNER_SETUP_SECRET
+else
+    [ ! -L "$setup_secret_file" ] || exit 1
+    if [ ! -e "$setup_secret_file" ]; then
+        if ! openssl rand -hex 32 > "$setup_secret_file.new.$$"; then
+            rm -f "$setup_secret_file.new.$$"
+            write_status setup-secret-failed
+            exit 1
+        fi
+        chmod 600 "$setup_secret_file.new.$$"
+        mv "$setup_secret_file.new.$$" "$setup_secret_file"
+    fi
+    [ -f "$setup_secret_file" ] || exit 1
+    chmod 600 "$setup_secret_file"
+    CHROMA_OWNER_SETUP_SECRET=$(cat "$setup_secret_file")
+    case "$CHROMA_OWNER_SETUP_SECRET" in
+        ''|*[!0123456789abcdef]*) write_status setup-secret-invalid; exit 1 ;;
+    esac
+    [ "${#CHROMA_OWNER_SETUP_SECRET}" -eq 64 ] || {
+        write_status setup-secret-invalid; exit 1;
+    }
+    export CHROMA_OWNER_SETUP_SECRET
+fi
 
 if [ -f "$pid_file" ]; then
     old_pid=$(cat "$pid_file")

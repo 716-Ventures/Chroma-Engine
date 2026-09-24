@@ -117,7 +117,8 @@ def validate_arm_binary(path: pathlib.Path) -> None:
 
 
 def build(pilot_dir: pathlib.Path, output: pathlib.Path, packager: pathlib.Path,
-          docker_context: str | None, reference: pathlib.Path | None) -> pathlib.Path:
+          docker_context: str | None, reference: pathlib.Path | None,
+          admin_dir: pathlib.Path | None = None) -> pathlib.Path:
     source = pathlib.Path(__file__).resolve().parent
     if reference:
         inspect_package(reference, "plexmediaserver", "1.43.4.10903")
@@ -133,6 +134,12 @@ def build(pilot_dir: pathlib.Path, output: pathlib.Path, packager: pathlib.Path,
             raise ValueError(f"pilot checksum mismatch: {relative}")
     if not (pilot_dir / "resources/admin/index.html").is_file():
         raise ValueError("pilot lacks admin SPA")
+    if admin_dir and not (admin_dir / "index.html").is_file():
+        raise ValueError("admin override lacks index.html")
+    admin_source = admin_dir or pilot_dir / "resources/admin"
+    if not any(b"x-chroma-setup-secret" in asset.read_bytes()
+               for asset in (admin_source / "assets").glob("index-*.js")):
+        raise ValueError("admin SPA lacks owner setup secret field; pass --admin-dir")
     if output.exists():
         raise FileExistsError(f"refusing to overwrite {output}")
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -145,6 +152,9 @@ def build(pilot_dir: pathlib.Path, output: pathlib.Path, packager: pathlib.Path,
         tool.chmod(0o755)
         shutil.copy2(pilot_dir / "chroma-server", app_dir)
         shutil.copytree(pilot_dir / "resources", app_dir / "resources")
+        if admin_dir:
+            shutil.rmtree(app_dir / "resources/admin")
+            shutil.copytree(admin_dir, app_dir / "resources/admin")
         for entry in ("SHA256SUMS", "BUILD-PROVENANCE.txt"):
             shutil.copy2(pilot_dir / entry, app_dir)
         for entry in HOOKS:
@@ -184,9 +194,11 @@ def main() -> None:
                         default=repo / "target/wd-os5/mksapkg-OS5")
     parser.add_argument("--docker-context")
     parser.add_argument("--reference", type=pathlib.Path)
+    parser.add_argument("--admin-dir", type=pathlib.Path,
+                        help="rebuilt Server administration SPA directory")
     args = parser.parse_args()
     print(build(args.pilot_dir, args.output, args.packager, args.docker_context,
-                args.reference))
+                args.reference, args.admin_dir))
 
 
 if __name__ == "__main__":

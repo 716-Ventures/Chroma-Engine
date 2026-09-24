@@ -104,8 +104,25 @@ class InstallContractTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual((installed / "startup-status.txt").read_text(),
                          "engine-load-failed\n")
+        secret = self.programs / "chromaserver-data/owner-setup-secret"
+        first_secret = secret.read_text().strip()
+        self.assertEqual(len(first_secret), 64)
+        self.assertEqual(secret.stat().st_mode & 0o777, 0o600)
+        subprocess.run(["sh", str(installed / "start.sh")],
+                       cwd=self.temporary.name, capture_output=True)
+        self.assertEqual(secret.read_text().strip(), first_secret)
         subprocess.run(["sh", str(installed / "stop.sh")],
                        cwd=self.temporary.name, check=True)
+
+    def test_configured_owner_removes_bootstrap_secret_on_restart(self):
+        installed = self.programs / "chromaserver"
+        make_stage(installed)
+        data = self.programs / "chromaserver-data"
+        data.mkdir()
+        (data / "owner-setup-secret").write_text("a" * 64 + "\n", encoding="ascii")
+        (data / "owner-auth.json").write_text("{}", encoding="utf-8")
+        subprocess.run(["sh", str(installed / "start.sh")], capture_output=True)
+        self.assertFalse((data / "owner-setup-secret").exists())
 
     def test_failed_readiness_is_bounded_and_removes_pid(self):
         installed = self.programs / "chromaserver"
