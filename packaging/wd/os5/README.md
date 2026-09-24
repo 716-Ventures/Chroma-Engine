@@ -72,16 +72,23 @@ client could otherwise claim an unconfigured server first. The rejected 0.1.7
 candidate required SSH for the setup secret and should not be installed.
 The owner successfully installed 0.1.8 and completed owner setup on the NAS.
 
-Version 0.1.9 is a candidate to correct the first large TV scan: the 0.1.8
-scan reached only about 170 of 1,507 files during the observed test window
-because it probes every file before metadata matching can start. In the
+Version 0.1.9 is a superseded candidate for the first large TV scan: the 0.1.8
+scan reached only about 170 of 1,507 files during the observed test window.
+It probed files serially, and metadata matching waited for the scan to finish;
+the exact source of the observed latency has not been measured. In the
 small-NAS profile, 0.1.9 imports files first and leaves technical probing for
 on-demand playback. This avoids serial probe delays during indexing, but a
 file's first playback can still pay the probe cost. TV counts are computed
 from imported rows while the scan is running; the sidebar counts distinct
 series, not episode files. Scan progress and failures are persisted so Activity
 can show them after a page refresh. The 0.1.9 scan and subsequent metadata
-matching remain unverified on the appliance until the owner tests this build.
+matching were not verified on the appliance.
+
+Complete technical analysis is required for unplayed files too. Follow the
+[staged scanner execution plan](../../../docs/nas/staged-scanner-execution-plan.md)
+to restore mandatory probes, share the full probe result with playback, and
+measure actual NAS performance. The replacement is planned, not implemented;
+0.1.9 must not be presented as the completed scanning fix.
 
 The 0.1.4 dashboard registration was metadata-only: it did not install the
 payload. Versions 0.1.5 and 0.1.6 installed and started through WD's manager;

@@ -9,6 +9,12 @@ and [device evidence](nas/wd-os5-install-recovery-evidence.md). Version 0.1.6
 installs and opens the administration UI on the tested appliance; media,
 authenticated dashboard Off/On, reboot and broader NAS qualification remain.
 
+The [staged scanner execution plan](nas/staged-scanner-execution-plan.md) defines
+the next Server/Engine correction: mandatory per-file probing, shared playback
+metadata, independent metadata matching, bounded work, and measured WD acceptance.
+It supersedes candidate 0.1.9's small-NAS probe-skipping behavior; implementation
+and a replacement package remain pending.
+
 ## Objective and scope
 
 Deliver installable, reproducible Chroma Server distributions containing Chroma
