@@ -200,10 +200,13 @@ class InstallContractTests(unittest.TestCase):
             "test \"$(readlink /var/www/apps/chromaserver/index.php)\" = "
             "/tmp/Nas_Prog/chromaserver/index.php"
         )
-        # Colima and Docker Desktop may not share the repository's volume.
-        # Stage only the hook inputs under the home directory for this test.
+        # Docker contexts share different host roots. Allow the caller to pick
+        # a verified shared directory; home is the usual Docker Desktop root.
+        shared_root = pathlib.Path(
+            os.environ.get("CHROMA_WD_DOCKER_SHARED_DIR", str(pathlib.Path.home()))
+        )
         with tempfile.TemporaryDirectory(prefix="chroma-wd-hook-",
-                                         dir=pathlib.Path.home()) as shared:
+                                         dir=shared_root) as shared:
             hook_dir = pathlib.Path(shared) / "packaging/wd/os5"
             hook_dir.mkdir(parents=True)
             for name in ("index.php", "init.sh"):

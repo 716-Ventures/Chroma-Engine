@@ -11,16 +11,18 @@ the NAS. The pilot's SQLx build workaround remains a release-reproducibility
 issue; this is not general NAS or playback qualification.
 
 The current off-device-tested candidate is
-`target/wd-os5/MyCloudEX2Ultra_chromaserver_0.1.14.bin` (SHA-256
-`61649e588a3a923bdd58b1309a2f04d29e2d4f8f9d5a4d72c49435df7a0529eb`). It retains the
-0.1.13 Engine's 24 MiB bounded NAS metadata ceiling and adds an Activity
-issue view for failed scans. Each scan can show paginated per-file probe and
-metadata errors, with the path, stage, reason, and attempt count. The Engine
-binary remains based on `f8ff9e490b0e1f132ef102473b719ebfd9b792b2`;
-the package provenance records Engine `6a1b375c468721d515ce38bee3bc389321e11e93`
-and Server `49b6a3879ee756d00f694e91796b50201cefc13d`. This candidate has
-not been tested on the appliance. The `target/`
-artifact is local and is not committed to Git.
+`target/wd-os5/MyCloudEX2Ultra_chromaserver_0.1.15.bin` (SHA-256
+`7cb08941758630bfc6e86720a8f74a7ef5a36f638f78765a92b02dd0035dea1f`).
+It contains Engine `1028b69de1a1af91c0ea7c736fe69e0d0740760c` and Server
+`9434de38980459b559237ee8f8d5a5bfbd88fff5`. The Engine no longer rejects
+an entire MP4 during probing solely because an unselected track exceeds the
+per-track sample limit. Selecting that oversized track still fails safely;
+an alternate compatible track is required. The small-NAS policy has a 24 MiB
+metadata ceiling and 96 MiB expanded-index ceiling, so other large files can
+still hit resource limits. The Activity UI includes paginated per-file scan
+issues with the stage, reason, path, and attempt count. This candidate has
+not been tested on the appliance. The `target/` artifact is local and is not
+committed to Git.
 
 The package must be built on Linux amd64 using the pinned OS 5 `mksapkg-OS5`
 tool. `Dockerfile` supplies the Linux dependencies and OpenSSL legacy provider
@@ -40,7 +42,7 @@ SPA's `dist` directory with `--admin-dir`:
 docker build --platform linux/amd64 -t chroma-wd-os5-builder:bookworm \
   -f packaging/wd/os5/Dockerfile packaging/wd/os5
 python3 packaging/wd/os5/build.py \
-  --pilot-dir /absolute/path/to/wd-ex2-ultra-armv7-pilot-0.1.14 \
+  --pilot-dir /absolute/path/to/wd-ex2-ultra-armv7-pilot-0.1.15 \
   --admin-dir /absolute/path/to/GenusServer/apps/admin-spa/dist
 CHROMA_WD_DOCKER_CONTEXT=default python3 -m unittest \
   packaging/wd/os5/test_build.py packaging/wd/os5/test_install.py -v
@@ -52,6 +54,10 @@ shell alone cannot run the packager. `build.py` refuses to overwrite an
 existing output. Set `CHROMA_WD_REFERENCE_PACKAGE` to a locally held known-good
 OS 5 package to run the optional reference-parser assertion; never commit
 that package. Keep the prior `.bin` as a rollback artifact.
+For the installer-hook Docker test, set `CHROMA_WD_DOCKER_SHARED_DIR` to an
+existing host directory shared with that Docker context if it cannot mount
+the default home-directory staging path. The build workspace's `target/`
+directory works with the `colima-wd-os5` profile used for this candidate.
 
 Install or update through the WD dashboard's **Apps → Install an App manually**
 flow. On the tested firmware, WD's reinstall handler stages

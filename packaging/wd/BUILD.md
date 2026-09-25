@@ -49,9 +49,9 @@ SERVER_BINARY="$CARGO_TARGET_DIR/armv7-unknown-linux-gnueabihf/release/chroma-se
 npm run build -w @chroma-server/admin-spa
 cd -
 packaging/wd/build-pilot-bundle.sh "$ENGINE_BINARY" "$SERVER_BINARY" "$SERVER_REPO" \
-  "$PWD/target/wd-ex2-ultra-armv7-pilot-0.1.14"
+  "$PWD/target/wd-ex2-ultra-armv7-pilot-0.1.15"
 python3 packaging/wd/os5/build.py \
-  --pilot-dir "$PWD/target/wd-ex2-ultra-armv7-pilot-0.1.14" \
+  --pilot-dir "$PWD/target/wd-ex2-ultra-armv7-pilot-0.1.15" \
   --admin-dir "$SERVER_REPO/apps/admin-spa/dist"
 ```
 
