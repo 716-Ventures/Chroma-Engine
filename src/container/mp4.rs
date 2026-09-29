@@ -8,6 +8,7 @@ use crate::packet::{
 pub(crate) fn validate_metadata_budget(bytes: &[u8], limits: ParseLimits) -> anyhow::Result<()> {
     let mut budget = super::ParseBudget::new(limits);
     let mut largest_track_samples = 0usize;
+    let mut second_largest_track_samples = 0usize;
     let mut pending = vec![(bytes, 0)];
     while let Some((bytes, depth)) = pending.pop() {
         for atom in AtomIter::new(bytes) {
@@ -29,23 +30,30 @@ pub(crate) fn validate_metadata_budget(bytes: &[u8], limits: ParseLimits) -> any
                     // different video/audio track may still be playable.
                     continue;
                 }
-                // Retained packet indexes accumulate across tracks; table/timing
-                // expansion is sequential, so its scratch peak is the largest
-                // track, not the sum of every track's scratch allocation.
-                largest_track_samples = largest_track_samples.max(samples);
-                budget.visit(
-                    depth,
-                    false,
-                    samples
-                        .checked_mul(std::mem::size_of::<PacketRef>())
-                        .ok_or_else(|| anyhow::anyhow!("sample index budget overflow"))?,
-                )?;
+                // Playback can retain a video and an audio packet index at
+                // once. Other tracks are only parsed when selected, so their
+                // projected indexes must not be summed into this source-wide
+                // budget. Keep the two largest tracks as a conservative peak.
+                if samples >= largest_track_samples {
+                    second_largest_track_samples = largest_track_samples;
+                    largest_track_samples = samples;
+                } else if samples > second_largest_track_samples {
+                    second_largest_track_samples = samples;
+                }
             }
             if nested {
                 pending.push((atom.payload, depth + 1));
             }
         }
     }
+    budget.visit(
+        0,
+        false,
+        largest_track_samples
+            .checked_add(second_largest_track_samples)
+            .and_then(|samples| samples.checked_mul(std::mem::size_of::<PacketRef>()))
+            .ok_or_else(|| anyhow::anyhow!("sample index budget overflow"))?,
+    )?;
     // 48 bytes/sample covers the size/duration/CTO/sync arrays plus normalized
     // timing. Normalization uses two passes, not an additional raw tuple array. Table entries are also
     // charged above by their serialized payload size; owned source metadata has
@@ -2196,6 +2204,23 @@ mod tests {
         assert!(validate_metadata_budget(&metadata, limits).is_ok());
         limits.max_index_bytes -= 1;
         assert!(validate_metadata_budget(&metadata, limits).is_err());
+    }
+
+    #[test]
+    fn index_budget_does_not_charge_unselected_third_track() {
+        let mut payload = vec![0; 12];
+        payload[4..8].copy_from_slice(&1u32.to_be_bytes());
+        payload[8..12].copy_from_slice(&100u32.to_be_bytes());
+        let table = atom(b"stsz", &payload);
+        let mut metadata = table.clone();
+        metadata.extend_from_slice(&table);
+        metadata.extend_from_slice(&table);
+        let required = 36 + 200 * std::mem::size_of::<PacketRef>() + 100 * 48;
+        let limits = ParseLimits {
+            max_index_bytes: required,
+            ..ParseLimits::default()
+        };
+        assert!(validate_metadata_budget(&metadata, limits).is_ok());
     }
 
     #[test]
