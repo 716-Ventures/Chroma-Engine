@@ -231,6 +231,10 @@ fn activate_hw_decoder(
     .map_err(|_| DecodeError::Unsupported)?;
 
     if activates.is_null() || count == 0 {
+        if !activates.is_null() {
+            // SAFETY: successful enumeration may return an empty allocated array.
+            unsafe { CoTaskMemFree(Some(activates.cast_const().cast())) };
+        }
         return Err(DecodeError::Unsupported);
     }
 
@@ -240,10 +244,13 @@ fn activate_hw_decoder(
         let Some(activate) = activate else {
             continue;
         };
-        if let Ok(t) = unsafe { activate.ActivateObject::<IMFTransform>() } {
+        if chosen.is_none()
+            && let Ok(t) = unsafe { activate.ActivateObject::<IMFTransform>() }
+        {
             chosen = Some(t);
-            break;
         }
+        // The activation owns a COM reference even when a previous candidate
+        // was selected; let it drop before freeing the array below.
     }
     unsafe {
         CoTaskMemFree(Some(activates as *const _));

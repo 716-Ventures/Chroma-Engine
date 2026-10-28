@@ -2147,8 +2147,9 @@ fn segment_windows(video_packets: &[PacketRef], target_ms: u64) -> Vec<SegmentWi
         }
     }
     let end_ms = video_packets
-        .last()
+        .iter()
         .map(packet_end_ms)
+        .max()
         .unwrap_or(start_ms)
         .max(start_ms.saturating_add(1));
     windows.push(SegmentWindow {
@@ -2223,14 +2224,18 @@ fn track_bytes_by_window(track: &HlsTrack, windows: &[SegmentWindow]) -> Vec<u64
     let mut window_index = 0_usize;
     for packet in &track.packets {
         let pts = packet.pts.as_millis();
-        while window_index < windows.len() && pts >= windows[window_index].end_ms {
-            window_index += 1;
+        // Packets are in decode order, so B-frame presentation timestamps can
+        // move backwards across a window boundary. Keep the common sequential
+        // case cheap, and locate the correct window when that assumption fails.
+        if windows
+            .get(window_index)
+            .is_none_or(|window| pts < window.start_ms || pts >= window.end_ms)
+        {
+            window_index = windows.partition_point(|window| window.end_ms <= pts);
         }
-        if window_index >= windows.len() {
-            break;
-        }
-        let window = &windows[window_index];
-        if pts >= window.start_ms {
+        if let Some(window) = windows.get(window_index)
+            && pts >= window.start_ms
+        {
             out[window_index] = out[window_index].saturating_add(u64::from(packet.size));
         }
     }
@@ -2546,7 +2551,7 @@ fn hex_to_bytes(hex: &str) -> Result<Vec<u8>> {
     }
     let mut out = Vec::with_capacity(clean.len() / 2);
     let bytes = clean.as_bytes();
-    for pair in bytes.chunks_exact(2) {
+    for pair in bytes.as_chunks::<2>().0 {
         let hi = hex_digit(pair[0])?;
         let lo = hex_digit(pair[1])?;
         out.push((hi << 4) | lo);
@@ -2566,6 +2571,66 @@ fn hex_digit(byte: u8) -> Result<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn final_window_keeps_the_latest_presented_frame_in_decode_order() {
+        let packets = [0, 80, 40]
+            .into_iter()
+            .enumerate()
+            .map(|(index, pts)| PacketRef {
+                source_offset: index as u64,
+                size: 1,
+                pts: crate::packet::TimePoint::millis(pts),
+                dts: crate::packet::TimePoint::millis(index as u64 * 40),
+                duration: crate::packet::TimeDelta::millis(40),
+                keyframe: index == 0,
+            })
+            .collect::<Vec<_>>();
+        let windows = segment_windows(&packets, 4_000);
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].end_ms, 120);
+        assert_eq!(packets_in_window(&packets, windows[0]).len(), 3);
+    }
+
+    #[test]
+    fn bandwidth_accounts_for_reordered_packets_and_outside_timestamps() {
+        let track = HlsTrack {
+            packets: [0, 1_000, 960, 2_000, 1_960, 3_000, 1_500]
+                .into_iter()
+                .map(|pts| PacketRef {
+                    source_offset: 0,
+                    size: 10,
+                    pts: crate::packet::TimePoint::millis(pts),
+                    dts: crate::packet::TimePoint::millis(0),
+                    duration: crate::packet::TimeDelta::millis(40),
+                    keyframe: false,
+                })
+                .collect(),
+            id: "v0".into(),
+            codec_string: "avc1.640028".into(),
+            timescale: 1_000,
+            payload: PayloadKind::RawAudio,
+            fmp4_sample_entry: None,
+        };
+        let windows = [
+            SegmentWindow {
+                index: 0,
+                start_ms: 0,
+                end_ms: 1_000,
+            },
+            SegmentWindow {
+                index: 1,
+                start_ms: 1_000,
+                end_ms: 2_000,
+            },
+            SegmentWindow {
+                index: 2,
+                start_ms: 2_000,
+                end_ms: 3_000,
+            },
+        ];
+        assert_eq!(track_bytes_by_window(&track, &windows), [20, 30, 10]);
+    }
 
     #[test]
     fn hls_errors_expose_stable_codes() {
@@ -2796,7 +2861,12 @@ mod tests {
 
     fn ts_packets(bytes: &[u8]) -> Vec<&[u8]> {
         assert_eq!(bytes.len() % 188, 0);
-        bytes.chunks_exact(188).collect()
+        bytes
+            .as_chunks::<188>()
+            .0
+            .iter()
+            .map(|packet| packet.as_slice())
+            .collect()
     }
 
     fn top_level_boxes(bytes: &[u8]) -> Vec<[u8; 4]> {

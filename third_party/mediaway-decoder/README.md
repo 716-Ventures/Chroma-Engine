@@ -6,5 +6,9 @@ and D3D11 zero-copy path in addition to H.264. Chroma converts hvcC configuratio
 length-prefixed HEVC samples to Annex-B before submission and performs checked NV12/P010 texture
 readback.
 
+The patch also releases every Media Foundation activation object returned during
+decoder enumeration, including candidates after the selected transform, before
+freeing the COM-allocated array. Empty successful enumerations free their array too.
+
 The local package remains pinned to the matching Mediaway common API so it can be replaced by an
 upstream release once that public decoder dispatch supports the same hardware path.

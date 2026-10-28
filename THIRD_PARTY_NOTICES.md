@@ -92,6 +92,9 @@ The `mediaway-encoder` source is also vendored from that revision. Its NVENC dep
 and implementation are restricted to Windows x86/x64; ARM64 uses the existing unsupported
 backend stub so automatic selection can continue to Media Foundation. Patch details and
 upstream license texts are retained in `third_party/mediaway-encoder/`.
+Both vendored packages also release every Media Foundation activation reference before
+freeing the enumeration array, including candidates after the selected transform, and
+free an allocated array when enumeration succeeds with no candidates.
 
 MIT License
 

@@ -24,6 +24,8 @@ pub enum HevcParseError {
     TruncatedLengthPrefix,
     #[error("HEVC sample has a truncated NAL unit")]
     TruncatedNalUnit,
+    #[error("HEVC Annex B output exceeds the resource limit")]
+    ResourceLimit,
 }
 
 pub fn parse_hevc_decoder_config(payload: &[u8]) -> Result<HevcDecoderConfig, HevcParseError> {
@@ -36,12 +38,26 @@ pub fn parse_hevc_decoder_config(payload: &[u8]) -> Result<HevcDecoderConfig, He
     }
     let array_count = payload[22] as usize;
     let mut offset = 23_usize;
+    if array_count > payload.len().saturating_sub(offset) / 3 {
+        return Err(HevcParseError::TruncatedConfig);
+    }
+    let mut unit_total = 0usize;
     let mut arrays = Vec::with_capacity(array_count);
     for _ in 0..array_count {
         let header = *payload.get(offset).ok_or(HevcParseError::TruncatedConfig)?;
         offset += 1;
         let unit_count = read_u16(payload, offset)? as usize;
         offset += 2;
+        // Every unit needs at least its 16-bit size, even an empty NAL.
+        if unit_count > payload.len().saturating_sub(offset) / 2 {
+            return Err(HevcParseError::TruncatedConfig);
+        }
+        // Empty NALs still allocate Vec metadata. Bound their aggregate count
+        // independently of the serialized byte geometry (up to 12x expansion).
+        unit_total = unit_total
+            .checked_add(unit_count)
+            .filter(|total| *total <= 4_096)
+            .ok_or(HevcParseError::ResourceLimit)?;
         let mut units = Vec::with_capacity(unit_count);
         for _ in 0..unit_count {
             let len = read_u16(payload, offset)? as usize;
@@ -75,7 +91,18 @@ pub fn hevc_sample_to_annex_b(
     if !(1..=4).contains(&nalu_length_size) {
         return Err(HevcParseError::InvalidLengthSize);
     }
-    let mut out = Vec::with_capacity(sample.len() + 16);
+    let mut out = Vec::new();
+    append_hevc_annex_b(&mut out, sample, nalu_length_size)?;
+    Ok(out)
+}
+
+const MAX_ANNEX_B_BYTES: usize = 64 * 1024 * 1024;
+
+fn append_hevc_annex_b(
+    out: &mut Vec<u8>,
+    sample: &[u8],
+    nalu_length_size: u8,
+) -> Result<(), HevcParseError> {
     let mut offset = 0_usize;
     while offset < sample.len() {
         let len_end = offset
@@ -95,11 +122,21 @@ pub fn hevc_sample_to_annex_b(
         if nal_end > sample.len() {
             return Err(HevcParseError::TruncatedNalUnit);
         }
+        let extra = len.checked_add(4).ok_or(HevcParseError::ResourceLimit)?;
+        if out
+            .len()
+            .checked_add(extra)
+            .is_none_or(|size| size > MAX_ANNEX_B_BYTES)
+        {
+            return Err(HevcParseError::ResourceLimit);
+        }
+        out.try_reserve(extra)
+            .map_err(|_| HevcParseError::ResourceLimit)?;
         out.extend_from_slice(&[0, 0, 0, 1]);
         out.extend_from_slice(&sample[offset..nal_end]);
         offset = nal_end;
     }
-    Ok(out)
+    Ok(())
 }
 
 /// First coded-picture NAL type in a length-prefixed access unit.
@@ -164,19 +201,20 @@ pub fn hevc_chunk_to_annex_b(
     samples: &[ChunkSample],
     nalu_length_size: u8,
 ) -> Result<Vec<u8>, HevcParseError> {
-    let mut out = Vec::with_capacity(payload.len());
+    if !(1..=4).contains(&nalu_length_size) {
+        return Err(HevcParseError::InvalidLengthSize);
+    }
+    let mut out = Vec::new();
     for sample in samples {
-        let start = sample.payload_offset as usize;
+        let start =
+            usize::try_from(sample.payload_offset).map_err(|_| HevcParseError::TruncatedNalUnit)?;
         let end = start
             .checked_add(sample.byte_count as usize)
             .ok_or(HevcParseError::TruncatedNalUnit)?;
         if end > payload.len() {
             return Err(HevcParseError::TruncatedNalUnit);
         }
-        out.extend_from_slice(&hevc_sample_to_annex_b(
-            &payload[start..end],
-            nalu_length_size,
-        )?);
+        append_hevc_annex_b(&mut out, &payload[start..end], nalu_length_size)?;
     }
     Ok(out)
 }
@@ -222,6 +260,49 @@ mod tests {
         assert_eq!(parsed.nalu_length_size, 4);
         assert_eq!(parsed.arrays[0].nal_unit_type, 32);
         assert_eq!(parsed.arrays[0].units[0], vec![0xaa, 0xbb]);
+    }
+
+    #[test]
+    fn rejects_truncated_config_counts_before_allocating() {
+        let mut config = vec![0; 23];
+        config[22] = 255;
+        assert_eq!(
+            parse_hevc_decoder_config(&config),
+            Err(HevcParseError::TruncatedConfig)
+        );
+        config[22] = 1;
+        config.extend_from_slice(&[0x20, 0xff, 0xff]);
+        assert_eq!(
+            parse_hevc_decoder_config(&config),
+            Err(HevcParseError::TruncatedConfig)
+        );
+    }
+
+    #[test]
+    fn decoder_config_bounds_empty_parameter_set_metadata() {
+        let mut config = vec![0; 23];
+        config[22] = 2;
+        for _ in 0..2 {
+            config.extend_from_slice(&[0x20, 0x08, 0x01]); // 2049 empty units.
+            config.resize(config.len() + 2 * 2_049, 0);
+        }
+        assert_eq!(
+            parse_hevc_decoder_config(&config),
+            Err(HevcParseError::ResourceLimit)
+        );
+    }
+
+    #[test]
+    fn annex_b_expansion_enforces_aggregate_limit() {
+        let mut out = vec![0; MAX_ANNEX_B_BYTES - 4];
+        assert_eq!(
+            append_hevc_annex_b(&mut out, &[1, 0x40], 1),
+            Err(HevcParseError::ResourceLimit)
+        );
+        assert_eq!(
+            hevc_chunk_to_annex_b(&[], &[], 0),
+            Err(HevcParseError::InvalidLengthSize)
+        );
     }
 
     #[test]

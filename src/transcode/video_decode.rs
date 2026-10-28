@@ -1285,7 +1285,7 @@ fn copy_openh264_bgra_frame(
         })?;
     let mut pixels = vec![0; byte_count];
     decoded.write_rgba8(&mut pixels);
-    for pixel in pixels.chunks_exact_mut(4) {
+    for pixel in pixels.as_chunks_mut::<4>().0 {
         pixel.swap(0, 2);
     }
     Ok(DecodedVideoFrame {
@@ -2672,7 +2672,9 @@ mod tests {
     fn decode_hex(hex: &str) -> Vec<u8> {
         assert_eq!(hex.len() % 2, 0);
         hex.as_bytes()
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| {
                 let pair = std::str::from_utf8(pair).unwrap();
                 u8::from_str_radix(pair, 16).unwrap()
@@ -2703,7 +2705,14 @@ mod tests {
                 }
             );
             assert_eq!(frame.pixels.len(), 32 * 32 * 4);
-            assert!(frame.pixels.chunks_exact(4).all(|pixel| pixel[3] == 255));
+            assert!(
+                frame
+                    .pixels
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .all(|pixel| pixel[3] == 255)
+            );
             assert!(frame.pixels.windows(2).any(|pair| pair[0] != pair[1]));
         }
     }
@@ -2772,7 +2781,9 @@ mod tests {
         assert!(
             decoded.frames[0]
                 .pixels
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .all(|pixel| pixel[3] == 255)
         );
     }
@@ -2814,7 +2825,9 @@ mod tests {
         assert!(
             converted
                 .pixels
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .all(|pixel| { pixel[0] == pixel[1] && pixel[1] == pixel[2] && pixel[3] == 255 })
         );
     }

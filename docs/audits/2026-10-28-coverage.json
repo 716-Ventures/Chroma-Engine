@@ -1,0 +1,1923 @@
+{
+  "tool": "LLVM 23.1.2",
+  "scope": "Source compiled for macOS; unit/integration/doc tests; includes test code inside src. Platform-gated other-OS code excluded.",
+  "totals": {
+    "lines": {
+      "covered": 20474,
+      "count": 26773,
+      "percent": 76.47
+    },
+    "functions": {
+      "covered": 1762,
+      "count": 2468,
+      "percent": 71.39
+    },
+    "regions": {
+      "covered": 29102,
+      "count": 38500,
+      "percent": 75.59
+    }
+  },
+  "files": [
+    {
+      "filename": "src/bin/chroma-engine.rs",
+      "summary": {
+        "lines": {
+          "count": 3,
+          "covered": 3,
+          "percent": 100
+        },
+        "functions": {
+          "count": 1,
+          "covered": 1,
+          "percent": 100
+        },
+        "instantiations": {
+          "count": 2,
+          "covered": 1,
+          "percent": 50
+        },
+        "regions": {
+          "count": 3,
+          "covered": 3,
+          "notcovered": 0,
+          "percent": 100
+        },
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        }
+      }
+    },
+    {
+      "filename": "src/cli/hls.rs",
+      "summary": {
+        "lines": {
+          "count": 290,
+          "covered": 21,
+          "percent": 7.241379310344828
+        },
+        "functions": {
+          "count": 29,
+          "covered": 3,
+          "percent": 10.344827586206897
+        },
+        "instantiations": {
+          "count": 58,
+          "covered": 3,
+          "percent": 5.172413793103448
+        },
+        "regions": {
+          "count": 340,
+          "covered": 20,
+          "notcovered": 320,
+          "percent": 5.88235294117647
+        },
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        }
+      }
+    },
+    {
+      "filename": "src/cli/mod.rs",
+      "summary": {
+        "lines": {
+          "count": 944,
+          "covered": 173,
+          "percent": 18.326271186440678
+        },
+        "functions": {
+          "count": 56,
+          "covered": 4,
+          "percent": 7.142857142857142
+        },
+        "instantiations": {
+          "count": 112,
+          "covered": 4,
+          "percent": 3.571428571428571
+        },
+        "regions": {
+          "count": 1436,
+          "covered": 272,
+          "notcovered": 1164,
+          "percent": 18.94150417827298
+        },
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        }
+      }
+    },
+    {
+      "filename": "src/codec/aac.rs",
+      "summary": {
+        "lines": {
+          "count": 106,
+          "covered": 94,
+          "percent": 88.67924528301887
+        },
+        "functions": {
+          "count": 9,
+          "covered": 9,
+          "percent": 100
+        },
+        "instantiations": {
+          "count": 15,
+          "covered": 9,
+          "percent": 60
+        },
+        "regions": {
+          "count": 151,
+          "covered": 132,
+          "notcovered": 19,
+          "percent": 87.41721854304636
+        },
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        }
+      }
+    },
+    {
+      "filename": "src/codec/ac3.rs",
+      "summary": {
+        "lines": {
+          "count": 320,
+          "covered": 284,
+          "percent": 88.75
+        },
+        "functions": {
+          "count": 21,
+          "covered": 19,
+          "percent": 90.47619047619048
+        },
+        "instantiations": {
+          "count": 37,
+          "covered": 19,
+          "percent": 51.35135135135135
+        },
+        "regions": {
+          "count": 513,
+          "covered": 441,
+          "notcovered": 72,
+          "percent": 85.96491228070175
+        },
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        }
+      }
+    },
+    {
+      "filename": "src/codec/dts.rs",
+      "summary": {
+        "lines": {
+          "count": 194,
+          "covered": 170,
+          "percent": 87.62886597938144
+        },
+        "functions": {
+          "count": 16,
+          "covered": 16,
+          "percent": 100
+        },
+        "instantiations": {
+          "count": 26,
+          "covered": 16,
+          "percent": 61.53846153846154
+        },
+        "regions": {
+          "count": 365,
+          "covered": 318,
+          "notcovered": 47,
+          "percent": 87.12328767123287
+        },
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        }
+      }
+    },
+    {
+      "filename": "src/codec/h264.rs",
+      "summary": {
+        "lines": {
+          "count": 319,
+          "covered": 277,
+          "percent": 86.83385579937304
+        },
+        "functions": {
+          "count": 25,
+          "covered": 22,
+          "percent": 88
+        },
+        "instantiations": {
+          "count": 50,
+          "covered": 26,
+          "percent": 52
+        },
+        "regions": {
+          "count": 491,
+          "covered": 393,
+          "notcovered": 98,
+          "percent": 80.04073319755601
+        },
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        }
+      }
+    },
+    {
+      "filename": "src/codec/hevc.rs",
+      "summary": {
+        "lines": {
+          "count": 266,
+          "covered": 259,
+          "percent": 97.36842105263158
+        },
+        "functions": {
+          "count": 24,
+          "covered": 24,
+          "percent": 100
+        },
+        "instantiations": {
+          "count": 39,
+          "covered": 24,
+          "percent": 61.53846153846154
+        },
+        "regions": {
+          "count": 441,
+          "covered": 418,
+          "notcovered": 23,
+          "percent": 94.7845804988662
+        },
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        }
+      }
+    },
+    {
+      "filename": "src/codec/pixel_format.rs",
+      "summary": {
+        "lines": {
+          "count": 76,
+          "covered": 68,
+          "percent": 89.47368421052632
+        },
+        "functions": {
+          "count": 8,
+          "covered": 8,
+          "percent": 100
+        },
+        "instantiations": {
+          "count": 13,
+          "covered": 12,
+          "percent": 92.3076923076923
+        },
+        "regions": {
+          "count": 134,
+          "covered": 117,
+          "notcovered": 17,
+          "percent": 87.31343283582089
+        },
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        }
+      }
+    },
+    {
+      "filename": "src/codec/subtitles.rs",
+      "summary": {
+        "lines": {
+          "count": 556,
+          "covered": 533,
+          "percent": 95.86330935251799
+        },
+        "functions": {
+          "count": 52,
+          "covered": 49,
+          "percent": 94.23076923076923
+        },
+        "instantiations": {
+          "count": 92,
+          "covered": 63,
+          "percent": 68.47826086956522
+        },
+        "regions": {
+          "count": 855,
+          "covered": 795,
+          "notcovered": 60,
+          "percent": 92.98245614035088
+        },
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        }
+      }
+    },
+    {
+      "filename": "src/container/matroska.rs",
+      "summary": {
+        "lines": {
+          "count": 1869,
+          "covered": 1694,
+          "percent": 90.63670411985018
+        },
+        "functions": {
+          "count": 158,
+          "covered": 145,
+          "percent": 91.77215189873418
+        },
+        "instantiations": {
+          "count": 249,
+          "covered": 179,
+          "percent": 71.8875502008032
+        },
+        "regions": {
+          "count": 2840,
+          "covered": 2524,
+          "notcovered": 316,
+          "percent": 88.87323943661973
+        },
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        }
+      }
+    },
+    {
+      "filename": "src/container/matroska/ebml.rs",
+      "summary": {
+        "lines": {
+          "count": 105,
+          "covered": 93,
+          "percent": 88.57142857142857
+        },
+        "functions": {
+          "count": 15,
+          "covered": 13,
+          "percent": 86.66666666666667
+        },
+        "instantiations": {
+          "count": 30,
+          "covered": 23,
+          "percent": 76.66666666666667
+        },
+        "regions": {
+          "count": 180,
+          "covered": 152,
+          "notcovered": 28,
+          "percent": 84.44444444444444
+        },
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        }
+      }
+    },
+    {
+      "filename": "src/container/matroska/file.rs",
+      "summary": {
+        "lines": {
+          "count": 261,
+          "covered": 204,
+          "percent": 78.16091954022988
+        },
+        "functions": {
+          "count": 22,
+          "covered": 14,
+          "percent": 63.63636363636363
+        },
+        "instantiations": {
+          "count": 44,
+          "covered": 27,
+          "percent": 61.36363636363637
+        },
+        "regions": {
+          "count": 437,
+          "covered": 318,
+          "notcovered": 119,
+          "percent": 72.76887871853546
+        },
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        }
+      }
+    },
+    {
+      "filename": "src/container/mod.rs",
+      "summary": {
+        "lines": {
+          "count": 69,
+          "covered": 62,
+          "percent": 89.85507246376811
+        },
+        "functions": {
+          "count": 9,
+          "covered": 6,
+          "percent": 66.66666666666666
+        },
+        "instantiations": {
+          "count": 18,
+          "covered": 11,
+          "percent": 61.111111111111114
+        },
+        "regions": {
+          "count": 66,
+          "covered": 56,
+          "notcovered": 10,
+          "percent": 84.84848484848484
+        },
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        }
+      }
+    },
+    {
+      "filename": "src/container/mp4.rs",
+      "summary": {
+        "lines": {
+          "count": 2396,
+          "covered": 2197,
+          "percent": 91.69449081803005
+        },
+        "functions": {
+          "count": 196,
+          "covered": 186,
+          "percent": 94.89795918367348
+        },
+        "instantiations": {
+          "count": 318,
+          "covered": 250,
+          "percent": 78.61635220125787
+        },
+        "regions": {
+          "count": 3994,
+          "covered": 3558,
+          "notcovered": 436,
+          "percent": 89.08362543815723
+        },
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        }
+      }
+    },
+    {
+      "filename": "src/container/mp4/atom.rs",
+      "summary": {
+        "lines": {
+          "count": 54,
+          "covered": 52,
+          "percent": 96.29629629629629
+        },
+        "functions": {
+          "count": 8,
+          "covered": 8,
+          "percent": 100
+        },
+        "instantiations": {
+          "count": 16,
+          "covered": 13,
+          "percent": 81.25
+        },
+        "regions": {
+          "count": 118,
+          "covered": 100,
+          "notcovered": 18,
+          "percent": 84.7457627118644
+        },
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        }
+      }
+    },
+    {
+      "filename": "src/engine.rs",
+      "summary": {
+        "lines": {
+          "count": 366,
+          "covered": 325,
+          "percent": 88.79781420765028
+        },
+        "functions": {
+          "count": 34,
+          "covered": 29,
+          "percent": 85.29411764705883
+        },
+        "instantiations": {
+          "count": 53,
+          "covered": 41,
+          "percent": 77.35849056603774
+        },
+        "regions": {
+          "count": 560,
+          "covered": 513,
+          "notcovered": 47,
+          "percent": 91.60714285714285
+        },
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        }
+      }
+    },
+    {
+      "filename": "src/error.rs",
+      "summary": {
+        "lines": {
+          "count": 68,
+          "covered": 55,
+          "percent": 80.88235294117648
+        },
+        "functions": {
+          "count": 16,
+          "covered": 12,
+          "percent": 75
+        },
+        "instantiations": {
+          "count": 32,
+          "covered": 12,
+          "percent": 37.5
+        },
+        "regions": {
+          "count": 68,
+          "covered": 52,
+          "notcovered": 16,
+          "percent": 76.47058823529412
+        },
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        }
+      }
+    },
+    {
+      "filename": "src/fmp4/mod.rs",
+      "summary": {
+        "lines": {
+          "count": 1473,
+          "covered": 1441,
+          "percent": 97.8275627970129
+        },
+        "functions": {
+          "count": 174,
+          "covered": 164,
+          "percent": 94.25287356321839
+        },
+        "instantiations": {
+          "count": 482,
+          "covered": 416,
+          "percent": 86.30705394190872
+        },
+        "regions": {
+          "count": 2054,
+          "covered": 1999,
+          "notcovered": 55,
+          "percent": 97.32229795520935
+        },
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        }
+      }
+    },
+    {
+      "filename": "src/fmp4/validation.rs",
+      "summary": {
+        "lines": {
+          "count": 223,
+          "covered": 184,
+          "percent": 82.51121076233184
+        },
+        "functions": {
+          "count": 30,
+          "covered": 13,
+          "percent": 43.333333333333336
+        },
+        "instantiations": {
+          "count": 60,
+          "covered": 25,
+          "percent": 41.66666666666667
+        },
+        "regions": {
+          "count": 431,
+          "covered": 352,
+          "notcovered": 79,
+          "percent": 81.67053364269141
+        },
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        }
+      }
+    },
+    {
+      "filename": "src/fuzzing.rs",
+      "summary": {
+        "lines": {
+          "count": 80,
+          "covered": 0,
+          "percent": 0
+        },
+        "functions": {
+          "count": 7,
+          "covered": 0,
+          "percent": 0
+        },
+        "instantiations": {
+          "count": 8,
+          "covered": 0,
+          "percent": 0
+        },
+        "regions": {
+          "count": 135,
+          "covered": 0,
+          "notcovered": 135,
+          "percent": 0
+        },
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        }
+      }
+    },
+    {
+      "filename": "src/hls/input.rs",
+      "summary": {
+        "lines": {
+          "count": 66,
+          "covered": 17,
+          "percent": 25.757575757575758
+        },
+        "functions": {
+          "count": 22,
+          "covered": 5,
+          "percent": 22.727272727272727
+        },
+        "instantiations": {
+          "count": 36,
+          "covered": 5,
+          "percent": 13.88888888888889
+        },
+        "regions": {
+          "count": 108,
+          "covered": 24,
+          "notcovered": 84,
+          "percent": 22.22222222222222
+        },
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        }
+      }
+    },
+    {
+      "filename": "src/hls/mod.rs",
+      "summary": {
+        "lines": {
+          "count": 2679,
+          "covered": 1081,
+          "percent": 40.35087719298245
+        },
+        "functions": {
+          "count": 250,
+          "covered": 78,
+          "percent": 31.2
+        },
+        "instantiations": {
+          "count": 469,
+          "covered": 83,
+          "percent": 17.69722814498934
+        },
+        "regions": {
+          "count": 3663,
+          "covered": 1225,
+          "notcovered": 2438,
+          "percent": 33.442533442533446
+        },
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        }
+      }
+    },
+    {
+      "filename": "src/hls/playlist.rs",
+      "summary": {
+        "lines": {
+          "count": 40,
+          "covered": 40,
+          "percent": 100
+        },
+        "functions": {
+          "count": 5,
+          "covered": 5,
+          "percent": 100
+        },
+        "instantiations": {
+          "count": 10,
+          "covered": 5,
+          "percent": 50
+        },
+        "regions": {
+          "count": 45,
+          "covered": 45,
+          "notcovered": 0,
+          "percent": 100
+        },
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        }
+      }
+    },
+    {
+      "filename": "src/hls/transport_stream.rs",
+      "summary": {
+        "lines": {
+          "count": 259,
+          "covered": 188,
+          "percent": 72.58687258687259
+        },
+        "functions": {
+          "count": 23,
+          "covered": 16,
+          "percent": 69.56521739130434
+        },
+        "instantiations": {
+          "count": 46,
+          "covered": 16,
+          "percent": 34.78260869565217
+        },
+        "regions": {
+          "count": 425,
+          "covered": 314,
+          "notcovered": 111,
+          "percent": 73.88235294117646
+        },
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        }
+      }
+    },
+    {
+      "filename": "src/output.rs",
+      "summary": {
+        "lines": {
+          "count": 255,
+          "covered": 223,
+          "percent": 87.45098039215686
+        },
+        "functions": {
+          "count": 34,
+          "covered": 30,
+          "percent": 88.23529411764706
+        },
+        "instantiations": {
+          "count": 53,
+          "covered": 41,
+          "percent": 77.35849056603774
+        },
+        "regions": {
+          "count": 529,
+          "covered": 463,
+          "notcovered": 66,
+          "percent": 87.52362948960302
+        },
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        }
+      }
+    },
+    {
+      "filename": "src/packet/mod.rs",
+      "summary": {
+        "lines": {
+          "count": 451,
+          "covered": 413,
+          "percent": 91.57427937915743
+        },
+        "functions": {
+          "count": 39,
+          "covered": 34,
+          "percent": 87.17948717948718
+        },
+        "instantiations": {
+          "count": 62,
+          "covered": 43,
+          "percent": 69.35483870967742
+        },
+        "regions": {
+          "count": 676,
+          "covered": 622,
+          "notcovered": 54,
+          "percent": 92.01183431952663
+        },
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        }
+      }
+    },
+    {
+      "filename": "src/pipeline/mod.rs",
+      "summary": {
+        "lines": {
+          "count": 196,
+          "covered": 195,
+          "percent": 99.48979591836735
+        },
+        "functions": {
+          "count": 13,
+          "covered": 13,
+          "percent": 100
+        },
+        "instantiations": {
+          "count": 15,
+          "covered": 13,
+          "percent": 86.66666666666667
+        },
+        "regions": {
+          "count": 217,
+          "covered": 215,
+          "notcovered": 2,
+          "percent": 99.07834101382488
+        },
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        }
+      }
+    },
+    {
+      "filename": "src/platform/mod.rs",
+      "summary": {
+        "lines": {
+          "count": 1077,
+          "covered": 734,
+          "percent": 68.15227483751161
+        },
+        "functions": {
+          "count": 129,
+          "covered": 84,
+          "percent": 65.11627906976744
+        },
+        "instantiations": {
+          "count": 213,
+          "covered": 102,
+          "percent": 47.88732394366197
+        },
+        "regions": {
+          "count": 1275,
+          "covered": 846,
+          "notcovered": 429,
+          "percent": 66.3529411764706
+        },
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        }
+      }
+    },
+    {
+      "filename": "src/playback_manifest/mod.rs",
+      "summary": {
+        "lines": {
+          "count": 620,
+          "covered": 468,
+          "percent": 75.48387096774194
+        },
+        "functions": {
+          "count": 53,
+          "covered": 40,
+          "percent": 75.47169811320755
+        },
+        "instantiations": {
+          "count": 84,
+          "covered": 41,
+          "percent": 48.80952380952381
+        },
+        "regions": {
+          "count": 932,
+          "covered": 712,
+          "notcovered": 220,
+          "percent": 76.39484978540773
+        },
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        }
+      }
+    },
+    {
+      "filename": "src/probe/mod.rs",
+      "summary": {
+        "lines": {
+          "count": 432,
+          "covered": 389,
+          "percent": 90.04629629629629
+        },
+        "functions": {
+          "count": 37,
+          "covered": 32,
+          "percent": 86.48648648648648
+        },
+        "instantiations": {
+          "count": 67,
+          "covered": 43,
+          "percent": 64.17910447761194
+        },
+        "regions": {
+          "count": 560,
+          "covered": 482,
+          "notcovered": 78,
+          "percent": 86.07142857142858
+        },
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        }
+      }
+    },
+    {
+      "filename": "src/remux/mod.rs",
+      "summary": {
+        "lines": {
+          "count": 434,
+          "covered": 370,
+          "percent": 85.25345622119815
+        },
+        "functions": {
+          "count": 32,
+          "covered": 26,
+          "percent": 81.25
+        },
+        "instantiations": {
+          "count": 60,
+          "covered": 27,
+          "percent": 45
+        },
+        "regions": {
+          "count": 542,
+          "covered": 433,
+          "notcovered": 109,
+          "percent": 79.88929889298892
+        },
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        }
+      }
+    },
+    {
+      "filename": "src/resources.rs",
+      "summary": {
+        "lines": {
+          "count": 158,
+          "covered": 143,
+          "percent": 90.50632911392405
+        },
+        "functions": {
+          "count": 18,
+          "covered": 13,
+          "percent": 72.22222222222221
+        },
+        "instantiations": {
+          "count": 32,
+          "covered": 24,
+          "percent": 75
+        },
+        "regions": {
+          "count": 158,
+          "covered": 134,
+          "notcovered": 24,
+          "percent": 84.81012658227847
+        },
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        }
+      }
+    },
+    {
+      "filename": "src/session/mod.rs",
+      "summary": {
+        "lines": {
+          "count": 568,
+          "covered": 559,
+          "percent": 98.41549295774648
+        },
+        "functions": {
+          "count": 72,
+          "covered": 72,
+          "percent": 100
+        },
+        "instantiations": {
+          "count": 118,
+          "covered": 103,
+          "percent": 87.28813559322035
+        },
+        "regions": {
+          "count": 744,
+          "covered": 731,
+          "notcovered": 13,
+          "percent": 98.25268817204301
+        },
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        }
+      }
+    },
+    {
+      "filename": "src/source.rs",
+      "summary": {
+        "lines": {
+          "count": 363,
+          "covered": 256,
+          "percent": 70.52341597796143
+        },
+        "functions": {
+          "count": 46,
+          "covered": 29,
+          "percent": 63.04347826086957
+        },
+        "instantiations": {
+          "count": 85,
+          "covered": 49,
+          "percent": 57.647058823529406
+        },
+        "regions": {
+          "count": 603,
+          "covered": 415,
+          "notcovered": 188,
+          "percent": 68.82255389718075
+        },
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        }
+      }
+    },
+    {
+      "filename": "src/source/probe_reader.rs",
+      "summary": {
+        "lines": {
+          "count": 488,
+          "covered": 440,
+          "percent": 90.1639344262295
+        },
+        "functions": {
+          "count": 39,
+          "covered": 34,
+          "percent": 87.17948717948718
+        },
+        "instantiations": {
+          "count": 64,
+          "covered": 50,
+          "percent": 78.125
+        },
+        "regions": {
+          "count": 926,
+          "covered": 822,
+          "notcovered": 104,
+          "percent": 88.76889848812095
+        },
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        }
+      }
+    },
+    {
+      "filename": "src/transcode/audio_clock.rs",
+      "summary": {
+        "lines": {
+          "count": 114,
+          "covered": 107,
+          "percent": 93.85964912280701
+        },
+        "functions": {
+          "count": 12,
+          "covered": 10,
+          "percent": 83.33333333333334
+        },
+        "instantiations": {
+          "count": 20,
+          "covered": 14,
+          "percent": 70
+        },
+        "regions": {
+          "count": 141,
+          "covered": 134,
+          "notcovered": 7,
+          "percent": 95.0354609929078
+        },
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        }
+      }
+    },
+    {
+      "filename": "src/transcode/audio_decode.rs",
+      "summary": {
+        "lines": {
+          "count": 783,
+          "covered": 562,
+          "percent": 71.77522349936143
+        },
+        "functions": {
+          "count": 54,
+          "covered": 35,
+          "percent": 64.81481481481481
+        },
+        "instantiations": {
+          "count": 96,
+          "covered": 42,
+          "percent": 43.75
+        },
+        "regions": {
+          "count": 1020,
+          "covered": 786,
+          "notcovered": 234,
+          "percent": 77.05882352941177
+        },
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        }
+      }
+    },
+    {
+      "filename": "src/transcode/audio_encode.rs",
+      "summary": {
+        "lines": {
+          "count": 807,
+          "covered": 668,
+          "percent": 82.77571251548946
+        },
+        "functions": {
+          "count": 88,
+          "covered": 64,
+          "percent": 72.72727272727273
+        },
+        "instantiations": {
+          "count": 159,
+          "covered": 80,
+          "percent": 50.314465408805034
+        },
+        "regions": {
+          "count": 1089,
+          "covered": 908,
+          "notcovered": 181,
+          "percent": 83.37924701561064
+        },
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        }
+      }
+    },
+    {
+      "filename": "src/transcode/execution_plan.rs",
+      "summary": {
+        "lines": {
+          "count": 660,
+          "covered": 606,
+          "percent": 91.81818181818183
+        },
+        "functions": {
+          "count": 66,
+          "covered": 63,
+          "percent": 95.45454545454545
+        },
+        "instantiations": {
+          "count": 109,
+          "covered": 98,
+          "percent": 89.90825688073394
+        },
+        "regions": {
+          "count": 930,
+          "covered": 860,
+          "notcovered": 70,
+          "percent": 92.47311827956989
+        },
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        }
+      }
+    },
+    {
+      "filename": "src/transcode/mod.rs",
+      "summary": {
+        "lines": {
+          "count": 42,
+          "covered": 41,
+          "percent": 97.61904761904762
+        },
+        "functions": {
+          "count": 6,
+          "covered": 6,
+          "percent": 100
+        },
+        "instantiations": {
+          "count": 10,
+          "covered": 7,
+          "percent": 70
+        },
+        "regions": {
+          "count": 50,
+          "covered": 49,
+          "notcovered": 1,
+          "percent": 98
+        },
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        }
+      }
+    },
+    {
+      "filename": "src/transcode/scaler.rs",
+      "summary": {
+        "lines": {
+          "count": 223,
+          "covered": 204,
+          "percent": 91.4798206278027
+        },
+        "functions": {
+          "count": 23,
+          "covered": 10,
+          "percent": 43.47826086956522
+        },
+        "instantiations": {
+          "count": 31,
+          "covered": 14,
+          "percent": 45.16129032258064
+        },
+        "regions": {
+          "count": 436,
+          "covered": 384,
+          "notcovered": 52,
+          "percent": 88.07339449541286
+        },
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        }
+      }
+    },
+    {
+      "filename": "src/transcode/segment.rs",
+      "summary": {
+        "lines": {
+          "count": 1937,
+          "covered": 1409,
+          "percent": 72.74135260712443
+        },
+        "functions": {
+          "count": 163,
+          "covered": 85,
+          "percent": 52.14723926380368
+        },
+        "instantiations": {
+          "count": 307,
+          "covered": 113,
+          "percent": 36.807817589576544
+        },
+        "regions": {
+          "count": 2672,
+          "covered": 1832,
+          "notcovered": 840,
+          "percent": 68.562874251497
+        },
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        }
+      }
+    },
+    {
+      "filename": "src/transcode/segment/audio_pipeline.rs",
+      "summary": {
+        "lines": {
+          "count": 417,
+          "covered": 390,
+          "percent": 93.5251798561151
+        },
+        "functions": {
+          "count": 34,
+          "covered": 22,
+          "percent": 64.70588235294117
+        },
+        "instantiations": {
+          "count": 60,
+          "covered": 36,
+          "percent": 60
+        },
+        "regions": {
+          "count": 575,
+          "covered": 517,
+          "notcovered": 58,
+          "percent": 89.91304347826087
+        },
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        }
+      }
+    },
+    {
+      "filename": "src/transcode/segment/metrics.rs",
+      "summary": {
+        "lines": {
+          "count": 11,
+          "covered": 11,
+          "percent": 100
+        },
+        "functions": {
+          "count": 2,
+          "covered": 2,
+          "percent": 100
+        },
+        "instantiations": {
+          "count": 4,
+          "covered": 2,
+          "percent": 50
+        },
+        "regions": {
+          "count": 11,
+          "covered": 11,
+          "notcovered": 0,
+          "percent": 100
+        },
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        }
+      }
+    },
+    {
+      "filename": "src/transcode/video_decode.rs",
+      "summary": {
+        "lines": {
+          "count": 2055,
+          "covered": 1458,
+          "percent": 70.94890510948905
+        },
+        "functions": {
+          "count": 161,
+          "covered": 104,
+          "percent": 64.59627329192547
+        },
+        "instantiations": {
+          "count": 293,
+          "covered": 109,
+          "percent": 37.20136518771331
+        },
+        "regions": {
+          "count": 2428,
+          "covered": 1780,
+          "notcovered": 648,
+          "percent": 73.31136738056013
+        },
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        }
+      }
+    },
+    {
+      "filename": "src/transcode/video_encode.rs",
+      "summary": {
+        "lines": {
+          "count": 1322,
+          "covered": 1044,
+          "percent": 78.9712556732224
+        },
+        "functions": {
+          "count": 107,
+          "covered": 81,
+          "percent": 75.70093457943925
+        },
+        "instantiations": {
+          "count": 197,
+          "covered": 116,
+          "percent": 58.88324873096447
+        },
+        "regions": {
+          "count": 1666,
+          "covered": 1389,
+          "notcovered": 277,
+          "percent": 83.3733493397359
+        },
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        }
+      }
+    },
+    {
+      "filename": "src/transcode/yuv.rs",
+      "summary": {
+        "lines": {
+          "count": 174,
+          "covered": 166,
+          "percent": 95.40229885057471
+        },
+        "functions": {
+          "count": 21,
+          "covered": 15,
+          "percent": 71.42857142857143
+        },
+        "instantiations": {
+          "count": 38,
+          "covered": 15,
+          "percent": 39.473684210526315
+        },
+        "regions": {
+          "count": 311,
+          "covered": 295,
+          "notcovered": 16,
+          "percent": 94.85530546623794
+        },
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        }
+      }
+    },
+    {
+      "filename": "src/work.rs",
+      "summary": {
+        "lines": {
+          "count": 30,
+          "covered": 30,
+          "percent": 100
+        },
+        "functions": {
+          "count": 5,
+          "covered": 5,
+          "percent": 100
+        },
+        "instantiations": {
+          "count": 9,
+          "covered": 7,
+          "percent": 77.77777777777779
+        },
+        "regions": {
+          "count": 38,
+          "covered": 38,
+          "notcovered": 0,
+          "percent": 100
+        },
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        }
+      }
+    },
+    {
+      "filename": "src/worker.rs",
+      "summary": {
+        "lines": {
+          "count": 74,
+          "covered": 73,
+          "percent": 98.64864864864865
+        },
+        "functions": {
+          "count": 4,
+          "covered": 4,
+          "percent": 100
+        },
+        "instantiations": {
+          "count": 8,
+          "covered": 4,
+          "percent": 50
+        },
+        "regions": {
+          "count": 118,
+          "covered": 103,
+          "notcovered": 15,
+          "percent": 87.28813559322035
+        },
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0
+        }
+      }
+    }
+  ]
+}

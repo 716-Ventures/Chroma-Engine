@@ -349,7 +349,7 @@ fn hex_bytes(hex: &str) -> Option<Vec<u8>> {
         return None;
     }
     let mut out = Vec::with_capacity(clean.len() / 2);
-    for chunk in clean.as_bytes().chunks_exact(2) {
+    for chunk in clean.as_bytes().as_chunks::<2>().0 {
         let hi = hex_nibble(chunk[0])?;
         let lo = hex_nibble(chunk[1])?;
         out.push((hi << 4) | lo);

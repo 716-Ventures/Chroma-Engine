@@ -274,6 +274,10 @@ pub(super) fn activate_encoder_mft(
     .map_err(|_| EncodeError::Unsupported)?;
 
     if activates.is_null() || count == 0 {
+        if !activates.is_null() {
+            // SAFETY: successful enumeration may return an empty allocated array.
+            unsafe { CoTaskMemFree(Some(activates.cast_const().cast())) };
+        }
         return Err(EncodeError::Unsupported);
     }
 
@@ -283,10 +287,13 @@ pub(super) fn activate_encoder_mft(
         let Some(activate) = activate else {
             continue;
         };
-        if let Ok(t) = unsafe { activate.ActivateObject::<IMFTransform>() } {
+        if chosen.is_none()
+            && let Ok(t) = unsafe { activate.ActivateObject::<IMFTransform>() }
+        {
             chosen = Some(t);
-            break;
         }
+        // Release every activation's COM reference, including candidates after
+        // the selected transform, before freeing their containing allocation.
     }
     unsafe {
         CoTaskMemFree(Some(activates as *const _));

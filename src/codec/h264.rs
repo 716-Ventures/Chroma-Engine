@@ -25,6 +25,8 @@ pub enum H264ParseError {
     TruncatedNalUnit,
     #[error("AVC decoder configuration record is truncated")]
     TruncatedAvcConfig,
+    #[error("AVC NAL metadata or Annex B output exceeds the resource limit")]
+    ResourceLimit,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +36,11 @@ pub struct AvcParameterSets {
     pub pps: Vec<Vec<u8>>,
 }
 
+// Bound expanded NAL metadata independently of compressed input size. A stream
+// of tiny NAL units can otherwise expand a 64 MiB packet window into over 1 GiB.
+const MAX_NAL_UNITS: usize = 1_000_000;
+const MAX_ANNEX_B_BYTES: usize = 64 * 1024 * 1024;
+
 pub fn parse_avc_chunk_nalus(
     payload: &[u8],
     samples: &[ChunkSample],
@@ -42,24 +49,24 @@ pub fn parse_avc_chunk_nalus(
     if !(1..=4).contains(&nalu_length_size) {
         return Err(H264ParseError::InvalidLengthSize);
     }
-
     let mut nalus = Vec::new();
     for sample in samples {
-        let sample_start = sample.payload_offset as usize;
-        let sample_end = sample_start
+        let start = usize::try_from(sample.payload_offset)
+            .map_err(|_| H264ParseError::SampleOutOfBounds)?;
+        let end = start
             .checked_add(sample.byte_count as usize)
             .ok_or(H264ParseError::SampleOutOfBounds)?;
-        if sample_end > payload.len() {
-            return Err(H264ParseError::SampleOutOfBounds);
-        }
-        nalus.extend(parse_avc_sample_nalus(
+        let bytes = payload
+            .get(start..end)
+            .ok_or(H264ParseError::SampleOutOfBounds)?;
+        append_avc_nalus(
+            &mut nalus,
             sample.index,
             sample.payload_offset,
-            &payload[sample_start..sample_end],
+            bytes,
             nalu_length_size,
-        )?);
+        )?;
     }
-
     Ok(nalus)
 }
 
@@ -69,63 +76,104 @@ pub fn parse_avc_sample_nalus(
     sample_payload: &[u8],
     nalu_length_size: u8,
 ) -> Result<Vec<AvcNalUnit>, H264ParseError> {
+    let mut nalus = Vec::new();
+    append_avc_nalus(
+        &mut nalus,
+        sample_index,
+        sample_payload_offset,
+        sample_payload,
+        nalu_length_size,
+    )?;
+    Ok(nalus)
+}
+
+fn append_avc_nalus(
+    nalus: &mut Vec<AvcNalUnit>,
+    sample_index: u32,
+    sample_payload_offset: u64,
+    sample_payload: &[u8],
+    nalu_length_size: u8,
+) -> Result<(), H264ParseError> {
+    visit_avc_nalus(sample_payload, nalu_length_size, |offset, bytes| {
+        if nalus.len() >= MAX_NAL_UNITS {
+            return Err(H264ParseError::ResourceLimit);
+        }
+        let payload_offset = sample_payload_offset
+            .checked_add(offset as u64)
+            .ok_or(H264ParseError::SampleOutOfBounds)?;
+        nalus
+            .try_reserve(1)
+            .map_err(|_| H264ParseError::ResourceLimit)?;
+        nalus.push(AvcNalUnit {
+            sample_index,
+            sample_payload_offset,
+            payload_offset,
+            byte_count: bytes.len() as u32,
+            nal_unit_type: bytes[0] & 0x1f,
+        });
+        Ok(())
+    })
+}
+
+fn visit_avc_nalus(
+    sample: &[u8],
+    nalu_length_size: u8,
+    mut visit: impl FnMut(usize, &[u8]) -> Result<(), H264ParseError>,
+) -> Result<(), H264ParseError> {
     if !(1..=4).contains(&nalu_length_size) {
         return Err(H264ParseError::InvalidLengthSize);
     }
-
-    let prefix_len = nalu_length_size as usize;
-    let mut offset = 0_usize;
-    let mut nalus = Vec::new();
-
-    while offset < sample_payload.len() {
+    let mut offset = 0usize;
+    while offset < sample.len() {
         let prefix_end = offset
-            .checked_add(prefix_len)
+            .checked_add(usize::from(nalu_length_size))
             .ok_or(H264ParseError::TruncatedLengthPrefix)?;
-        if prefix_end > sample_payload.len() {
-            return Err(H264ParseError::TruncatedLengthPrefix);
-        }
-        let nal_len = read_be_uint(&sample_payload[offset..prefix_end]);
-        offset = prefix_end;
-        let nal_end = offset
-            .checked_add(nal_len)
+        let prefix = sample
+            .get(offset..prefix_end)
+            .ok_or(H264ParseError::TruncatedLengthPrefix)?;
+        let length = read_be_uint(prefix);
+        let end = prefix_end
+            .checked_add(length)
             .ok_or(H264ParseError::TruncatedNalUnit)?;
-        if nal_end > sample_payload.len() {
-            return Err(H264ParseError::TruncatedNalUnit);
+        let bytes = sample
+            .get(prefix_end..end)
+            .ok_or(H264ParseError::TruncatedNalUnit)?;
+        if !bytes.is_empty() {
+            visit(prefix_end, bytes)?;
         }
-        if nal_len > 0 {
-            let nal_unit_type = sample_payload[offset] & 0x1f;
-            nalus.push(AvcNalUnit {
-                sample_index,
-                sample_payload_offset,
-                payload_offset: sample_payload_offset.saturating_add(offset as u64),
-                byte_count: nal_len as u32,
-                nal_unit_type,
-            });
-        }
-        offset = nal_end;
+        offset = end;
     }
-
-    Ok(nalus)
+    Ok(())
 }
 
 pub fn avc_sample_to_annex_b(
     sample_payload: &[u8],
     nalu_length_size: u8,
 ) -> Result<Vec<u8>, H264ParseError> {
-    let nalus = parse_avc_sample_nalus(0, 0, sample_payload, nalu_length_size)?;
-    let mut out = Vec::with_capacity(sample_payload.len());
-    for nalu in nalus {
-        let start = nalu.payload_offset as usize;
-        let end = start
-            .checked_add(nalu.byte_count as usize)
-            .ok_or(H264ParseError::TruncatedNalUnit)?;
-        if end > sample_payload.len() {
-            return Err(H264ParseError::TruncatedNalUnit);
-        }
-        out.extend_from_slice(&[0, 0, 0, 1]);
-        out.extend_from_slice(&sample_payload[start..end]);
-    }
+    let mut out = Vec::new();
+    append_annex_b(&mut out, sample_payload, nalu_length_size)?;
     Ok(out)
+}
+
+fn append_annex_b(out: &mut Vec<u8>, sample: &[u8], length_size: u8) -> Result<(), H264ParseError> {
+    // Validate and size before allocation; conversion never materializes a NAL
+    // metadata vector or a separate temporary buffer for each sample.
+    let mut size = out.len();
+    visit_avc_nalus(sample, length_size, |_, bytes| {
+        size = size
+            .checked_add(4)
+            .and_then(|size| size.checked_add(bytes.len()))
+            .filter(|size| *size <= MAX_ANNEX_B_BYTES)
+            .ok_or(H264ParseError::ResourceLimit)?;
+        Ok(())
+    })?;
+    out.try_reserve_exact(size - out.len())
+        .map_err(|_| H264ParseError::ResourceLimit)?;
+    visit_avc_nalus(sample, length_size, |_, bytes| {
+        out.extend_from_slice(&[0, 0, 0, 1]);
+        out.extend_from_slice(bytes);
+        Ok(())
+    })
 }
 
 pub fn avc_chunk_to_annex_b(
@@ -133,19 +181,41 @@ pub fn avc_chunk_to_annex_b(
     samples: &[ChunkSample],
     nalu_length_size: u8,
 ) -> Result<Vec<u8>, H264ParseError> {
-    let mut out = Vec::with_capacity(payload.len());
+    if !(1..=4).contains(&nalu_length_size) {
+        return Err(H264ParseError::InvalidLengthSize);
+    }
+    let mut total = 0usize;
     for sample in samples {
-        let start = sample.payload_offset as usize;
+        let start = usize::try_from(sample.payload_offset)
+            .map_err(|_| H264ParseError::SampleOutOfBounds)?;
         let end = start
             .checked_add(sample.byte_count as usize)
             .ok_or(H264ParseError::SampleOutOfBounds)?;
-        if end > payload.len() {
-            return Err(H264ParseError::SampleOutOfBounds);
-        }
-        out.extend_from_slice(&avc_sample_to_annex_b(
-            &payload[start..end],
-            nalu_length_size,
-        )?);
+        let bytes = payload
+            .get(start..end)
+            .ok_or(H264ParseError::SampleOutOfBounds)?;
+        visit_avc_nalus(bytes, nalu_length_size, |_, bytes| {
+            total = total
+                .checked_add(4)
+                .and_then(|size| size.checked_add(bytes.len()))
+                .filter(|size| *size <= MAX_ANNEX_B_BYTES)
+                .ok_or(H264ParseError::ResourceLimit)?;
+            Ok(())
+        })?;
+    }
+    let mut out = Vec::new();
+    out.try_reserve_exact(total)
+        .map_err(|_| H264ParseError::ResourceLimit)?;
+    for sample in samples {
+        let start = usize::try_from(sample.payload_offset)
+            .map_err(|_| H264ParseError::SampleOutOfBounds)?;
+        let end = start
+            .checked_add(sample.byte_count as usize)
+            .ok_or(H264ParseError::SampleOutOfBounds)?;
+        let bytes = payload
+            .get(start..end)
+            .ok_or(H264ParseError::SampleOutOfBounds)?;
+        append_annex_b(&mut out, bytes, nalu_length_size)?;
     }
     Ok(out)
 }
@@ -259,6 +329,47 @@ mod tests {
         .concat();
         let out = avc_sample_to_annex_b(&sample, 4).unwrap();
         assert_eq!(out, [0, 0, 0, 1, 0x65, 0x88, 0, 0, 0, 1, 0x41]);
+    }
+
+    #[test]
+    fn tiny_nal_metadata_expansion_is_bounded_across_samples() {
+        let payload = [1, 0x65].repeat(MAX_NAL_UNITS / 2 + 1);
+        let count = payload.len() as u32;
+        let samples = [sample(0, 0, count), sample(1, 0, count)];
+        assert_eq!(
+            parse_avc_chunk_nalus(&payload, &samples, 1),
+            Err(H264ParseError::ResourceLimit)
+        );
+        // Packet conversion does not need the expanded metadata at all.
+        assert_eq!(
+            avc_sample_to_annex_b(&payload, 1).unwrap().len(),
+            payload.len() / 2 * 5
+        );
+    }
+
+    #[test]
+    fn conversion_bounds_total_output_and_rejects_invalid_offsets() {
+        let mut output = vec![0; MAX_ANNEX_B_BYTES - 4];
+        assert_eq!(
+            append_annex_b(&mut output, &[1, 0x65], 1),
+            Err(H264ParseError::ResourceLimit)
+        );
+        assert_eq!(
+            parse_avc_sample_nalus(0, u64::MAX, &[1, 0x65], 1),
+            Err(H264ParseError::SampleOutOfBounds)
+        );
+        assert_eq!(
+            avc_sample_to_annex_b(&[0, 1, 0x65, 0], 1).unwrap(),
+            [0, 0, 0, 1, 0x65]
+        );
+        assert_eq!(
+            avc_sample_to_annex_b(&[2, 0x65], 1),
+            Err(H264ParseError::TruncatedNalUnit)
+        );
+        assert_eq!(
+            avc_chunk_to_annex_b(&[], &[], 0),
+            Err(H264ParseError::InvalidLengthSize)
+        );
     }
 
     #[test]

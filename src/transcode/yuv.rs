@@ -186,8 +186,10 @@ mod tests {
         assert_eq!(output.len(), 3 * 3 * 4);
         assert!(
             output
-                .chunks_exact(4)
-                .all(|pixel| pixel == [0, 24, 255, 255])
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|pixel| *pixel == [0, 24, 255, 255])
         );
     }
 

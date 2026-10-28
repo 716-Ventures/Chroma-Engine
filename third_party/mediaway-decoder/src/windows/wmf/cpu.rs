@@ -50,6 +50,10 @@ fn activate_sw_decoder(input_subtype: &GUID) -> Result<IMFTransform, DecodeError
     .map_err(|_| DecodeError::Unsupported)?;
 
     if activates.is_null() || count == 0 {
+        if !activates.is_null() {
+            // SAFETY: successful enumeration may return an empty allocated array.
+            unsafe { CoTaskMemFree(Some(activates.cast_const().cast())) };
+        }
         return Err(DecodeError::Unsupported);
     }
 
@@ -60,10 +64,13 @@ fn activate_sw_decoder(input_subtype: &GUID) -> Result<IMFTransform, DecodeError
         let Some(activate) = activate else {
             continue;
         };
-        if let Ok(t) = unsafe { activate.ActivateObject::<IMFTransform>() } {
+        if chosen.is_none()
+            && let Ok(t) = unsafe { activate.ActivateObject::<IMFTransform>() }
+        {
             chosen = Some(t);
-            break;
         }
+        // Drop every activation reference, including those following the first
+        // selected transform, before freeing the allocation containing them.
     }
     // SAFETY: `activates` was allocated by MFTEnumEx (CoTaskMemAlloc); we own and free it.
     unsafe {
