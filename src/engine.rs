@@ -162,9 +162,12 @@ impl PlaybackSession {
         let container = sniff_container(source.as_ref());
         let (track_id, packets) = match container {
             ContainerKind::Mp4 | ContainerKind::Mov => {
+                let selected = source
+                    .mp4_metadata_for_tracks(&[options.track_id.as_deref().unwrap_or("v0")])
+                    .map_err(EngineSessionError::from_source)?;
                 let Mp4TrackPacketIndex {
                     track_id, packets, ..
-                } = mp4::parse_packet_track(source.as_ref(), options.track_id.as_deref())
+                } = mp4::parse_packet_track(&selected, options.track_id.as_deref())
                     .ok_or(EngineSessionError::NoTrack)?;
                 (track_id, packets)
             }

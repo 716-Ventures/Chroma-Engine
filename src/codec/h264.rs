@@ -70,6 +70,7 @@ pub fn parse_avc_chunk_nalus(
     Ok(nalus)
 }
 
+#[cfg(any(test, feature = "fuzzing"))]
 pub fn parse_avc_sample_nalus(
     sample_index: u32,
     sample_payload_offset: u64,

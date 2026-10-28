@@ -277,6 +277,16 @@ pub fn parse_chunk_plan(
     requested_track_id: Option<&str>,
     target_ms: u64,
 ) -> Option<ChunkPlan> {
+    parse_chunk_plan_with_peak_bitrate(bytes, requested_track_id, target_ms).map(|(plan, _)| plan)
+}
+
+/// Compute segment bandwidth from the same bounded sample tables used to plan
+/// chunks. No media payload or second packet index is required.
+pub(crate) fn parse_chunk_plan_with_peak_bitrate(
+    bytes: &[u8],
+    requested_track_id: Option<&str>,
+    target_ms: u64,
+) -> Option<(ChunkPlan, Option<u64>)> {
     let mut video_index = 0_u32;
     let mut audio_index = 0_u32;
     let mut subtitle_index = 0_u32;
@@ -302,7 +312,9 @@ pub fn parse_chunk_plan(
                 .unwrap_or(kind == Mp4TrackKind::Video);
             if should_parse {
                 let (scale, table) = parse_trak_sample_table(trak.payload)?;
-                return Some(table.into_chunk_plan(&track_id, scale, target_ms));
+                let plan = table.chunk_plan(&track_id, scale, target_ms);
+                let peak = table.peak_chunk_bitrate(&plan);
+                return Some((plan, peak));
             }
         }
     }
@@ -731,7 +743,7 @@ impl SampleTable {
         index
     }
 
-    fn into_chunk_plan(self, track_id: &str, scale: TimeScale, target_ms: u64) -> ChunkPlan {
+    fn chunk_plan(&self, track_id: &str, scale: TimeScale, target_ms: u64) -> ChunkPlan {
         if self.sample_sizes.is_empty() || target_ms == 0 {
             return ChunkPlan {
                 track_ids: Vec::new(),
@@ -808,6 +820,33 @@ impl SampleTable {
             track_ids: vec![track_id.to_string()],
             chunks,
         }
+    }
+
+    fn peak_chunk_bitrate(&self, plan: &ChunkPlan) -> Option<u64> {
+        plan.chunks
+            .iter()
+            .enumerate()
+            .filter_map(|(index, chunk)| {
+                let sizes = self
+                    .sample_sizes
+                    .get(chunk.packet_range.start as usize..chunk.packet_range.end as usize)?;
+                let bytes: u128 = sizes.iter().map(|size| u128::from(*size)).sum();
+                let duration = plan.chunks.get(index + 1).map_or_else(
+                    || chunk.duration.as_millis(),
+                    |next| {
+                        next.start
+                            .as_millis()
+                            .saturating_sub(chunk.start.as_millis())
+                    },
+                );
+                (duration > 0).then(|| {
+                    (bytes * 8_000)
+                        .div_ceil(u128::from(duration))
+                        .min(u128::from(u64::MAX)) as u64
+                })
+            })
+            .max()
+            .filter(|peak| *peak > 0)
     }
 }
 
@@ -1853,6 +1892,45 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
+
+    #[test]
+    fn chunk_bandwidth_uses_sample_bytes_and_normalized_segment_duration() {
+        let table = SampleTable {
+            sample_sizes: vec![1_000_000, 500_000, 1_000_000],
+            sample_durations: vec![],
+            composition_offsets: vec![],
+            keyframes: vec![],
+            chunk_offsets: vec![],
+            sample_to_chunk: vec![],
+        };
+        let plan = ChunkPlan {
+            track_ids: vec!["v0".into()],
+            chunks: vec![
+                NativeChunk {
+                    index: 0,
+                    start: TimePoint::millis(0),
+                    duration: TimeDelta::millis(750),
+                    packet_range: PacketRange { start: 0, end: 2 },
+                    key_aligned: true,
+                },
+                NativeChunk {
+                    index: 1,
+                    start: TimePoint::millis(1_000),
+                    duration: TimeDelta::millis(500),
+                    packet_range: PacketRange { start: 2, end: 3 },
+                    key_aligned: true,
+                },
+            ],
+        };
+        assert_eq!(table.peak_chunk_bitrate(&plan), Some(16_000_000));
+        assert_eq!(
+            table.peak_chunk_bitrate(&ChunkPlan {
+                track_ids: vec![],
+                chunks: vec![]
+            }),
+            None
+        );
+    }
 
     proptest! {
         #[test]

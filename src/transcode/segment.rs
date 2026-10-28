@@ -11,9 +11,10 @@ mod metrics;
 use audio_pipeline::AudioPipeline;
 use metrics::{StageCounters, StageTimer};
 
+use super::scaler::constrained_h264_format;
 #[cfg(test)]
 use super::scaler::scale_bgra;
-use super::scaler::{BgraScaler, constrained_h264_format};
+use super::scaler::{BgraScaler, constrained_h264_format_with_bounds};
 use crate::{
     codec::ac3::{parse_ac3_specific_box, parse_eac3_specific_box},
     container::{
@@ -66,6 +67,10 @@ pub struct NativeFmp4TranscodeOptions {
     pub segment_ms: u64,
     /// Target H.264 bitrate.
     pub video_bitrate: u32,
+    /// Maximum output dimensions; absent limits retain the legacy 1080p cap.
+    pub max_width: Option<u32>,
+    /// Maximum output height; absent limits retain the legacy 1080p cap.
+    pub max_height: Option<u32>,
     /// Target bitrate for transcoded audio.
     pub audio_bitrate: u32,
     /// Output video path.
@@ -256,14 +261,13 @@ impl NativeFmp4TranscodeSession {
         control: crate::WorkControl,
         runtime: std::sync::Arc<crate::EngineRuntime>,
     ) -> Result<Self> {
+        options.validate()?;
         let metrics = StageCounters::default();
         let timer = StageTimer::new(&metrics.open);
         control.check()?;
         let source = MappedMediaFile::open_with_context(input, runtime, control.clone())?;
         let prepared = match sniff_container(source.as_ref()) {
-            ContainerKind::Mp4 | ContainerKind::Mov => {
-                prepare_mp4_transcode(source.as_ref(), &options)?
-            }
+            ContainerKind::Mp4 | ContainerKind::Mov => prepare_mp4_transcode(&source, &options)?,
             ContainerKind::Matroska | ContainerKind::Webm => {
                 prepare_matroska_transcode(&source, &options)?
             }
@@ -410,6 +414,11 @@ impl NativeFmp4TranscodeSession {
         {
             // Discard all partially advanced state before one eligible fallback.
             // No output has been published; restart from the same keyframe window.
+            let initial_error = result
+                .as_ref()
+                .err()
+                .map(ToString::to_string)
+                .unwrap_or_default();
             self.control.check()?;
             let prior = codec_pipeline.as_ref().unwrap().stats;
             *codec_pipeline = None;
@@ -441,7 +450,10 @@ impl NativeFmp4TranscodeSession {
                 codec_pipeline.as_mut(),
                 audio_pipeline.as_mut(),
                 &self.metrics,
-            );
+            )
+            .map_err(|error| {
+                anyhow::anyhow!("{error}; initial native backend error: {initial_error}")
+            });
         }
         if result.is_ok()
             && let Some(pipeline) = audio_pipeline.as_mut()
@@ -609,6 +621,26 @@ fn render_transcode_media_playlist(
     playlist
 }
 
+impl NativeFmp4TranscodeOptions {
+    fn validate(&self) -> Result<()> {
+        if self
+            .max_width
+            .is_some_and(|width| !(2..=3840).contains(&width))
+            || self
+                .max_height
+                .is_some_and(|height| !(2..=2160).contains(&height))
+        {
+            bail!("native H.264 output limits must be within 3840x2160 and at least 2 pixels");
+        }
+        if self.video_mode == NativeFmp4VideoMode::H264
+            && !(1..=100_000_000).contains(&self.video_bitrate)
+        {
+            bail!("native H.264 video bitrate must be between 1 and 100000000 bits per second");
+        }
+        Ok(())
+    }
+}
+
 impl Default for NativeFmp4TranscodeOptions {
     fn default() -> Self {
         Self {
@@ -616,6 +648,8 @@ impl Default for NativeFmp4TranscodeOptions {
             audio_track_id: None,
             segment_ms: DEFAULT_SEGMENT_MS,
             video_bitrate: DEFAULT_VIDEO_BITRATE,
+            max_width: None,
+            max_height: None,
             audio_bitrate: DEFAULT_AUDIO_BITRATE,
             video_mode: NativeFmp4VideoMode::Copy,
         }
@@ -748,6 +782,7 @@ struct NativeVideoCodecPipeline {
     scaled_buffers: Vec<Vec<u8>>,
     decoder_output_format: RawVideoFormat,
     encoder: H264EncoderSession,
+    encode_format: RawVideoFormat,
     last_completed_index: Option<u32>,
     poisoned: bool,
     control: crate::WorkControl,
@@ -779,7 +814,7 @@ impl NativeVideoCodecPipeline {
                 "HDR-to-SDR video transcode requires tone mapping; select compatible HDR video copy"
             );
         }
-        let (decode_format, encode_format) = video_formats(&prepared.video_track);
+        let (decode_format, encode_format) = video_formats(&prepared.video_track, options);
         let pixels = u64::from(decode_format.width) * u64::from(decode_format.height);
         policy.check(
             "video pixels",
@@ -830,6 +865,7 @@ impl NativeVideoCodecPipeline {
             },
             policy,
             decoder,
+            encode_format,
             scaler: BgraScaler::new(decoder_output_format, encode_format)?,
             scaled_buffers: Vec::new(),
             decoder_output_format,
@@ -926,9 +962,22 @@ fn prepare_matroska_transcode(
 }
 
 fn prepare_mp4_transcode(
-    bytes: &[u8],
+    source: &MappedMediaFile,
     options: &NativeFmp4TranscodeOptions,
 ) -> Result<PreparedTranscode> {
+    let headers = parse_mp4_metadata(source.as_ref());
+    let video = select_mp4_track(
+        &headers.tracks,
+        Mp4TrackKind::Video,
+        options.video_track_id.as_deref(),
+    )
+    .ok_or_else(|| anyhow::anyhow!("no matching MP4/MOV video track found"))?
+    .0;
+    let audio = select_mp4_audio_track(&headers.tracks, options.audio_track_id.as_deref())
+        .ok_or_else(|| anyhow::anyhow!("no executable MP4/MOV audio track found"))?
+        .0;
+    let selected = source.mp4_metadata_for_tracks(&[&video, &audio])?;
+    let bytes = selected.as_ref();
     let meta = parse_mp4_metadata(bytes);
     let (video_track_id, video_track) = select_mp4_track(
         &meta.tracks,
@@ -1538,14 +1587,14 @@ fn copy_native_video_segment(
 }
 
 fn transcode_h264_video_segment(
-    track: &PreparedVideoTrack,
+    _track: &PreparedVideoTrack,
     codec: VideoCodec,
     decoder_config: Vec<u8>,
     manifest: &ExtractedChunk,
     payload: &[u8],
     codec_pipeline: &mut NativeVideoCodecPipeline,
 ) -> Result<VideoSegment> {
-    let (_, encode_format) = video_formats(track);
+    let encode_format = codec_pipeline.encode_format;
     let decode_format = codec_pipeline.decoder_output_format;
     let batch_packets = video_batch_packets_with_budget(
         decode_format,
@@ -1746,7 +1795,10 @@ fn validate_segment_window(start: u32, count: u32, available: usize) -> Result<(
     Ok(())
 }
 
-fn video_formats(track: &PreparedVideoTrack) -> (RawVideoFormat, RawVideoFormat) {
+fn video_formats(
+    track: &PreparedVideoTrack,
+    options: &NativeFmp4TranscodeOptions,
+) -> (RawVideoFormat, RawVideoFormat) {
     let (frame_rate_num, frame_rate_den) = frame_rate_ratio(track.frame_rate);
     let decode_format = RawVideoFormat {
         width: track.width,
@@ -1755,7 +1807,16 @@ fn video_formats(track: &PreparedVideoTrack) -> (RawVideoFormat, RawVideoFormat)
         frame_rate_den,
         pixel_format: RawVideoPixelFormat::Bgra,
     };
-    (decode_format, constrained_h264_format(decode_format))
+    let output = if options.max_width.is_none() && options.max_height.is_none() {
+        constrained_h264_format(decode_format)
+    } else {
+        constrained_h264_format_with_bounds(
+            decode_format,
+            options.max_width.unwrap_or(1920),
+            options.max_height.unwrap_or(1080),
+        )
+    };
+    (decode_format, output)
 }
 
 fn frame_rate_ratio(frame_rate: Option<f64>) -> (u32, u32) {
@@ -2376,6 +2437,39 @@ mod tests {
         assert!(segment.encoded_frame_count > 0);
         assert_eq!(segment.first_pts.expect("first PTS").units, 48_000);
         assert!(matches!(segment.sample_entry, Fmp4SampleEntry::Aac { .. }));
+    }
+
+    #[test]
+    fn request_quality_formats_preserve_aspect_and_do_not_upscale() {
+        let source = RawVideoFormat {
+            width: 3840,
+            height: 1600,
+            frame_rate_num: 24,
+            frame_rate_den: 1,
+            pixel_format: RawVideoPixelFormat::Bgra,
+        };
+        for (width, height, expected) in [
+            (1920, 1080, (1920, 800)),
+            (2560, 1440, (2560, 1066)),
+            (3840, 2160, (3840, 1600)),
+        ] {
+            let output = constrained_h264_format_with_bounds(source, width, height);
+            assert_eq!((output.width, output.height), expected);
+        }
+        let small = RawVideoFormat {
+            width: 1280,
+            height: 720,
+            ..source
+        };
+        assert_eq!(
+            constrained_h264_format_with_bounds(small, 3840, 2160),
+            small
+        );
+        let invalid = NativeFmp4TranscodeOptions {
+            max_width: Some(99999),
+            ..Default::default()
+        };
+        assert!(invalid.validate().is_err());
     }
 
     #[test]

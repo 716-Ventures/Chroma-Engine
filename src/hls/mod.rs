@@ -1130,14 +1130,15 @@ fn hls_tracks_from_mp4(
                         anyhow!("native HLS MP4 path currently requires AAC, AC-3, or E-AC-3 audio")
                     })
             })?;
-    let video_config = mp4::parse_codec_config(bytes.metadata(), Some(&video_track_id))
+    let selected = bytes.mp4_metadata(&[&video_track_id, &audio_track_id])?;
+    let video_config = mp4::parse_codec_config(&selected, Some(&video_track_id))
         .ok_or_else(|| anyhow!("missing MP4 video decoder config"))?;
-    let audio_config = mp4::parse_codec_config(bytes.metadata(), Some(&audio_track_id))
+    let audio_config = mp4::parse_codec_config(&selected, Some(&audio_track_id))
         .ok_or_else(|| anyhow!("missing MP4 audio decoder config"))?;
-    let video_packets = mp4::parse_packet_track(bytes.metadata(), Some(&video_track_id))
+    let video_packets = mp4::parse_packet_track(&selected, Some(&video_track_id))
         .ok_or_else(|| anyhow!("missing MP4 video packet index"))?
         .packets;
-    let audio_packets = mp4::parse_packet_track(bytes.metadata(), Some(&audio_track_id))
+    let audio_packets = mp4::parse_packet_track(&selected, Some(&audio_track_id))
         .ok_or_else(|| anyhow!("missing MP4 audio packet index"))?
         .packets;
 
@@ -1626,13 +1627,13 @@ fn hls_playlist_plan_from_mp4(
                         anyhow!("native HLS MP4 path currently requires AAC, AC-3, or E-AC-3 audio")
                     })
             })?;
-    let video_config = mp4::parse_codec_config(bytes.metadata(), Some(&video_track_id))
+    let selected = bytes.mp4_metadata(&[&video_track_id, &audio_track_id])?;
+    let video_config = mp4::parse_codec_config(&selected, Some(&video_track_id))
         .ok_or_else(|| anyhow!("missing MP4 video decoder config"))?;
-    let audio_config = mp4::parse_codec_config(bytes.metadata(), Some(&audio_track_id))
+    let audio_config = mp4::parse_codec_config(&selected, Some(&audio_track_id))
         .ok_or_else(|| anyhow!("missing MP4 audio decoder config"))?;
-    let video_plan =
-        mp4::parse_chunk_plan(bytes.metadata(), Some(&video_track_id), segment_target_ms)
-            .ok_or_else(|| anyhow!("missing MP4 video chunk plan"))?;
+    let video_plan = mp4::parse_chunk_plan(&selected, Some(&video_track_id), segment_target_ms)
+        .ok_or_else(|| anyhow!("missing MP4 video chunk plan"))?;
     hls_playlist_plan_from_chunk_plan(
         video_track_id,
         audio_track_id,

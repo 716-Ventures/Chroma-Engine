@@ -104,8 +104,17 @@ impl BgraScaler {
 }
 
 pub(super) fn constrained_h264_format(source: RawVideoFormat) -> RawVideoFormat {
-    let width_scale = H264_WEB_MAX_WIDTH as f64 / source.width.max(1) as f64;
-    let height_scale = H264_WEB_MAX_HEIGHT as f64 / source.height.max(1) as f64;
+    constrained_h264_format_with_bounds(source, H264_WEB_MAX_WIDTH, H264_WEB_MAX_HEIGHT)
+}
+
+/// Preserve source aspect ratio and avoid upscaling within validated request limits.
+pub(super) fn constrained_h264_format_with_bounds(
+    source: RawVideoFormat,
+    max_width: u32,
+    max_height: u32,
+) -> RawVideoFormat {
+    let width_scale = max_width as f64 / source.width.max(1) as f64;
+    let height_scale = max_height as f64 / source.height.max(1) as f64;
     let scale = width_scale.min(height_scale).min(1.0);
     let width = even_dimension((source.width as f64 * scale).round() as u32).max(2);
     let height = even_dimension((source.height as f64 * scale).round() as u32).max(2);

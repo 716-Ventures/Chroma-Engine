@@ -9,6 +9,9 @@ pub(super) trait HlsInput {
         64 * 1024 * 1024
     }
     fn metadata(&self) -> &[u8];
+    fn mp4_metadata(&self, _tracks: &[&str]) -> Result<std::borrow::Cow<'_, [u8]>> {
+        Ok(std::borrow::Cow::Borrowed(self.metadata()))
+    }
     fn source_len(&self) -> u64;
     fn payload(&self, packets: &[PacketRef]) -> Result<Vec<u8>>;
     fn matroska_packets(
@@ -21,6 +24,9 @@ pub(super) trait HlsInput {
 }
 
 impl HlsInput for MappedMediaFile {
+    fn mp4_metadata(&self, tracks: &[&str]) -> Result<std::borrow::Cow<'_, [u8]>> {
+        Ok(self.mp4_metadata_for_tracks(tracks)?)
+    }
     fn output_limit(&self) -> usize {
         self.policy().output_bytes
     }

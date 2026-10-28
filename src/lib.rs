@@ -134,3 +134,8 @@ pub use transcode::{
     WindowsH264BgraDecoderSession, WindowsH264EncoderSession, WindowsHevcBgraDecoderSession,
     WindowsHevcEncoderSession,
 };
+
+pub use codec::subtitle_resources::{
+    SubtitleFontResource, SubtitleResources, SubtitleScriptResource, UnavailableSubtitleResource,
+    write_subtitle_resources,
+};

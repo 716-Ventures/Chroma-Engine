@@ -5,6 +5,8 @@ use anyhow::{Context, Result, bail};
 
 use super::{MediaSourceIdentity, read_exact_at};
 
+mod mp4_compact;
+
 const MAX_METADATA: usize = 64 * 1024 * 1024;
 const MAX_ELEMENTS: usize = 100_000;
 
@@ -39,6 +41,16 @@ pub(crate) fn read_metadata_with_context(
     policy: &crate::ResourcePolicy,
     control: &crate::WorkControl,
 ) -> Result<(u64, Vec<u8>)> {
+    let (len, bytes, _) = read_metadata_view(path, policy, control, &[])?;
+    Ok((len, bytes))
+}
+
+pub(crate) fn read_metadata_view(
+    path: &Path,
+    policy: &crate::ResourcePolicy,
+    control: &crate::WorkControl,
+    selected: &[&str],
+) -> Result<(u64, Vec<u8>, bool)> {
     let timed = std::env::var_os("CHROMA_PROBE_DIAGNOSTICS").is_some();
     let started = Instant::now();
     if timed {
@@ -49,9 +61,12 @@ pub(crate) fn read_metadata_with_context(
     let identity = MediaSourceIdentity::from_metadata(&file.metadata()?);
     let len = identity.len;
     let head = read(&file, 0, len.min(16) as usize)?;
+    let mut compact = false;
     let bytes = match crate::container::sniff_container(&head) {
         crate::container::ContainerKind::Mp4 | crate::container::ContainerKind::Mov => {
-            mp4_metadata(&file, len, policy, control)?
+            let (bytes, reduced) = mp4_metadata(&file, len, policy, control, selected)?;
+            compact = reduced;
+            bytes
         }
         crate::container::ContainerKind::Matroska | crate::container::ContainerKind::Webm => {
             mkv_metadata(&file, len, policy, control)?
@@ -78,7 +93,7 @@ pub(crate) fn read_metadata_with_context(
             counters.elements
         );
     }
-    Ok((len, bytes))
+    Ok((len, bytes, compact))
 }
 
 #[cfg(test)]
@@ -124,13 +139,15 @@ fn mp4_metadata(
     len: u64,
     policy: &crate::ResourcePolicy,
     control: &crate::WorkControl,
-) -> Result<Vec<u8>> {
+    selected: &[&str],
+) -> Result<(Vec<u8>, bool)> {
     let mut output = Vec::new();
+    let mut compact = false;
     let mut offset = 0;
     for _ in 0..MAX_ELEMENTS {
         control.check()?;
         if offset == len {
-            return Ok(output);
+            return Ok((output, compact));
         }
         let header = read(file, offset, (len - offset).min(16) as usize)?;
         if header.len() < 8 {
@@ -146,7 +163,24 @@ fn mp4_metadata(
         if size < header_len || size > len - offset {
             bail!("invalid MP4 box size");
         }
-        if matches!(&header[4..8], b"ftyp" | b"moov") {
+        if &header[4..8] == b"moov"
+            && size
+                > (policy
+                    .metadata_bytes
+                    .min(MAX_METADATA)
+                    .saturating_sub(output.len())) as u64
+        {
+            mp4_compact::append_moov(
+                file,
+                offset + header_len,
+                offset + size,
+                &mut output,
+                policy,
+                control,
+                selected,
+            )?;
+            compact = true;
+        } else if matches!(&header[4..8], b"ftyp" | b"moov") {
             append(file, offset, size, &mut output, policy)?;
         }
         offset += size;
@@ -535,10 +569,14 @@ mod tests {
 
         let mut old_policy = policy;
         old_policy.metadata_bytes = 8 * 1024 * 1024;
-        let error =
+        let (_, compact) =
             read_metadata_with_context(file.path(), &old_policy, &crate::WorkControl::default())
-                .unwrap_err();
-        assert!(error.to_string().contains("container metadata requires"));
+                .unwrap();
+        assert_eq!(
+            compact.len(),
+            24,
+            "irrelevant free padding should not consume the metadata budget"
+        );
     }
 
     #[test]

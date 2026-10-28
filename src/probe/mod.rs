@@ -339,8 +339,11 @@ pub fn probe_media_source_with_runtime(
     runtime: std::sync::Arc<crate::EngineRuntime>,
     control: crate::WorkControl,
 ) -> anyhow::Result<MediaProbe> {
-    let source = crate::source::MediaSource::open_with_context(path, runtime, control)?;
-    Ok(probe_metadata(path, source.len(), source.as_ref()))
+    control.check()?;
+    let _lease = runtime.admit()?;
+    let (size, bytes) =
+        crate::source::probe_reader::read_metadata_with_context(path, runtime.policy(), &control)?;
+    Ok(probe_metadata(path, size, &bytes))
 }
 
 fn probe_metadata(path: &Path, size_bytes: u64, bytes: &[u8]) -> MediaProbe {

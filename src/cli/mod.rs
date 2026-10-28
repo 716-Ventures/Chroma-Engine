@@ -13,7 +13,7 @@ use crate::output::publish_bytes;
 use crate::packet::{ExtractedChunk, TimeDelta, TimePoint, TimeScale};
 use crate::playback_manifest::{
     MatroskaManifestOptions, Mp4ManifestOptions, build_file_matroska_manifest,
-    build_mp4_playback_manifest,
+    build_file_mp4_playback_manifest,
 };
 use crate::probe::probe_media_source;
 use crate::session::{AudioSelection, PlaybackConstraints, PlaybackTarget, plan_playback};
@@ -204,6 +204,10 @@ enum Command {
         segment_ms: u64,
         #[arg(long, default_value_t = 16_000_000)]
         video_bitrate: u32,
+        #[arg(long, value_parser = clap::value_parser!(u32).range(2..=3840))]
+        max_width: Option<u32>,
+        #[arg(long, value_parser = clap::value_parser!(u32).range(2..=2160))]
+        max_height: Option<u32>,
         #[arg(long, default_value_t = 640_000)]
         audio_bitrate: u32,
         #[arg(long, value_enum, default_value_t = NativeFmp4VideoModeArg::Copy)]
@@ -223,6 +227,10 @@ enum Command {
         segment_ms: u64,
         #[arg(long, default_value_t = 16_000_000)]
         video_bitrate: u32,
+        #[arg(long, value_parser = clap::value_parser!(u32).range(2..=3840))]
+        max_width: Option<u32>,
+        #[arg(long, value_parser = clap::value_parser!(u32).range(2..=2160))]
+        max_height: Option<u32>,
         #[arg(long, default_value_t = 640_000)]
         audio_bitrate: u32,
         #[arg(long, value_enum, default_value_t = NativeFmp4VideoModeArg::Copy)]
@@ -246,6 +254,10 @@ enum Command {
         segment_ms: u64,
         #[arg(long, default_value_t = 16_000_000)]
         video_bitrate: u32,
+        #[arg(long, value_parser = clap::value_parser!(u32).range(2..=3840))]
+        max_width: Option<u32>,
+        #[arg(long, value_parser = clap::value_parser!(u32).range(2..=2160))]
+        max_height: Option<u32>,
         #[arg(long, default_value_t = 640_000)]
         audio_bitrate: u32,
         #[arg(long, value_enum, default_value_t = NativeFmp4VideoModeArg::Copy)]
@@ -266,11 +278,17 @@ enum Command {
         segment_ms: u64,
         #[arg(long, default_value_t = 16_000_000)]
         video_bitrate: u32,
+        #[arg(long, value_parser = clap::value_parser!(u32).range(2..=3840))]
+        max_width: Option<u32>,
+        #[arg(long, value_parser = clap::value_parser!(u32).range(2..=2160))]
+        max_height: Option<u32>,
         #[arg(long, default_value_t = 640_000)]
         audio_bitrate: u32,
         #[arg(long, value_enum, default_value_t = NativeFmp4VideoModeArg::Copy)]
         video_mode: NativeFmp4VideoModeArg,
     },
+    /// Extract authored ASS/SSA, native SRT/WebVTT, sidecars and font resources.
+    SubtitleResources { input: PathBuf, output_dir: PathBuf },
     /// Warm the selected encoder backend.
     Warmup,
     /// Package a source into native HLS VOD output.
@@ -512,14 +530,15 @@ pub fn run() -> Result<()> {
             let source = MappedMediaFile::open_packet_copy(&file)?;
             let bytes = &source;
             let manifest = if looks_like_mp4(bytes.as_ref()) {
-                build_mp4_playback_manifest(
-                    bytes.as_ref(),
+                build_file_mp4_playback_manifest(
+                    bytes,
                     &file,
                     Mp4ManifestOptions {
                         chunk_target_ms: target_ms,
                         include_audio,
                     },
                 )
+                .ok()
             } else if looks_like_ebml(bytes.as_ref()) {
                 build_file_matroska_manifest(
                     bytes,
@@ -780,6 +799,10 @@ pub fn run() -> Result<()> {
                 bridge_audio_chunk(&source, track.as_deref(), chunk_index, target_ms, bitrate)?;
             println!("{}", serde_json::to_string_pretty(&bridge)?);
         }
+        Command::SubtitleResources { input, output_dir } => {
+            let resources = crate::write_subtitle_resources(&input, &output_dir)?;
+            println!("{}", serde_json::to_string_pretty(&resources)?);
+        }
         Command::TranscodeFmp4Init {
             input,
             output,
@@ -787,6 +810,8 @@ pub fn run() -> Result<()> {
             audio_track,
             segment_ms,
             video_bitrate,
+            max_width,
+            max_height,
             audio_bitrate,
             video_mode,
         } => {
@@ -798,6 +823,8 @@ pub fn run() -> Result<()> {
                     audio_track_id: audio_track,
                     segment_ms,
                     video_bitrate,
+                    max_width,
+                    max_height,
                     audio_bitrate,
                     video_mode: video_mode.into(),
                 },
@@ -812,6 +839,8 @@ pub fn run() -> Result<()> {
             audio_track,
             segment_ms,
             video_bitrate,
+            max_width,
+            max_height,
             audio_bitrate,
             video_mode,
         } => {
@@ -824,6 +853,8 @@ pub fn run() -> Result<()> {
                     audio_track_id: audio_track,
                     segment_ms,
                     video_bitrate,
+                    max_width,
+                    max_height,
                     audio_bitrate,
                     video_mode: video_mode.into(),
                 },
@@ -839,6 +870,8 @@ pub fn run() -> Result<()> {
             audio_track,
             segment_ms,
             video_bitrate,
+            max_width,
+            max_height,
             audio_bitrate,
             video_mode,
         } => {
@@ -852,6 +885,8 @@ pub fn run() -> Result<()> {
                     audio_track_id: audio_track,
                     segment_ms,
                     video_bitrate,
+                    max_width,
+                    max_height,
                     audio_bitrate,
                     video_mode: video_mode.into(),
                 },
@@ -868,6 +903,8 @@ pub fn run() -> Result<()> {
             audio_track,
             segment_ms,
             video_bitrate,
+            max_width,
+            max_height,
             audio_bitrate,
             video_mode,
         } => {
@@ -878,6 +915,8 @@ pub fn run() -> Result<()> {
                     audio_track_id: audio_track,
                     segment_ms,
                     video_bitrate,
+                    max_width,
+                    max_height,
                     audio_bitrate,
                     video_mode: video_mode.into(),
                 },

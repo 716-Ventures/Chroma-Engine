@@ -23,6 +23,7 @@ The target is a native media architecture, not an FFmpeg-compatible facade. Chro
 - `manifest`: emit a native playback manifest with selected tracks, decoder config, and chunk windows.
 - `chunks`: produce keyframe-aligned native chunk windows from compressed packet indexes.
 - `codec-config`: emit decoder initialization facts for a compressed MP4/MOV track.
+- `subtitle-resources`: extract original Matroska ASS/SSA scripts and fonts, native SRT/WebVTT renditions, MP4 WebVTT and common styled mov_text, and same-basename external subtitles. ASS styles, event layers, authored timings and font attachments remain intact; native text renditions retain cue times and WebVTT positioning metadata.
 - `h264-nalus`: emit AVC/H.264 NAL-unit layout for a native chunk.
 - `h264-annex-b`: write a start-code framed H.264 payload for a native chunk.
 - `hevc-annex-b`: write a start-code framed HEVC payload for a native chunk.
@@ -133,6 +134,10 @@ cancellation, audio compatibility changes, and telemetry.
 
 ## Build and Run
 
+Use an optimized `--release` binary for live playback and point the host server at
+that executable. Unoptimized software audio encoding can exceed an HLS segment's
+request deadline even when artifact generation succeeds in isolation.
+
 Source builds require Rust **1.90 or newer** (edition 2024), a native C/C++ build toolchain,
 and **libdav1d 1.3+** discoverable through `pkg-config`. This is a native dependency even
 though AV1 is accessed through a Rust wrapper. Runtime bundles must include the matching
@@ -149,6 +154,7 @@ cargo run --locked -- manifest /path/to/media.mp4 --target-ms 4000
 cargo run --locked -- transcode-plan /path/to/media.mkv --target apple-native
 cargo run --locked -- chunks /path/to/media.mp4 --target-ms 4000
 cargo run --locked -- codec-config /path/to/media.mp4 --track a0
+cargo run --locked -- subtitle-resources /path/to/media.mkv /path/to/subtitle-cache
 cargo run --locked -- decoder-probe
 cargo run --locked -- cache-probe /path/to/chroma-cache
 cargo run --locked --release -- transcode-fmp4-segments /path/to/media.mkv /path/to/chroma-window \
@@ -156,12 +162,28 @@ cargo run --locked --release -- transcode-fmp4-segments /path/to/media.mkv /path
 ```
 
 Use `--video-mode h264` when native video encoding is needed and the source/resource policy
-permits it. For a shell-based small-NAS copy run:
+permits it. All four `transcode-fmp4-*` commands accept request-local `--video-bitrate`
+(bits per second), `--max-width`, and `--max-height`. H.264 dimension limits preserve aspect ratio
+and avoid upscaling; the largest accepted H.264 output is 3840×2160. Omitting dimension limits
+retains the existing 1920×1080 H.264 cap. HDR-to-SDR encoding requires tone mapping and is
+rejected; use compatible video copy to preserve HDR.
+
+For a shell-based small-NAS copy run:
 
 ```sh
 CHROMA_RESOURCE_POLICY=small-nas cargo run --locked --release -- \
   transcode-fmp4-segments /path/to/media.mkv /path/to/chroma-window --count 2 --video-mode copy
 ```
+
+Generate the original H.264/Opus source used by the tvOS playback smoke test without
+FFmpeg or downloaded media:
+
+```sh
+cargo run --locked --example tvos_fixture -- /tmp/chroma-tvos-fixture.mkv
+```
+
+The default duration is 120 seconds. An optional second argument selects 1–3600 seconds;
+the example creates a new file and refuses to overwrite an existing path.
 
 Linux distributors can enable H.264/HEVC VA-API decode and encode with
 `cargo build --locked --release --features linux-vaapi`.

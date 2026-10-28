@@ -473,6 +473,7 @@ dependencies = [
  "criterion",
  "dav1d",
  "insta",
+ "libc",
  "libloading 0.8.9",
  "mediaway-common",
  "mediaway-decoder",

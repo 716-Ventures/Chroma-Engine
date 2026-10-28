@@ -112,6 +112,17 @@ cargo build --locked --release
 ./target/release/chroma-engine transcode-fmp4-segments /media/movie.mkv /cache/chroma/window-001 --start-index 0 --count 2 --video-mode copy
 ```
 
+Configure playback hosts to use this optimized binary. Debug software audio
+bridges may generate valid fragments more slowly than the player's HLS request
+deadline. Compare generation time with media duration on representative sources.
+
+MP4 manifest tracks optionally include `peakBitrateBps`, computed from the same
+bounded sample-size tables and normalized chunk windows used for packaging. It
+describes elementary-stream bytes before mux overhead. Hosts should combine the
+selected tracks and allow packaging overhead when declaring HLS `BANDWIDTH`;
+an arbitrary fixed value can cause AVFoundation to reject valid high-bitrate
+segments. Older or sparse manifests may omit this field.
+
 These are POSIX shell examples; substitute your paths and use `chroma-engine.exe`
 on Windows. The segment window must exist in the source. Choose `h264` instead of
 `copy` only when conversion is required and supported by the source and policy.
@@ -219,6 +230,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+For H.264 output, set `video_mode: NativeFmp4VideoMode::H264` and pass the
+request's `video_bitrate` in bits per second plus `max_width` / `max_height` in
+`NativeFmp4TranscodeOptions`. Bounds are inclusive: 2–3840 pixels wide,
+2–2160 pixels high, and 1–100,000,000 bits per second. Scaling preserves the
+source aspect ratio and avoids upscaling, using even dimensions of at least two pixels.
+Absent dimension limits retain the legacy 1920×1080 cap; absent explicit
+bitrate retains the options' default. Each CLI `transcode-fmp4-*` variant
+accepts the equivalent `--video-bitrate`, `--max-width`, and `--max-height`
+flags. Include these choices in every host cache key and pass the same
+options to initialization and later segments. Do not change process-global
+environment variables for individual playback requests. HDR-to-SDR conversion
+is rejected until a tone-mapping path is available; compatible video copy
+preserves the original HDR stream.
 
 This writes only the first window, not a full-movie VOD package. Keep the session
 alive and use `write_segment` or `write_segments` for subsequent windows. Generate

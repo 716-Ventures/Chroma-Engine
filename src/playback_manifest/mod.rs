@@ -8,7 +8,9 @@ use crate::{
         MatroskaTrack, MatroskaTrackKind, parse_basic_metadata as parse_matroska_basic_metadata,
         parse_chunk_plan as parse_matroska_chunk_plan,
     },
-    container::mp4::{Mp4TrackKind, parse_basic_metadata, parse_chunk_plan, parse_codec_config},
+    container::mp4::{
+        Mp4TrackKind, parse_basic_metadata, parse_chunk_plan_with_peak_bitrate, parse_codec_config,
+    },
     packet::NativeChunk,
 };
 
@@ -57,6 +59,10 @@ pub struct ManifestTrack {
     pub config_box: Option<String>,
     /// Hex-encoded decoder configuration bytes.
     pub decoder_config_hex: Option<String>,
+    /// Maximum elementary-stream chunk bitrate, excluding mux overhead.
+    /// Available when the bounded container sample tables provide packet sizes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak_bitrate_bps: Option<u64>,
     /// Keyframe-aligned chunks for this track.
     pub chunks: Vec<NativeChunk>,
 }
@@ -131,6 +137,44 @@ pub fn build_mp4_playback_manifest(
     })
 }
 
+/// Build file-backed MP4 manifests one track at a time, retaining only headers
+/// and the current track's exact sample tables for oversized multi-track sources.
+pub(crate) fn build_file_mp4_playback_manifest(
+    source: &crate::source::MediaSource,
+    source_path: &Path,
+    options: Mp4ManifestOptions,
+) -> anyhow::Result<NativePlaybackManifest> {
+    let metadata = parse_basic_metadata(source.as_ref());
+    let mut ids = Vec::new();
+    if metadata
+        .tracks
+        .iter()
+        .any(|track| track.kind == Mp4TrackKind::Video)
+    {
+        ids.push("v0".to_string());
+    }
+    if options.include_audio {
+        ids.extend(mp4_audio_track_ids(&metadata.tracks));
+    }
+    let mut tracks = Vec::new();
+    for id in ids {
+        let selected = source.mp4_metadata_for_tracks(&[&id])?;
+        if let Some(track) = manifest_track(&selected, &id, options.chunk_target_ms) {
+            tracks.push(track);
+        } else if id == "v0" {
+            anyhow::bail!("missing MP4 video manifest track");
+        }
+    }
+    source.validate_current()?;
+    Ok(NativePlaybackManifest {
+        schema_version: 2,
+        source_path: source_path.display().to_string(),
+        duration_ms: metadata.duration_ms,
+        chunk_target_ms: options.chunk_target_ms,
+        tracks,
+    })
+}
+
 /// Builds a native playback manifest for a Matroska/WebM source.
 pub(crate) fn build_file_matroska_manifest(
     source: &crate::source::MediaSource,
@@ -164,6 +208,7 @@ pub(crate) fn build_file_matroska_manifest(
             forced: track.forced,
             config_box: matroska_config_box(track, private).map(str::to_string),
             decoder_config_hex: private.map(hex_string),
+            peak_bitrate_bps: None,
             chunks: source
                 .chunk_plan(Some(&id), options.chunk_target_ms)?
                 .chunks,
@@ -273,7 +318,8 @@ fn next_semantic_track_id(prefix: &str, counter: &mut u32) -> String {
 
 fn manifest_track(bytes: &[u8], track_id: &str, target_ms: u64) -> Option<ManifestTrack> {
     let config = parse_codec_config(bytes, Some(track_id))?;
-    let plan = parse_chunk_plan(bytes, Some(track_id), target_ms)?;
+    let (plan, peak_bitrate_bps) =
+        parse_chunk_plan_with_peak_bitrate(bytes, Some(track_id), target_ms)?;
     let metadata = parse_basic_metadata(bytes);
     let track_meta = mp4_track_by_semantic_id(&metadata.tracks, track_id);
     let codec_string = config
@@ -299,6 +345,7 @@ fn manifest_track(bytes: &[u8], track_id: &str, target_ms: u64) -> Option<Manife
         forced: track_meta.map(|track| track.forced).unwrap_or(false),
         config_box: config.config_box,
         decoder_config_hex: config.description_hex,
+        peak_bitrate_bps,
         chunks: plan.chunks,
     })
 }
@@ -390,6 +437,7 @@ fn matroska_manifest_track(
         forced: track.forced,
         config_box: matroska_config_box(track, private).map(str::to_string),
         decoder_config_hex: private.map(hex_string),
+        peak_bitrate_bps: None,
         chunks,
     })
 }

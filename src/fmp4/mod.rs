@@ -930,7 +930,12 @@ fn be_i32(out: &mut Vec<u8>, v: i32) {
 }
 
 fn rescale_time(units: u64, from_units_per_second: u32, to_units_per_second: u32) -> u64 {
-    units.saturating_mul(u64::from(to_units_per_second)) / u64::from(from_units_per_second.max(1))
+    // Nanosecond source clocks overflow a u64 intermediate after about 18 seconds,
+    // even when converting back into the same timescale. Clamp only the final
+    // rescaled value so late HLS fragments retain their original decode timeline.
+    let scaled = u128::from(units) * u128::from(to_units_per_second)
+        / u128::from(from_units_per_second.max(1));
+    scaled.min(u128::from(u64::MAX)) as u64
 }
 
 #[cfg(test)]
@@ -1507,6 +1512,23 @@ mod tests {
         assert_eq!(track.payload, b"idrp");
         assert_eq!(track.samples[0].flags, 0x0200_0000);
         assert_eq!(track.samples[1].flags, 0x0101_0000);
+    }
+
+    #[test]
+    fn rescaling_preserves_late_nanosecond_decode_times_without_intermediate_overflow() {
+        assert_eq!(
+            rescale_time(108_000_000_000, 1_000_000_000, 1_000_000_000),
+            108_000_000_000
+        );
+        assert_eq!(
+            rescale_time(108_000_000_000, 1_000_000_000, 90_000),
+            9_720_000
+        );
+        assert_eq!(
+            rescale_time(u64::MAX, 1_000_000_000, 1_000_000_000),
+            u64::MAX
+        );
+        assert_eq!(rescale_time(u64::MAX, 1, 1_000_000_000), u64::MAX);
     }
 
     #[test]

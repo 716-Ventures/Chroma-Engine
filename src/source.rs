@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::{
     fs::{self, File},
     io,
@@ -98,6 +99,7 @@ pub struct MediaSource {
     identity: MediaSourceIdentity,
     len: u64,
     bytes: Vec<u8>,
+    compact_mp4: bool,
     file: File,
 }
 
@@ -136,6 +138,19 @@ impl MediaSource {
     pub(crate) fn check_work(&self) -> Result<()> {
         Ok(self.control.check()?)
     }
+    /// Oversized multi-track MP4s keep only headers resident; selected tables
+    /// are loaded losslessly on demand under the same metadata budget.
+    pub(crate) fn mp4_metadata_for_tracks(&self, tracks: &[&str]) -> Result<Cow<'_, [u8]>> {
+        if !self.compact_mp4 {
+            return Ok(Cow::Borrowed(self.as_ref()));
+        }
+        self.validate_current()?;
+        let (_, bytes, _) =
+            probe_reader::read_metadata_view(&self.path, self.policy(), &self.control, tracks)?;
+        self.validate_current()?;
+        Ok(Cow::Owned(bytes))
+    }
+
     pub(crate) fn chunk_plan(
         &self,
         track: Option<&str>,
@@ -146,7 +161,8 @@ impl MediaSource {
         }
         match crate::container::sniff_container(self.as_ref()) {
             crate::container::ContainerKind::Mp4 | crate::container::ContainerKind::Mov => {
-                crate::container::mp4::parse_chunk_plan(self.as_ref(), track, target_ms)
+                let metadata = self.mp4_metadata_for_tracks(&[track.unwrap_or("v0")])?;
+                crate::container::mp4::parse_chunk_plan(&metadata, track, target_ms)
                     .ok_or_else(|| anyhow::anyhow!("missing MP4 chunk plan"))
             }
             crate::container::ContainerKind::Matroska | crate::container::ContainerKind::Webm => {
@@ -172,7 +188,8 @@ impl MediaSource {
             .find(|chunk| chunk.index == index)
             .ok_or_else(|| anyhow::anyhow!("chunk {index} is out of range"))?;
         let (id, packets) = if crate::container::mp4::looks_like_mp4(self.as_ref()) {
-            let track = crate::container::mp4::parse_packet_track(self.as_ref(), track)
+            let metadata = self.mp4_metadata_for_tracks(&[track.unwrap_or("v0")])?;
+            let track = crate::container::mp4::parse_packet_track(&metadata, track)
                 .ok_or_else(|| anyhow::anyhow!("missing MP4 packet track"))?;
             (track.track_id, track.packets)
         } else {
@@ -272,8 +289,8 @@ impl MediaSource {
         let lease = runtime.admit()?;
         let file = File::open(path)?;
         let identity = MediaSourceIdentity::from_metadata(&file.metadata()?);
-        let (_, metadata) =
-            probe_reader::read_metadata_with_context(path, runtime.policy(), &control)?;
+        let (_, metadata, compact_mp4) =
+            probe_reader::read_metadata_view(path, runtime.policy(), &control, &[])?;
         let source = Self {
             read_bytes: AtomicU64::new(0),
             read_operations: AtomicU64::new(0),
@@ -286,6 +303,7 @@ impl MediaSource {
             len: identity.len,
             identity,
             bytes: metadata,
+            compact_mp4,
             file,
         };
         source.validate_current()?;

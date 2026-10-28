@@ -9,8 +9,8 @@ Dropping a source session releases admission. Busy admission is a retryable
 validated policy, not an immediate retry loop.
 
 Session convenience entrypoints share a process-local runtime. Use
-`probe_media_source_with_runtime` for admission-controlled probing; the lightweight
-`probe_media_source` helper is not a shared admission reservation. Set `CHROMA_RESOURCE_POLICY`
+`probe_media_source_with_runtime` to use the host's shared admission pool; the
+`probe_media_source` convenience helper uses the process-global runtime. Set `CHROMA_RESOURCE_POLICY`
 **before its first use**: `small-nas` selects the copy-first profile, or provide a
 JSON object using the camelCase field names in `ResourcePolicy`. Missing fields
 use desktop defaults. Inconsistent or zero budgets fail before media opens.
@@ -85,6 +85,14 @@ Run `cache-probe` when choosing storage. Native transcode write APIs also check
 each destination directory before rendering and cache that result for the
 session. Hard-link/no-replace support is required; use local cache storage when
 SMB/NFS/appliance shares do not supply it.
+
+MP4 metadata limits apply to the owned source view, rather than the sum of every
+track's packet tables on disk. When a multi-track movie exceeds that ceiling, the
+engine retains bounded track headers for probing and loads only requested tracks'
+original timing/offset tables for packet work. Selected tables still obey the same
+metadata, parser-depth, track, sample, and index budgets. A single oversized selected
+track is rejected; the limit is not raised. Optional probe fields derived from packet
+tables can be absent in this header-only view. Source media is never rewritten.
 
 ## Timing, color and measurements
 
