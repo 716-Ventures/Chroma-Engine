@@ -1,0 +1,218 @@
+{
+  "schemaVersion": 1,
+  "qualifiedDate": "2026-10-29",
+  "engineSha256": "9d1a091b2f97ed5b426dac0265c703ac51e9477e19cc4381a19ba30f1cab4f0f",
+  "scope": "Native audio/visual ranges with neutral fixture identifiers; no source paths, titles, library identifiers, captions or source frames.",
+  "audio": {
+    "cases": [
+      {
+        "fixture": "intro-fixture-01",
+        "seconds": 0.439,
+        "returnCode": 0,
+        "cacheState": "previous acoustic fingerprints cached; uncontrolled NAS/OS cache",
+        "markers": [
+          {
+            "type": "credits",
+            "startTimeOffset": 1331220,
+            "endTimeOffset": 1419700,
+            "confidence": 0.9714027014239366,
+            "method": "native-audio-repetition-v1",
+            "referenceCount": 2
+          }
+        ],
+        "notices": []
+      },
+      {
+        "fixture": "intro-fixture-02",
+        "seconds": 0.37,
+        "returnCode": 0,
+        "cacheState": "previous acoustic fingerprints cached; uncontrolled NAS/OS cache",
+        "markers": [
+          {
+            "type": "intro",
+            "startTimeOffset": 1728,
+            "endTimeOffset": 89408,
+            "confidence": 0.9788377591851583,
+            "method": "native-audio-repetition-v1",
+            "referenceCount": 2
+          },
+          {
+            "type": "credits",
+            "startTimeOffset": 1280384,
+            "endTimeOffset": 1354624,
+            "confidence": 0.9822757889652212,
+            "method": "native-audio-repetition-v1",
+            "referenceCount": 2
+          }
+        ],
+        "notices": []
+      },
+      {
+        "fixture": "unrelated-program-negative",
+        "seconds": 0.368,
+        "returnCode": 0,
+        "cacheState": "previous acoustic fingerprints cached; uncontrolled NAS/OS cache",
+        "markers": [],
+        "notices": []
+      }
+    ],
+    "freshAACWorkloadSeconds": 39.258,
+    "oldAACFirstSourceDeadlineSeconds": 240,
+    "firstEAC3WorkloadSeconds": 16.707,
+    "timingCaveat": "Uncontrolled NAS/OS cache; final hash-pinned audio cases reuse exact source-identity acoustic fingerprints."
+  },
+  "visual": {
+    "qualificationEngineSha256": "bbf894e7885bb372f4b2a83cb78e5da24f25413ad5134068d67f2fb4c025cb17",
+    "cases": [
+      {
+        "fixture": "skip-film-01",
+        "exitCode": 0,
+        "wallSeconds": 50.447488708,
+        "durationMs": 7876896,
+        "markers": [
+          {
+            "type": "credits",
+            "startTimeOffset": 7546956,
+            "endTimeOffset": 7576360,
+            "confidence": 0.9454162466474736,
+            "method": "native-visual-rolling-credits-v1",
+            "referenceCount": 0
+          },
+          {
+            "type": "credits",
+            "startTimeOffset": 7580990,
+            "endTimeOffset": 7630414,
+            "confidence": 0.9430900233482757,
+            "method": "native-visual-rolling-credits-v1",
+            "referenceCount": 0
+          },
+          {
+            "type": "credits",
+            "startTimeOffset": 7683968,
+            "endTimeOffset": 7754413,
+            "confidence": 0.9380636527387771,
+            "method": "native-visual-rolling-credits-v1",
+            "referenceCount": 0
+          },
+          {
+            "type": "credits",
+            "startTimeOffset": 7755915,
+            "endTimeOffset": 7789448,
+            "confidence": 0.9372626355453901,
+            "method": "native-visual-rolling-credits-v1",
+            "referenceCount": 0
+          },
+          {
+            "type": "credits",
+            "startTimeOffset": 7792952,
+            "endTimeOffset": 7817476,
+            "confidence": 0.9380535862396534,
+            "method": "native-visual-rolling-credits-v1",
+            "referenceCount": 0
+          },
+          {
+            "type": "credits",
+            "startTimeOffset": 7823858,
+            "endTimeOffset": 7860394,
+            "confidence": 0.9370660673390658,
+            "method": "native-visual-rolling-credits-v1",
+            "referenceCount": 0
+          }
+        ],
+        "notices": []
+      },
+      {
+        "fixture": "skip-film-02",
+        "exitCode": 0,
+        "wallSeconds": 12.199037707999999,
+        "durationMs": 7180966,
+        "markers": [
+          {
+            "type": "credits",
+            "startTimeOffset": 7056967,
+            "endTimeOffset": 7127412,
+            "confidence": 0.9422977756696591,
+            "method": "native-visual-rolling-credits-v1",
+            "referenceCount": 0
+          },
+          {
+            "type": "credits",
+            "startTimeOffset": 7128913,
+            "endTimeOffset": 7172457,
+            "confidence": 0.9392479268403399,
+            "method": "native-visual-rolling-credits-v1",
+            "referenceCount": 0
+          }
+        ],
+        "notices": []
+      }
+    ],
+    "ownedPositive": {
+      "observedRange": {
+        "type": "credits",
+        "startTimeOffset": 78000,
+        "endTimeOffset": 107500,
+        "confidence": 0.9656485914643371,
+        "method": "native-visual-rolling-credits-v1",
+        "referenceCount": 0
+      },
+      "trueCreditsStartMs": 75000,
+      "trueCreditsEndMs": 108000,
+      "postCreditSceneStartMs": 108000,
+      "postCreditSceneEndMs": 120000
+    }
+  },
+  "finalBinaryServerAPI": {
+    "initialSeconds": 0.03915037500000001,
+    "initialState": "queued",
+    "events": [
+      {
+        "seconds": 0.052,
+        "status": "running",
+        "markerCount": 0
+      },
+      {
+        "seconds": 14.488,
+        "status": "ready",
+        "markerCount": 2
+      }
+    ],
+    "coalescedResponseStates": [
+      "running",
+      "running",
+      "running",
+      "running",
+      "running",
+      "running",
+      "running",
+      "running"
+    ],
+    "foregroundResponseSeconds": 0.02849012499999999,
+    "preemptedToQueued": true,
+    "restartResponseSeconds": 0.001637125000000017,
+    "final": {
+      "status": "ready"
+    },
+    "markers": [
+      {
+        "type": "credits",
+        "startTimeOffset": 7056967,
+        "endTimeOffset": 7127412
+      },
+      {
+        "type": "credits",
+        "startTimeOffset": 7128913,
+        "endTimeOffset": 7172457
+      }
+    ]
+  },
+  "verification": {
+    "engineTopLevelPassed": 414,
+    "engineRawIncludingNestedChild": 415,
+    "engineIntentionalIgnored": 8,
+    "aacLibraryPassed": 94,
+    "aacLibraryIntentionalIgnored": 4,
+    "strictClippy": true,
+    "optimizedBuild": true
+  }
+}

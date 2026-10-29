@@ -12,3 +12,11 @@ one-shot API is unchanged. Streaming work is serial (one caller-owned thread).
 
 Final padding and the 1024-sample codec delay are generated once at EOS. Containers
 must represent that delay separately from coded access-unit duration.
+
+`src/dsp.rs` also replaces the standard 128/1024-coefficient decoder IMDCT's
+direct quadratic evaluation with a safe radix-2 FFT/DCT-IV implementation and
+cached twiddles. The original direct evaluation remains an independent numerical
+oracle and the fallback for other lengths. Impulse/random transform comparison,
+TDAC overlap reconstruction and known AAC access-unit PCM tests cover equivalence.
+This makes bounded background acoustic fingerprinting practical without changing
+the source codec, synthesis scaling, encoder API or licensing.

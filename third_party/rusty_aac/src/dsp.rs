@@ -4,8 +4,9 @@
 //! they're written straight from the spec and checked by the MDCT↔IMDCT
 //! perfect-reconstruction (TDAC) property.
 //!
-//! The IMDCT here is a direct O(N²) evaluation — correct and clear; it can be
-//! swapped for an FFT-based fast path later without changing results.
+//! AAC's standard long/short IMDCTs use a cached, safe radix-2 DCT-IV fast
+//! path. The original direct O(N²) evaluation remains the independent oracle
+//! and fallback for uncommon transform sizes.
 
 // These primitives are exercised by the tests now and wired into the decode
 // path in the spectral/synthesis stages; allow until then.
@@ -30,6 +31,25 @@ pub fn sf_gain(sf: i32) -> f32 {
 /// IMDCT (ISO 14496-3 §4.6.11.2): `N/2` spectral coefficients → `N` time
 /// samples. `out[i] = (2/N)·Σ_k spec[k]·cos((2π/N)(i+n0)(k+½))`, `n0=(N/2+1)/2`.
 pub fn imdct(spec: &[f32]) -> Vec<f32> {
+    // Only the two codec-defined sizes enter this path. Arbitrary public DSP
+    // callers retain the original direct transform and allocation behavior.
+    let twiddles = match spec.len() {
+        1024 => {
+            static LONG: OnceLock<ImdctTwiddles> = OnceLock::new();
+            LONG.get_or_init(|| ImdctTwiddles::build(1024))
+        }
+        128 => {
+            static SHORT: OnceLock<ImdctTwiddles> = OnceLock::new();
+            SHORT.get_or_init(|| ImdctTwiddles::build(128))
+        }
+        _ => return imdct_direct(spec),
+    };
+    imdct_fast(spec, twiddles)
+}
+
+// Preserve the original mathematical implementation as a genuinely independent
+// numerical reference, rather than comparing two rearrangements of one FFT.
+fn imdct_direct(spec: &[f32]) -> Vec<f32> {
     let half = spec.len();
     let n = half * 2;
     if n == 0 {
@@ -46,6 +66,81 @@ pub fn imdct(spec: &[f32]) -> Vec<f32> {
             acc += s as f64 * (a * (k as f64 + 0.5)).cos();
         }
         *o = (scale * acc) as f32;
+    }
+    out
+}
+
+/// DCT-IV via a zero-padded 2L-point complex FFT. Pre-rotation by
+/// exp(-i*pi*k/(2L)) and post-rotation by exp(-i*pi*(j+1/2)/(2L)) give
+/// C[j] = sum_k X[k] cos(pi/L * (j+1/2) * (k+1/2)). The IMDCT is the
+/// shifted anti-symmetric extension of C divided by L.
+struct ImdctTwiddles {
+    pre_c: Vec<f64>,
+    pre_s: Vec<f64>,
+    post_c: Vec<f64>,
+    post_s: Vec<f64>,
+    fft_c: Vec<f64>,
+    fft_s: Vec<f64>,
+}
+impl ImdctTwiddles {
+    fn build(l: usize) -> Self {
+        let (mut pre_c, mut pre_s, mut post_c, mut post_s) = (
+            Vec::with_capacity(l),
+            Vec::with_capacity(l),
+            Vec::with_capacity(l),
+            Vec::with_capacity(l),
+        );
+        for k in 0..l {
+            let before = PI * k as f64 / (2 * l) as f64;
+            let after = PI * (k as f64 + 0.5) / (2 * l) as f64;
+            pre_c.push(before.cos());
+            pre_s.push(before.sin());
+            post_c.push(after.cos());
+            post_s.push(after.sin());
+        }
+        let (mut fft_c, mut fft_s) = (Vec::with_capacity(2 * l - 1), Vec::with_capacity(2 * l - 1));
+        let mut width = 2;
+        while width <= 2 * l {
+            for k in 0..width / 2 {
+                let angle = -2.0 * PI * k as f64 / width as f64;
+                fft_c.push(angle.cos());
+                fft_s.push(angle.sin());
+            }
+            width *= 2;
+        }
+        Self {
+            pre_c,
+            pre_s,
+            post_c,
+            post_s,
+            fft_c,
+            fft_s,
+        }
+    }
+}
+fn imdct_fast(spec: &[f32], tw: &ImdctTwiddles) -> Vec<f32> {
+    let l = spec.len();
+    let (mut re, mut im) = (vec![0.0; 2 * l], vec![0.0; 2 * l]);
+    for (k, &value) in spec.iter().enumerate() {
+        re[k] = f64::from(value) * tw.pre_c[k];
+        im[k] = -f64::from(value) * tw.pre_s[k];
+    }
+    fft(&mut re, &mut im, &tw.fft_c, &tw.fft_s);
+    // Reuse the first L real slots for the normalized DCT-IV; the FFT's
+    // imaginary slots are no longer needed after the rotation at each index.
+    for k in 0..l {
+        re[k] = (re[k] * tw.post_c[k] + im[k] * tw.post_s[k]) / l as f64;
+    }
+    let mut out = vec![0.0; 2 * l];
+    for (i, value) in out.iter_mut().enumerate() {
+        let j = i + l / 2;
+        *value = if j < l {
+            re[j]
+        } else if j < 2 * l {
+            -re[2 * l - 1 - j]
+        } else {
+            -re[j - 2 * l]
+        } as f32;
     }
     out
 }
@@ -298,6 +393,103 @@ mod tests {
                         b[k]
                     );
                 }
+            }
+        }
+    }
+
+    fn assert_transform_equal(spec: &[f32]) {
+        let reference = imdct_direct(spec);
+        let fast = imdct(spec);
+        assert_eq!(reference.len(), fast.len());
+        for (index, (want, got)) in reference.iter().zip(&fast).enumerate() {
+            assert!(
+                (want - got).abs() <= 2e-6 * (1.0 + want.abs()),
+                "IMDCT size {} sample {index}: {got} != {want}",
+                spec.len()
+            );
+        }
+    }
+
+    #[test]
+    fn fast_imdct_matches_direct_long_short_random_impulse_and_fallback() {
+        for len in [128usize, 1024] {
+            assert_transform_equal(&vec![0.0; len]);
+            for index in [0, len / 2, len - 1] {
+                let mut spec = vec![0.0; len];
+                spec[index] = 37.0;
+                assert_transform_equal(&spec);
+            }
+            for seed in [0x1234abcd_u64, 0x987654321_u64] {
+                let mut state = seed;
+                let spec = (0..len)
+                    .map(|_| {
+                        state ^= state << 13;
+                        state ^= state >> 7;
+                        state ^= state << 17;
+                        ((state >> 32) as i32 as f64 / i32::MAX as f64 * 64.0) as f32
+                    })
+                    .collect::<Vec<_>>();
+                assert_transform_equal(&spec);
+            }
+        }
+        for len in [0usize, 3, 32, 960] {
+            let spec = vec![0.25; len];
+            assert_eq!(imdct(&spec), imdct_direct(&spec));
+        }
+    }
+
+    #[test]
+    fn fast_long_short_filterbanks_preserve_direct_tdac_and_overlap() {
+        for n in [256usize, 2048] {
+            let half = n / 2;
+            let win = sine_window(n);
+            let len = 5 * n;
+            let signal = (0..len)
+                .map(|i| ((i as f64 * 0.071).sin() * 0.3 + (i as f64 * 0.193).cos() * 0.2) as f32)
+                .collect::<Vec<_>>();
+            let mut got = vec![0f32; len];
+            let mut expected = vec![0f32; len];
+            for offset in (0..=len - n).step_by(half) {
+                let framed = (0..n)
+                    .map(|i| signal[offset + i] * win[i])
+                    .collect::<Vec<_>>();
+                let spectrum = mdct(&framed);
+                let direct = imdct_direct(&spectrum);
+                let fast = imdct(&spectrum);
+                for i in 0..n {
+                    got[offset + i] += fast[i] * win[i];
+                    expected[offset + i] += direct[i] * win[i];
+                }
+            }
+            for i in n..len - n {
+                assert!((got[i] - expected[i]).abs() < 2e-6);
+                assert!((got[i] - signal[i]).abs() < 2e-5);
+            }
+        }
+    }
+
+    #[test]
+    fn native_aac_pcm_fixture_retains_independent_direct_synthesis_across_packets() {
+        // Original six-byte mono ONLY_LONG access unit, not source media.
+        // Its independently known spectrum has X[0]=-1 and all other bins zero.
+        let packet = [0x00, 0xC8, 0x00, 0x84, 0x21, 0x1E];
+        let mut decoder = crate::AacDecoder::with_config_bytes(&[0x11, 0x88]).unwrap();
+        let mut spec = vec![0.0; 1024];
+        spec[0] = -1.0;
+        let time = imdct_direct(&spec);
+        let win = sine_window(2048);
+        let mut tail = vec![0.0f32; 1024];
+        for _ in 0..3 {
+            let decoded = decoder.decode(&packet, None).unwrap();
+            assert_eq!(decoded.channels, 1);
+            assert_eq!(decoded.samples.len(), 1024);
+            for n in 0..1024 {
+                let expected = time[n] * win[n] / 32768.0 + tail[n];
+                assert!(
+                    (decoded.samples[n] - expected).abs() < 1e-10,
+                    "PCM changed at sample {n}"
+                );
+                tail[n] = time[n + 1024] * win[n + 1024] / 32768.0;
             }
         }
     }

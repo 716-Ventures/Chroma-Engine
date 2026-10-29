@@ -43,6 +43,16 @@ enum Command {
     CacheProbe { directory: PathBuf },
     /// Emit native Chroma media probe JSON.
     Probe { file: PathBuf },
+    /// Analyze repeated intros/endings and high-confidence rolling credits without blocking playback.
+    AnalyzePlaybackMarkers {
+        input: PathBuf,
+        #[arg(long, value_name = "EPISODE")]
+        reference: Vec<PathBuf>,
+        #[arg(long)]
+        cache_dir: PathBuf,
+        #[arg(long, default_value_t = false)]
+        audio_only: bool,
+    },
     /// Emit a native Chroma playback pipeline plan.
     Plan {
         file: PathBuf,
@@ -465,6 +475,15 @@ pub fn run() -> Result<()> {
                 "{}",
                 serde_json::json!({"compatible": true, "publication": "hard-link-no-replace"})
             );
+        }
+        Command::AnalyzePlaybackMarkers {
+            input,
+            reference,
+            cache_dir,
+            audio_only,
+        } => {
+            let result = crate::analysis::analyze(&input, &reference, &cache_dir, audio_only)?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
         }
         Command::Probe { file } => {
             let probe = probe_media_source(&file)?;

@@ -477,7 +477,22 @@ fn parse_moov(payload: &[u8], meta: &mut Mp4BasicMetadata) {
                 meta.tracks.push(track);
             }
         } else if atom.kind == *b"chpl" {
-            meta.chapters = parse_chpl(atom.payload);
+            let chapters = parse_chpl(atom.payload);
+            if !chapters.is_empty() {
+                meta.chapters = chapters;
+            }
+        } else if atom.kind == *b"udta" && meta.chapters.is_empty() {
+            // Nero/HandBrake commonly stores the chapter list under moov/udta.
+            // The bounded compact reader already preserves this metadata tree.
+            for child in AtomIter::new(atom.payload) {
+                if child.kind == *b"chpl" {
+                    let chapters = parse_chpl(child.payload);
+                    if !chapters.is_empty() {
+                        meta.chapters = chapters;
+                        break;
+                    }
+                }
+            }
         }
     }
 }
@@ -2478,6 +2493,25 @@ mod tests {
         assert_eq!(meta.chapters[1].start_ms, 90_000);
         assert_eq!(meta.chapters[1].end_ms, None);
         assert_eq!(meta.chapters[1].title.as_deref(), Some("Scene 2"));
+    }
+
+    #[test]
+    fn parses_nested_nero_chapters_without_overwriting_a_valid_direct_table() {
+        let nested = atom(b"udta", &chpl(&[(0, "Opening Credits"), (90_000, "Main")]));
+        let mut data = ftyp();
+        data.extend(atom(b"moov", &nested));
+        let meta = parse_basic_metadata(&data);
+        assert_eq!(meta.chapters.len(), 2);
+        assert_eq!(meta.chapters[0].title.as_deref(), Some("Opening Credits"));
+        assert_eq!(meta.chapters[0].end_ms, Some(90_000));
+        let mut body = chpl(&[(0, "Intro"), (60_000, "Episode")]);
+        body.extend(nested);
+        let mut direct = ftyp();
+        direct.extend(atom(b"moov", &body));
+        assert_eq!(
+            parse_basic_metadata(&direct).chapters[0].title.as_deref(),
+            Some("Intro")
+        );
     }
 
     #[test]

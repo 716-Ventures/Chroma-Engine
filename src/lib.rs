@@ -7,6 +7,7 @@
 
 #![warn(missing_docs)]
 
+pub(crate) mod analysis;
 /// Command-line entrypoint support for the `chroma-engine` binary.
 pub mod cli;
 pub(crate) mod codec;

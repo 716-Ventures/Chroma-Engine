@@ -36,6 +36,7 @@ rusty_aac = { version = "=0.5.0", path = "third_party/rusty_aac", default-featur
 rust_h265 = "0.1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+sha2 = "0.10"
 tempfile = "3.12"
 thiserror = "1.0"
 time = { version = "0.3", features = ["formatting", "parsing", "serde"] }

@@ -17,6 +17,7 @@ covering the engine's philosophy, use cases, public APIs, Rust and CLI examples,
 The target is a native media architecture, not an FFmpeg-compatible facade. Chroma Engine owns its API shape, track model, session model, and output strategy; host servers and clients should adapt to the engine when that gives us better speed, stability, or flexibility.
 
 - `probe`: emit a Chroma-native `MediaProbe` manifest with typed tracks, source facts, and capability hints.
+- `analyze-playback-markers`: discover conservative repeated episode openings/endings and rolling credits using native bounded audio/video analysis. Optional reference episodes and source-identity caches keep this separate from playback. See [analysis coverage and verification](docs/audits/2026-10-29-skip-analysis.md).
 - `cache-probe`: check that an output directory supports the engine's hard-link/no-replace publication strategy.
 - `plan`: produce Chroma playback sessions optimized around reusable packet/decode/encode stages.
 - `transcode-plan`: emit the Chroma-native HLS transcode execution contract, including selected tracks, output codecs, executable stages, and missing native capabilities.
