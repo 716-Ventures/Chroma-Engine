@@ -1133,6 +1133,11 @@ fn transcode_prepared_segment(
         .ok_or_else(|| anyhow::anyhow!("transcode segment {index} is out of range"))?;
     let video_start_ms = video_chunk.start.as_millis();
     let video_end_ms = video_start_ms.saturating_add(video_chunk.duration.as_millis());
+    let audio_decode_window = audio_pipeline
+        .as_ref()
+        .map(|pipeline| pipeline.input_window(&prepared.audio_track, video_start_ms, video_end_ms));
+    let (audio_read_start, audio_read_end) =
+        audio_decode_window.unwrap_or((video_start_ms.saturating_sub(1_000), video_end_ms));
     // Share the sparse index and scan interleaved blocks once, with independent
     // video and audio-preroll windows.
     let owned_windows = match &prepared.source_index {
@@ -1140,11 +1145,7 @@ fn transcode_prepared_segment(
             source,
             &[
                 (&prepared.video_track_id, video_start_ms, video_end_ms),
-                (
-                    &prepared.audio_track_id,
-                    video_start_ms.saturating_sub(1_000),
-                    video_end_ms,
-                ),
+                (&prepared.audio_track_id, audio_read_start, audio_read_end),
             ],
         )?),
         PreparedSourceIndex::Mp4 { .. } => None,
@@ -1171,10 +1172,10 @@ fn transcode_prepared_segment(
         source,
         &prepared.audio_track_id,
         audio_packets,
-        video_start_ms,
-        video_end_ms,
+        (video_start_ms, video_end_ms),
         index,
         &prepared.audio_track.codec,
+        audio_decode_window,
     )?;
 
     drop(read_timer);
@@ -1297,24 +1298,26 @@ fn extract_indexed_time_range(
     bytes: &impl PacketSource,
     track_id: &str,
     packets: &[PacketRef],
-    start_ms: u64,
-    end_ms: u64,
+    window: (u64, u64),
     index: u32,
     codec: &str,
+    decode_window: Option<(u64, u64)>,
 ) -> Result<(ExtractedChunk, Vec<u8>)> {
+    let (start_ms, end_ms) = window;
+    let (read_start_ms, read_end_ms) = decode_window.unwrap_or((start_ms, end_ms));
     let decode_start = packets.partition_point(|packet| {
         packet
             .pts
             .as_millis()
             .saturating_add(packet.duration.as_millis().max(1))
-            <= start_ms
+            <= read_start_ms
     });
     if decode_start == packets.len() {
         bail!("audio track has no packets for segment {index}");
     }
     let start = match codec {
         "aac" | "ac3" | "eac3" | "flac" | "alac" => {
-            packets.partition_point(|packet| packet.pts.as_millis() < start_ms)
+            packets.partition_point(|packet| packet.pts.as_millis() < read_start_ms)
         }
         "truehd" => {
             let mut start = 0;
@@ -1331,7 +1334,7 @@ fn extract_indexed_time_range(
         "opus" => 0,
         _ => decode_start,
     };
-    let end = packets.partition_point(|packet| packet.pts.as_millis() < end_ms);
+    let end = packets.partition_point(|packet| packet.pts.as_millis() < read_end_ms);
     if end <= start {
         bail!("audio track has no packets for segment {index}");
     }
@@ -2183,10 +2186,12 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let (first, _) = extract_indexed_time_range(&bytes, "a0", &packets, 0, 50, 0, "eac3")
-            .expect("first packet-copy range");
-        let (second, _) = extract_indexed_time_range(&bytes, "a0", &packets, 50, 110, 1, "eac3")
-            .expect("second packet-copy range");
+        let (first, _) =
+            extract_indexed_time_range(&bytes, "a0", &packets, (0, 50), 0, "eac3", None)
+                .expect("first packet-copy range");
+        let (second, _) =
+            extract_indexed_time_range(&bytes, "a0", &packets, (50, 110), 1, "eac3", None)
+                .expect("second packet-copy range");
 
         assert_eq!(first.chunk.packet_range, PacketRange { start: 0, end: 2 });
         assert_eq!(second.chunk.packet_range, PacketRange { start: 2, end: 4 });
@@ -2210,8 +2215,9 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let (range, _) = extract_indexed_time_range(&bytes, "a0", &packets, 50, 110, 1, "dts")
-            .expect("decoder-backed range");
+        let (range, _) =
+            extract_indexed_time_range(&bytes, "a0", &packets, (50, 110), 1, "dts", None)
+                .expect("decoder-backed range");
 
         assert_eq!(range.chunk.packet_range, PacketRange { start: 1, end: 4 });
     }

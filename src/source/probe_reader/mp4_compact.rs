@@ -20,6 +20,8 @@ struct Reader<'a> {
     budget: ParseBudget,
     selected: &'a [&'a str],
     tracks: [usize; 4],
+    current_video: bool,
+    statistics_remaining: usize,
 }
 
 pub(super) fn append_moov(
@@ -42,15 +44,36 @@ pub(super) fn append_moov(
         };
         prior_tracks[index] += 1;
     }
-    let mut reader = Reader {
-        file,
-        policy,
-        control,
-        budget: ParseBudget::new(policy.parse_limits()),
-        selected,
-        tracks: prior_tracks,
+    let checkpoint = output.len();
+    let build = |output: &mut Vec<u8>, statistics_remaining| {
+        let mut reader = Reader {
+            file,
+            policy,
+            control,
+            budget: ParseBudget::new(policy.parse_limits()),
+            selected,
+            tracks: prior_tracks,
+            current_video: false,
+            statistics_remaining,
+        };
+        reader.container(*b"moov", start, end, output, 0)
     };
-    reader.container(*b"moov", start, end, output, 0)
+    // Essential headers take precedence over optional video statistics. A
+    // bounded second pass can retain STSZ/STTS without copying unrelated track
+    // indexes or making a previously valid header-only probe exceed its limit.
+    build(output, 0)?;
+    if selected.is_empty() {
+        let available = policy
+            .metadata_bytes
+            .min(super::MAX_METADATA)
+            .saturating_sub(output.len())
+            .min(4 * 1024 * 1024);
+        if available > 0 {
+            output.truncate(checkpoint);
+            build(output, available)?;
+        }
+    }
+    Ok(())
 }
 
 impl Reader<'_> {
@@ -153,13 +176,13 @@ impl Reader<'_> {
         while offset < end {
             let current = self.header(offset, end, depth + 1)?;
             offset = current.end;
-            let keep_track = if current.kind == *b"trak" {
+            let track = if current.kind == *b"trak" {
                 let id = self.track_id(&current, depth + 1)?;
-                self.selected.contains(&id.as_str())
+                Some((self.selected.contains(&id.as_str()), id.starts_with('v')))
             } else {
-                false
+                None
             };
-            if keep_track {
+            if track.is_some_and(|(keep, _)| keep) {
                 append(
                     self.file,
                     current.offset,
@@ -171,13 +194,19 @@ impl Reader<'_> {
                 &current.kind,
                 b"trak" | b"mdia" | b"minf" | b"stbl" | b"udta" | b"edts"
             ) {
-                self.container(
+                let previous = self.current_video;
+                if let Some((_, video)) = track {
+                    self.current_video = video;
+                }
+                let result = self.container(
                     current.kind,
                     current.payload,
                     current.end,
                     output,
                     depth + 1,
-                )?;
+                );
+                self.current_video = previous;
+                result?;
             } else if matches!(
                 &current.kind,
                 b"mvhd" | b"tkhd" | b"mdhd" | b"hdlr" | b"stsd" | b"chpl" | b"elst"
@@ -189,6 +218,18 @@ impl Reader<'_> {
                     output,
                     self.policy,
                 )?;
+            } else if self.current_video && matches!(&current.kind, b"stsz" | b"stts") {
+                let size = usize::try_from(current.end - current.offset)?;
+                if size <= self.statistics_remaining {
+                    append(
+                        self.file,
+                        current.offset,
+                        current.end - current.offset,
+                        output,
+                        self.policy,
+                    )?;
+                    self.statistics_remaining -= size;
+                }
             }
         }
         let size = u32::try_from(output.len() - size_offset)?;
@@ -220,6 +261,10 @@ mod tests {
             let mut mdhd = vec![0; 24];
             mdhd[12..16].copy_from_slice(&1000_u32.to_be_bytes());
             mdhd[16..20].copy_from_slice(&7_200_000_u32.to_be_bytes());
+            if index == 0 {
+                mdhd[12..16].copy_from_slice(&24_000_u32.to_be_bytes());
+                mdhd[16..20].copy_from_slice(&172_800_000_u32.to_be_bytes());
+            }
             let mut hdlr = vec![0; 12];
             hdlr[8..12].copy_from_slice(kind);
             let mut entry = vec![0; if index == 0 { 78 } else { 28 }];
@@ -232,7 +277,20 @@ mod tests {
             }
             let mut stsd = vec![0, 0, 0, 0, 0, 0, 0, 1];
             stsd.extend(atom(codec, &entry));
-            let timing = atom(b"stsd", &stsd);
+            let mut timing = atom(b"stsd", &stsd);
+            if index == 0 {
+                let mut sizes = vec![0; 8];
+                sizes.extend_from_slice(&172_800_u32.to_be_bytes());
+                for _ in 0..172_800 {
+                    sizes.extend_from_slice(&1_000_u32.to_be_bytes());
+                }
+                timing.extend(atom(b"stsz", &sizes));
+                let mut duration = vec![0; 4];
+                duration.extend_from_slice(&1_u32.to_be_bytes());
+                duration.extend_from_slice(&172_800_u32.to_be_bytes());
+                duration.extend_from_slice(&1_000_u32.to_be_bytes());
+                timing.extend(atom(b"stts", &duration));
+            }
             let offsets_size = 6 * 1024 * 1024;
             let stbl_size = 8 + timing.len() + offsets_size;
             let minf_size = 8 + stbl_size;
@@ -275,12 +333,14 @@ mod tests {
             super::super::read_metadata_view(file.path(), &policy, &WorkControl::default(), &[])
                 .unwrap();
         assert!(compact);
-        assert!(headers.len() < 16 * 1024);
+        assert!(headers.len() < 1024 * 1024);
         assert!(file.as_file().metadata().unwrap().len() > 100_000_000);
         let metadata = crate::container::mp4::parse_basic_metadata(&headers);
         assert_eq!(metadata.tracks.len(), 17);
         assert_eq!(metadata.tracks[0].width, Some(1920));
         assert_eq!(metadata.tracks[0].codec, "h264");
+        assert_eq!(metadata.tracks[0].frame_rate, Some(24.0));
+        assert_eq!(metadata.tracks[0].bitrate_bps, Some(192_000));
         assert_eq!(
             metadata
                 .tracks
@@ -322,6 +382,23 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("container metadata"));
+    }
+
+    #[test]
+    fn optional_video_statistics_yield_to_a_smaller_header_budget() {
+        let file = large_multitrack_mp4();
+        let policy = ResourcePolicy {
+            metadata_bytes: 32 * 1024,
+            ..ResourcePolicy::default()
+        };
+        let (_, headers, compact) =
+            super::super::read_metadata_view(file.path(), &policy, &WorkControl::default(), &[])
+                .unwrap();
+        let metadata = crate::container::mp4::parse_basic_metadata(&headers);
+        assert!(compact && headers.len() < 32 * 1024);
+        assert_eq!(metadata.tracks.len(), 17);
+        assert_eq!(metadata.tracks[0].width, Some(1920));
+        assert_eq!(metadata.tracks[0].bitrate_bps, None);
     }
 
     #[test]

@@ -241,7 +241,10 @@ bitrate retains the options' default. Each CLI `transcode-fmp4-*` variant
 accepts the equivalent `--video-bitrate`, `--max-width`, and `--max-height`
 flags. Include these choices in every host cache key and pass the same
 options to initialization and later segments. Do not change process-global
-environment variables for individual playback requests. HDR-to-SDR conversion
+environment variables for individual playback requests. VideoToolbox H.264
+sets a hard one-second `DataRateLimits` window in addition to its soft average
+bitrate target; unsupported hard limits cannot silently pass as configured.
+HDR-to-SDR conversion
 is rejected until a tone-mapping path is available; compatible video copy
 preserves the original HDR stream.
 

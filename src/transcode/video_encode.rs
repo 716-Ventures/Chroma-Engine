@@ -860,6 +860,7 @@ fn platform_new_h264_encoder_session(
             objc2_video_toolbox::kVTCompressionPropertyKey_AverageBitRate,
             i32::try_from(bitrate).unwrap_or(i32::MAX),
         )?;
+        set_vt_h264_data_rate_limit(&session, bitrate)?;
         set_vt_property_i32(
             &session,
             objc2_video_toolbox::kVTCompressionPropertyKey_MaxFrameDelayCount,
@@ -1135,6 +1136,35 @@ fn set_vt_property_i32(
 ) -> Result<(), VideoEncodeError> {
     let value = objc2_core_foundation::CFNumber::new_i32(value);
     set_vt_property(session, key, value.as_ref())
+}
+
+#[cfg(target_os = "macos")]
+fn set_vt_h264_data_rate_limit(
+    session: &objc2_video_toolbox::VTCompressionSession,
+    bitrate: u32,
+) -> Result<(), VideoEncodeError> {
+    // AverageBitRate is a soft target. HLS delivery also needs a hard cap on
+    // any contiguous one-second decode window, including complex keyframes.
+    let bytes = objc2_core_foundation::CFNumber::new_i64(i64::from(bitrate.div_ceil(8)));
+    let seconds = objc2_core_foundation::CFNumber::new_f64(1.0);
+    let limits = objc2_core_foundation::CFArray::from_objects(&[&*bytes, &*seconds]);
+    #[allow(unsafe_code)]
+    // SAFETY: DataRateLimits requires an even CFArray of retained CFNumbers
+    // alternating bytes and seconds; the session/key are valid framework types.
+    let status = unsafe {
+        let vt_session = &*(std::ptr::from_ref(session).cast::<objc2_video_toolbox::VTSession>());
+        objc2_video_toolbox::VTSessionSetProperty(
+            vt_session,
+            objc2_video_toolbox::kVTCompressionPropertyKey_DataRateLimits,
+            Some(limits.as_ref()),
+        )
+    };
+    if status != 0 {
+        return Err(VideoEncodeError::BackendUnavailable {
+            reason: format!("VideoToolbox cannot enforce the H.264 data-rate limit ({status})"),
+        });
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -1841,6 +1871,55 @@ mod tests {
                 .is_some_and(|config| {
                     config.first() == Some(&1) && config.windows(2).any(|w| w == [0xe1, 0x00])
                 })
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_h264_session_installs_a_hard_one_second_data_rate_limit() {
+        use objc2_core_foundation::{CFArray, CFNumber, CFRetained, CFType};
+        let encoder = VideoToolboxH264EncoderSession::new(smoke_format(), 500_000).unwrap();
+        let mut raw: *mut CFType = std::ptr::null_mut();
+        #[allow(unsafe_code)]
+        // SAFETY: The encoder owns a valid compression session. CopyProperty
+        // returns a +1 CF object into a correctly typed, writable pointer.
+        let status = unsafe {
+            let session =
+                &*(std::ptr::from_ref(&*encoder.session).cast::<objc2_video_toolbox::VTSession>());
+            objc2_video_toolbox::VTSessionCopyProperty(
+                session,
+                objc2_video_toolbox::kVTCompressionPropertyKey_DataRateLimits,
+                None,
+                std::ptr::from_mut(&mut raw).cast(),
+            )
+        };
+        assert_eq!(status, 0);
+        #[allow(unsafe_code)]
+        // SAFETY: CopyProperty transferred its non-null +1 reference to us.
+        let value = unsafe { CFRetained::from_raw(std::ptr::NonNull::new(raw).unwrap()) };
+        let limits = value.downcast_ref::<CFArray>().unwrap();
+        #[allow(unsafe_code)]
+        // SAFETY: VideoToolbox documents DataRateLimits as CFArray[CFNumber];
+        // every element is therefore a registered CFType, checked below.
+        let limits = unsafe { limits.cast_unchecked::<CFType>() };
+        assert_eq!(limits.len(), 2);
+        assert_eq!(
+            limits
+                .get(0)
+                .unwrap()
+                .downcast_ref::<CFNumber>()
+                .unwrap()
+                .as_i64(),
+            Some(62_500)
+        );
+        assert_eq!(
+            limits
+                .get(1)
+                .unwrap()
+                .downcast_ref::<CFNumber>()
+                .unwrap()
+                .as_f64(),
+            Some(1.0)
         );
     }
 

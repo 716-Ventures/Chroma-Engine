@@ -6,6 +6,11 @@ use crate::transcode::{
 };
 use std::collections::VecDeque;
 
+const AAC_FRAME_SAMPLES: u64 = 1024;
+// Warm both the codec synthesis history and the encoder's causal transient
+// detector before publishing a fresh worker's first AAC access unit.
+const AAC_PREROLL_FRAMES: u64 = 32;
+
 enum Decoder {
     TrueHd(Box<TrueHdAudioDecoderSession>),
     Dts(Box<DtsAudioDecoderSession>),
@@ -35,6 +40,27 @@ impl std::fmt::Debug for AudioPipeline {
 }
 
 impl AudioPipeline {
+    pub(super) fn input_window(
+        &self,
+        track: &PreparedAudioTrack,
+        start_ms: u64,
+        end_ms: u64,
+    ) -> (u64, u64) {
+        let rate = self
+            .format
+            // DTS-HD container headers may describe a higher rate than the
+            // executable Core stream. Plan conservatively until decoded PCM
+            // establishes the actual clock; never expand a malformed zero rate.
+            .map_or(track.sample_rate.clamp(8_000, 48_000), |format| format.sample_rate);
+        let preroll_ms = ((AAC_PREROLL_FRAMES + 2) * AAC_FRAME_SAMPLES * 1000)
+            .div_ceil(u64::from(rate))
+            .saturating_add(250);
+        let lookahead_ms = (4 * AAC_FRAME_SAMPLES * 1000).div_ceil(u64::from(rate));
+        (
+            start_ms.saturating_sub(preroll_ms),
+            end_ms.saturating_add(lookahead_ms),
+        )
+    }
     pub(super) fn new(track: &PreparedAudioTrack) -> Result<Option<Self>> {
         let (codec, decoder) = match track.codec.as_str() {
             "truehd" => (AudioDecodeCodec::TrueHd, Decoder::TrueHd(Box::default())),
@@ -145,7 +171,7 @@ impl AudioPipeline {
                 .and_then(|packet| packets.get(packet.index as usize))
                 .map(|packet| packet.source_offset);
             let previous_frames = output.len();
-            self.feed_pcm(&manifest, &mut output)?;
+            self.feed_pcm(&manifest, eos, &mut output)?;
             output_bytes = output[previous_frames..]
                 .iter()
                 .try_fold(output_bytes, |bytes, frame| {
@@ -158,7 +184,27 @@ impl AudioPipeline {
                 source.policy().output_bytes / 2,
             )?;
         }
-        self.feed_pcm(&manifest, &mut output)?;
+        self.feed_pcm(&manifest, eos, &mut output)?;
+        let format = self
+            .format
+            .ok_or_else(|| anyhow::anyhow!("missing audio format"))?;
+        let (window_start, window_end) = source_window(&manifest, format.sample_rate);
+        let coded_start = if window_start == 0 {
+            0
+        } else {
+            aligned_end(window_start).saturating_add(AAC_FRAME_SAMPLES)
+        };
+        let coded_end = aligned_end(window_end).saturating_add(AAC_FRAME_SAMPLES);
+        if eos {
+            // A legitimately shorter audio track ends in silence rather than a
+            // hole in the globally continuous presentation timeline.
+            self.feed_silence(window_end, &mut output)?;
+        } else if self
+            .next_pcm
+            .is_none_or(|next| next < coded_end.saturating_add(AAC_FRAME_SAMPLES))
+        {
+            bail!("audio source did not supply the bounded AAC lookahead window");
+        }
         let encoder = self
             .encoder
             .as_mut()
@@ -166,9 +212,6 @@ impl AudioPipeline {
         if eos {
             output.extend(encoder.finish()?.frames);
         }
-        let format = self
-            .format
-            .ok_or_else(|| anyhow::anyhow!("missing audio format"))?;
         let anchor = self
             .anchor
             .ok_or_else(|| anyhow::anyhow!("no PCM in segment window"))?;
@@ -176,8 +219,27 @@ impl AudioPipeline {
             frame.timing.start_sample = frame.timing.start_sample.saturating_add(anchor);
             frame.timing.pts.units = frame.timing.pts.units.saturating_add(anchor);
         }
+        // Every worker publishes the same global AAC frame lattice. Preroll
+        // and encoder priming are consumed here; only the initial stream's
+        // priming frame remains for the single init-segment edit list.
+        output.retain(|frame| {
+            frame.timing.start_sample >= coded_start && frame.timing.start_sample < coded_end
+        });
         if output.is_empty() {
             bail!("audio window is too short for streaming AAC lookahead");
+        }
+        if output
+            .first()
+            .is_none_or(|frame| frame.timing.start_sample != coded_start)
+            || output.last().is_none_or(|frame| {
+                frame
+                    .timing
+                    .start_sample
+                    .saturating_add(u64::from(frame.timing.sample_count))
+                    != coded_end
+            })
+        {
+            bail!("AAC output does not cover its complete global segment window");
         }
         let decoder_config = rusty_aac::encode::audio_specific_config_bytes(
             format.sample_rate,
@@ -201,34 +263,44 @@ impl AudioPipeline {
     fn feed_pcm(
         &mut self,
         manifest: &ExtractedChunk,
+        eos: bool,
         output: &mut Vec<EncodedAudioFrame>,
     ) -> Result<()> {
         let Some(format) = self.format else {
             return Ok(());
         };
-        let start = rescale_units(
-            manifest.chunk.start.units,
-            manifest.chunk.start.scale,
-            format.sample_rate,
+        let (start, source_end) = source_window(manifest, format.sample_rate);
+        let anchor = *self.anchor.get_or_insert(
+            start.saturating_sub(AAC_PREROLL_FRAMES * AAC_FRAME_SAMPLES) / AAC_FRAME_SAMPLES
+                * AAC_FRAME_SAMPLES,
         );
-        let end = start.saturating_add(rescale_units(
-            manifest.chunk.duration.units,
-            manifest.chunk.duration.scale,
-            format.sample_rate,
-        ));
-        while let Some(frame) = self.pcm.front() {
+        let end = if eos {
+            source_end
+        } else {
+            aligned_end(source_end).saturating_add(2 * AAC_FRAME_SAMPLES)
+        };
+        self.next_pcm.get_or_insert(anchor);
+        while let Some(frame) = self.pcm.pop_front() {
             let frame_start = frame.timing.start_sample;
             let frame_end = frame_start.saturating_add(u64::from(frame.timing.sample_count));
             if frame_start >= end {
+                self.pcm.push_front(frame);
                 break;
             }
-            let from = frame_start.max(self.next_pcm.unwrap_or(start));
+            let from = frame_start.max(self.next_pcm.unwrap_or(anchor));
             let to = frame_end.min(end);
             if from < to {
                 if self.next_pcm.is_some_and(|next| from > next) {
-                    bail!("audio PCM gap requires a new discontinuity");
+                    if self
+                        .encoder
+                        .as_ref()
+                        .is_some_and(|encoder| encoder.valid_samples() == 0)
+                    {
+                        self.feed_silence(from, output)?;
+                    } else {
+                        bail!("audio PCM gap requires a new discontinuity");
+                    }
                 }
-                self.anchor.get_or_insert(from);
                 let channels = format.channels as usize;
                 let lo = usize::try_from(from - frame_start)?
                     .checked_mul(channels)
@@ -249,19 +321,244 @@ impl AudioPipeline {
                 );
                 self.next_pcm = Some(to);
             }
-            if frame_end <= end {
-                self.pcm.pop_front();
-            } else {
+            if frame_end > end {
+                self.pcm.push_front(frame);
                 break;
             }
         }
         Ok(())
     }
+
+    fn feed_silence(&mut self, end: u64, output: &mut Vec<EncodedAudioFrame>) -> Result<()> {
+        let format = self
+            .format
+            .ok_or_else(|| anyhow::anyhow!("missing audio format"))?;
+        if end.saturating_sub(self.next_pcm.unwrap_or(end))
+            > u64::from(format.sample_rate).saturating_mul(2)
+        {
+            bail!("audio silence padding exceeds the bounded correction window");
+        }
+        let channels = usize::try_from(format.channels)?;
+        let zeros = vec![
+            0_i16;
+            usize::try_from(AAC_FRAME_SAMPLES)?
+                .checked_mul(channels)
+                .ok_or_else(|| anyhow::anyhow!("silence buffer overflow"))?
+        ];
+        while let Some(next) = self.next_pcm.filter(|next| *next < end) {
+            let count = (end - next).min(AAC_FRAME_SAMPLES);
+            let samples = usize::try_from(count)?
+                .checked_mul(channels)
+                .ok_or_else(|| anyhow::anyhow!("silence buffer overflow"))?;
+            output.extend(
+                self.encoder
+                    .as_mut()
+                    .ok_or_else(|| anyhow::anyhow!("missing AAC encoder"))?
+                    .encode(&zeros[..samples])?
+                    .frames,
+            );
+            self.next_pcm = Some(next + count);
+        }
+        Ok(())
+    }
+}
+
+fn aligned_end(samples: u64) -> u64 {
+    samples
+        .div_ceil(AAC_FRAME_SAMPLES)
+        .saturating_mul(AAC_FRAME_SAMPLES)
+}
+
+fn source_window(manifest: &ExtractedChunk, rate: u32) -> (u64, u64) {
+    let start = rescale_units(manifest.chunk.start.units, manifest.chunk.start.scale, rate);
+    let end = rescale_units(
+        manifest
+            .chunk
+            .start
+            .units
+            .saturating_add(manifest.chunk.duration.units),
+        manifest.chunk.start.scale,
+        rate,
+    );
+    (start, end)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn independent_dts_workers_share_one_aac_grid_without_new_priming_or_pcm_seams() {
+        for rate in [44_100, 48_000] {
+            let mut encoder =
+                oxideav_dts::CoreEncoder::new(oxideav_dts::EncoderConfig::new(rate, 2).unwrap())
+                    .unwrap();
+            let pcm = (0..4096)
+                .map(|sample| {
+                    let amplitude = if sample % 2048 < 512 { 0.25 } else { 0.04 };
+                    (f64::from(sample) * 0.071).sin() * amplitude
+                })
+                .collect::<Vec<_>>();
+            let mut pattern = encoder.push(&[&pcm, &pcm]).unwrap();
+            pattern.extend(encoder.flush());
+            // A short authored packet pattern keeps this regression fast while
+            // still exercising two seconds of decoder/encoder state and a real
+            // independent worker restart at a non-AAC-aligned boundary.
+            let core_samples =
+                crate::codec::dts::parse_dts_core_frames(&pattern[0]).unwrap()[0].sample_count;
+            let encoded = pattern
+                .iter()
+                .cycle()
+                .take((rate * 2).div_ceil(core_samples) as usize)
+                .cloned()
+                .collect::<Vec<_>>();
+            let scale = TimeScale {
+                units_per_second: rate,
+            };
+            let mut payload = Vec::new();
+            let mut samples = 0;
+            let packets = encoded
+                .iter()
+                .map(|bytes| {
+                    let start = samples;
+                    let count = crate::codec::dts::parse_dts_core_frames(bytes)
+                        .unwrap()
+                        .iter()
+                        .map(|frame| u64::from(frame.sample_count))
+                        .sum::<u64>();
+                    samples += count;
+                    let packet = PacketRef {
+                        source_offset: payload.len() as u64,
+                        size: bytes.len() as u32,
+                        pts: TimePoint {
+                            units: start,
+                            scale,
+                        },
+                        dts: TimePoint {
+                            units: start,
+                            scale,
+                        },
+                        duration: TimeDelta {
+                            units: count,
+                            scale,
+                        },
+                        keyframe: true,
+                    };
+                    payload.extend_from_slice(bytes);
+                    packet
+                })
+                .collect::<Vec<_>>();
+            let mut file = tempfile::NamedTempFile::new().unwrap();
+            file.write_all(&payload).unwrap();
+            let source = MappedMediaFile::open_packet_copy(file.path()).unwrap();
+            let track = PreparedAudioTrack {
+                codec: "dts".into(),
+                channels: 2,
+                sample_rate: rate,
+                codec_private: None,
+            };
+            let render = |pipeline: &mut AudioPipeline, index, start, end, eos| {
+                let read = pipeline.input_window(&track, start, end);
+                let (manifest, payload) = extract_indexed_time_range(
+                    &source,
+                    "a0",
+                    &packets,
+                    (start, end),
+                    index,
+                    "dts",
+                    Some(read),
+                )
+                .unwrap();
+                pipeline.prepare(index, &track).unwrap();
+                let output = pipeline
+                    .render(manifest, &payload, &packets, 128_000, eos, &source)
+                    .unwrap();
+                pipeline.complete(index);
+                output
+            };
+            let mut continuous = AudioPipeline::new(&track).unwrap().unwrap();
+            let expected = render(&mut continuous, 0, 0, 1700, true);
+            let mut first_worker = AudioPipeline::new(&track).unwrap().unwrap();
+            let first = render(&mut first_worker, 0, 0, 1001, false);
+            let mut second_worker = AudioPipeline::new(&track).unwrap().unwrap();
+            let second = render(&mut second_worker, 1, 1001, 1700, true);
+            let first_end = first.fragment.base_decode_time
+                + first
+                    .fragment
+                    .samples
+                    .iter()
+                    .map(|sample| u64::from(sample.duration))
+                    .sum::<u64>();
+            assert_eq!(first.fragment.base_decode_time, 0);
+            assert_eq!(
+                first_end, second.fragment.base_decode_time,
+                "independent worker clocks must abut exactly"
+            );
+            let actual = [
+                first.fragment.payload.as_slice(),
+                second.fragment.payload.as_slice(),
+            ]
+            .concat();
+            assert!(
+                actual == expected.fragment.payload,
+                "warm decoder/encoder history must preserve continuous AAC content at {rate} Hz; first differing byte {:?}",
+                actual
+                    .iter()
+                    .zip(&expected.fragment.payload)
+                    .position(|(a, b)| a != b)
+            );
+            let mut decoder = rusty_aac::AacDecoder::with_config_bytes(
+                &rusty_aac::encode::audio_specific_config_bytes(rate, 2),
+            )
+            .unwrap();
+            let mut decoded_frames = 0;
+            for fragment in [&first.fragment, &second.fragment] {
+                let mut offset = 0;
+                for sample in &fragment.samples {
+                    let end = offset + sample.size as usize;
+                    assert!(
+                        !decoder
+                            .decode(&fragment.payload[offset..end], None)
+                            .unwrap()
+                            .samples
+                            .is_empty()
+                    );
+                    decoded_frames += 1;
+                    offset = end;
+                }
+            }
+            assert_eq!(decoded_frames, expected.fragment.samples.len());
+        }
+    }
+
+    #[test]
+    fn silence_correction_rejects_unbounded_timestamp_gaps() {
+        let track = PreparedAudioTrack {
+            codec: "dts".into(),
+            channels: 2,
+            sample_rate: 48_000,
+            codec_private: None,
+        };
+        let mut pipeline = AudioPipeline::new(&track).unwrap().unwrap();
+        let format = PcmAudioFormat {
+            sample_rate: 48_000,
+            channels: 2,
+        };
+        pipeline.format = Some(format);
+        pipeline.encoder = Some(CpuAacEncoderSession::new(format, 128_000).unwrap());
+        pipeline.next_pcm = Some(0);
+        let mut frames = Vec::new();
+        assert!(
+            pipeline
+                .feed_silence(u64::MAX, &mut frames)
+                .unwrap_err()
+                .to_string()
+                .contains("bounded correction")
+        );
+        assert!(frames.is_empty());
+        assert_eq!(pipeline.encoder.unwrap().valid_samples(), 0);
+    }
 
     #[test]
     fn retained_dts_residual_pcm_matches_continuous_encode() {
@@ -354,7 +651,7 @@ mod tests {
             segmented.prepare(0, &track).unwrap();
             let first = segmented
                 .render(
-                    manifest(0, 4097, 10),
+                    manifest(0, 4097, 18),
                     &payload,
                     &packets,
                     128_000,

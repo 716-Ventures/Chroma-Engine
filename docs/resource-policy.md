@@ -52,6 +52,12 @@ Media is never memory-mapped. Cooperative checks occur around positional reads,
 element scans and codec batches, but cannot interrupt a blocked filesystem or
 native driver call.
 
+Large multi-track MP4 probes retain essential headers first, then at most 4 MiB
+of video-only STSZ/STTS statistics when the remaining metadata budget permits.
+This preserves measured video bitrate and frame rate for quality decisions
+without loading unrelated audio packet tables. Optional statistics yield to
+essential headers under smaller budgets; missing bitrate remains explicit.
+
 ## CLI worker supervision
 
 `WorkerSupervisor` supplies a host-side reservation, mandatory wall-clock
@@ -99,7 +105,11 @@ tables can be absent in this header-only view. Source media is never rewritten.
 Sequential TrueHD/DTS/Opus conversion retains decoder, PCM residuals, AAC overlap,
 and sample clock. CPU AAC `encode` now means **push**, not end-of-stream: call
 `finish` exactly once to flush the final tail. Output may be empty while initial
-lookahead fills. AAC priming is represented in the init segment edit list; coded
+lookahead fills. Fresh bounded workers use aligned codec/encoder preroll and
+lookahead and publish the same global 1024-sample AAC grid as retained workers.
+Preroll from later workers is discarded, so restarting a worker does not insert
+another priming interval or lose the previous worker's residual audio.
+AAC priming is represented in the init segment edit list; coded
 sample durations are never shortened to disguise delay.
 
 Known HDR-to-SDR transcodes fail explicitly and are marked non-executable by the

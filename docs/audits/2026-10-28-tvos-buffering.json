@@ -1,0 +1,201 @@
+{
+  "environment": "Physical tvOS production request profile, evaluated on Mac only",
+  "physicalDeviceAccess": false,
+  "watchProgressWrites": 0,
+  "beforeFix": {
+    "rockyPhysicalHighVideoTargetMbps": 50,
+    "rockySegment5Mbps": 100.305,
+    "rockySegment11Mbps": 81.793,
+    "rockyAACWindow6GapMs": 39.333,
+    "rockyAACWindow12GapMs": 32.0,
+    "rocky140SecondMacPlayback": {
+      "errorLogEntries": 0,
+      "advancedSeconds": 135.994632292,
+      "sampledVideoFrames": 545,
+      "width": 1920,
+      "height": 1080,
+      "finalError": null,
+      "indicatedBitrate": 55640000.0,
+      "stalls": 0,
+      "droppedFrames": 0,
+      "observedBitrateOnMacSelfHttp": 2241459163.0
+    },
+    "pacific140SecondMacPlayback": {
+      "errorLogEntries": 0,
+      "advancedSeconds": 139.436785415,
+      "sampledVideoFrames": 558,
+      "width": 3840,
+      "height": 2160,
+      "finalError": null,
+      "indicatedBitrate": 62773116.89274557,
+      "stalls": 0,
+      "droppedFrames": 0,
+      "observedBitrateOnMacSelfHttp": 1869876425.707457
+    }
+  },
+  "limitations": [
+    "Mac production-profile replays do not certify the physical Apple TV decoder or its network path.",
+    "Each final replay covers 140 seconds, not an entire feature film.",
+    "Physical installation was separately approved and completed without opening or viewing the app. Playback on the physical TV remains unverified.",
+    "The earlier fast-Mac baseline also had zero stalls, despite the measured bitrate bursts and audio clock gaps."
+  ],
+  "scope": {
+    "host": "Mac",
+    "requestClient": "chroma-tvos",
+    "requestQuality": "high",
+    "actualVideoOutputSampled": true,
+    "productionProgressWrites": 0,
+    "productSourceEditsDuringFinalReplay": 0,
+    "sourceMediaWrites": 0,
+    "physicalDeviceAccess": false
+  },
+  "productionAfterFix": {
+    "h2641080Dts": {
+      "playMode": "directStream",
+      "videoMode": "Copy",
+      "videoCodec": "avc1.640029",
+      "audioCodec": "mp4a.40.2",
+      "routeOptions": {
+        "hlsVariant": "clocked-aac-rate-v5/copy/high-2560x1440-50000000/a0",
+        "videoCodec": "avc1.640029",
+        "audioCodec": "mp4a.40.2",
+        "declaredBandwidth": 38477231,
+        "assetsPredatingDiagnostic": 0
+      },
+      "httpMediaSegments": 38,
+      "httpDecodeClockGaps": [],
+      "replay": {
+        "requestedRunSeconds": 140,
+        "actualPlaybackSeconds": 138.482218461,
+        "sampledVideoFrames": 554,
+        "videoWidth": 1920,
+        "videoHeight": 1080,
+        "startupSeconds": 1.4712889194488525,
+        "observedBitrateOnMacSelfHttp": 823651748.0,
+        "indicatedBitrate": 38477231.0,
+        "stalls": 0,
+        "droppedVideoFrames": 0,
+        "transferredBytes": 455343201,
+        "errorLogEntries": 0,
+        "finalError": null,
+        "preferredForwardBufferDurationSeconds": 20,
+        "externalPlaybackEnabled": false
+      }
+    },
+    "hevc2160Hdr10Eac3": {
+      "playMode": "directPlay",
+      "videoMode": "HEVC Direct",
+      "videoCodec": "hevc",
+      "audioCodec": "eac3",
+      "sourceHdrPreserved": true,
+      "replay": {
+        "requestedRunSeconds": 140,
+        "actualPlaybackSeconds": 138.177390376,
+        "sampledVideoFrames": 553,
+        "videoWidth": 3840,
+        "videoHeight": 2160,
+        "startupSeconds": 1.2611740827560425,
+        "observedBitrateOnMacSelfHttp": 976968539.009203,
+        "indicatedBitrate": 62773116.89274557,
+        "stalls": 0,
+        "droppedVideoFrames": 0,
+        "transferredBytes": 1173542003,
+        "errorLogEntries": 0,
+        "finalError": null,
+        "preferredForwardBufferDurationSeconds": 20,
+        "externalPlaybackEnabled": false
+      }
+    }
+  },
+  "engineValidation": {
+    "workingDirectory": "Chroma-Engine",
+    "command": "DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer CLANG_MODULE_CACHE_PATH=/private/tmp/chroma-engine-clang-cache SWIFT_MODULECACHE_PATH=/private/tmp/chroma-engine-swift-cache cargo test --workspace --all-features --locked",
+    "passedTopLevel": 326,
+    "ignoredIntentionalSubprocessFixtures": 6,
+    "rawPassedIncludingNestedSubprocessDuplicate": 327,
+    "clippyCommand": "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings",
+    "strictClippyPassed": true,
+    "formatAndWhitespacePassed": true
+  },
+  "fixedEngineChecks": {
+    "rockyProbeVideo": {
+      "width": 1920,
+      "height": 1080,
+      "frameRate": 23.976025506321225,
+      "bitrateBps": 24013640,
+      "pixelFormat": "yuv420-8bit",
+      "dynamicRange": "unknown"
+    },
+    "rockyProbeOwnedMetadataBytes": 1498885,
+    "rockyForcedHigh18Segments": {
+      "label": "rocky",
+      "segments": 18,
+      "timelineGaps": [],
+      "peakSegments": [
+        [
+          36.851,
+          "seg-00015.m4s"
+        ],
+        [
+          35.521,
+          "seg-00005.m4s"
+        ],
+        [
+          34.743,
+          "seg-00006.m4s"
+        ],
+        [
+          32.556,
+          "seg-00017.m4s"
+        ]
+      ]
+    },
+    "rockyIndependentCopy18Segments": {
+      "segments": 18,
+      "gaps": [],
+      "maximumSegmentMbps": 29.632841158841163
+    },
+    "unitAndIntegrationPassedTopLevel": 326,
+    "nestedSubprocessDuplicateExcluded": 1,
+    "intentionalIgnored": 6,
+    "strictAllFeatureClippy": true,
+    "formatAndWhitespace": true,
+    "hardRateLimitReadBackBytesPerSecondAt500kbps": 62500,
+    "aacIndependentWorkersMatchContinuousAtSampleRates": [
+      44100,
+      48000
+    ],
+    "hlsAssetRevision": "clocked-aac-rate-v5"
+  },
+  "diagnosticCleanup": {
+    "diagnosticRevoked": true,
+    "originalExpiryUnchanged": true,
+    "remainingDiagnosticSessions": 0,
+    "remainingFinalDiagnosticCacheDirectories": 0,
+    "retiredStreamStatusCodes": [
+      404,
+      404
+    ],
+    "catalogCount": 1594,
+    "catalogMatchesAndLocksUnchanged": true,
+    "allWatchProgressUnchanged": true,
+    "tvAccessPerformed": false
+  },
+  "validation": {
+    "serverPassedTopLevel": 238,
+    "serverRawPassesIncludingNestedDuplicate": 239,
+    "serverIgnoredLiveBenchmark": 1,
+    "serverStrictClippyPassed": true,
+    "nativeUnitPassed": 76,
+    "simulatorNavigationPassed": 11,
+    "independentSourceReviewClear": true
+  },
+  "deployment": {
+    "normalServerUpdated": true,
+    "lanAccessPreserved": true,
+    "signedNativeReleaseInstalledWithExplicitApproval": true,
+    "applicationOpenedByAgent": false,
+    "physicalScreenViewedByAgent": false,
+    "executableSha256": "2670e08073c44713f45d94fea4d49a350fb595581ec107ae7484cea484980a9d"
+  }
+}
