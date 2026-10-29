@@ -8,7 +8,7 @@ use crate::{
     source::MediaSource,
 };
 use anyhow::{Result, bail};
-use std::path::Path;
+use std::{collections::BTreeMap, path::Path};
 
 pub(super) struct AppendReport {
     pub next_id: usize,
@@ -64,7 +64,8 @@ pub(super) fn append(
             } else {
                 "WEBVTT".to_owned()
             };
-            let mut document = hls_header(&header)?;
+            let mut document = String::new();
+            let mut styles = Tx3gStyles::default();
             let mut raw_bytes = 0_usize;
             let mut duration_ms = 0;
             for packet in &packets.packets {
@@ -83,11 +84,13 @@ pub(super) fn append(
                     continue;
                 }
                 if let Some(defaults) = &tx3g {
-                    if let Some(text) = mov_text_sample(&bytes, defaults)? {
+                    if let Some(text) = mov_text_sample_with_styles(&bytes, defaults, &mut styles)?
+                    {
                         document.push_str(&format!(
-                            "{} --> {}\n{text}\n\n",
+                            "{} --> {} {}\n{text}\n\n",
                             text_time(start),
-                            text_time(end)
+                            text_time(end),
+                            defaults.cue_settings()
                         ));
                     }
                 } else {
@@ -98,7 +101,15 @@ pub(super) fn append(
                     return Err("MP4 WebVTT document exceeds limit".into());
                 }
             }
-            Ok((document, duration_ms))
+            let mut complete = hls_header(&header)?;
+            if let Some(defaults) = &tx3g {
+                complete.push_str(&defaults.stylesheet(&styles));
+            }
+            complete.push_str(&document);
+            if complete.len() > SCRIPT_LIMIT {
+                return Err("MP4 WebVTT document exceeds limit".into());
+            }
+            Ok((complete, duration_ms))
         })();
         let (document, duration_ms) = match result {
             Ok(result) => result,
@@ -234,12 +245,16 @@ fn webvtt_header(kind: [u8; 4], payload: &[u8]) -> std::result::Result<String, S
         .map_err(|_| "Invalid UTF-8 WebVTT configuration".into())
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Tx3gDefaults {
     font_id: u16,
     font_size: u8,
     face: u8,
     color: [u8; 4],
+    background: [u8; 4],
+    horizontal: i8,
+    vertical: i8,
+    fonts: BTreeMap<u16, String>,
 }
 impl Tx3gDefaults {
     fn parse(kind: [u8; 4], payload: &[u8]) -> std::result::Result<Self, String> {
@@ -247,11 +262,13 @@ impl Tx3gDefaults {
             return Err("Legacy QuickTime text sample descriptions require native playback".into());
         }
         if payload[8..12].iter().any(|byte| *byte != 0)
-            || payload[14..26].iter().any(|byte| *byte != 0)
+            || payload[18..26].iter().any(|byte| *byte != 0)
         {
             return Err("Authored tx3g display effects, backgrounds or text-box positioning require native playback".into());
         }
-        if payload[12] != 0 || ![0, 1].contains(&payload[13]) {
+        let horizontal = payload[12] as i8;
+        let vertical = payload[13] as i8;
+        if ![-1, 0, 1].contains(&horizontal) || ![-1, 0, 1].contains(&vertical) {
             return Err("Authored tx3g justification requires native playback".into());
         }
         let face = payload[32];
@@ -261,15 +278,157 @@ impl Tx3gDefaults {
         let color: [u8; 4] = payload[34..38]
             .try_into()
             .map_err(|_| "Invalid tx3g default color")?;
-        if color != [0, 0, 0, 0] && color != [255, 255, 255, 255] {
-            return Err("Authored tx3g default color requires native playback".into());
-        }
+        let fonts = font_table(&payload[38..])?;
         Ok(Self {
             font_id: u16::from_be_bytes([payload[30], payload[31]]),
             font_size: payload[33],
             face,
             color,
+            background: payload[14..18]
+                .try_into()
+                .map_err(|_| "Invalid tx3g background")?,
+            horizontal,
+            vertical,
+            fonts,
         })
+    }
+
+    fn cue_settings(&self) -> String {
+        let align = match self.horizontal {
+            -1 => "right",
+            1 => "center",
+            _ => "left",
+        };
+        let line = match self.vertical {
+            -1 => "100%,end",
+            1 => "50%,center",
+            _ => "0%,start",
+        };
+        format!("align:{align} line:{line}")
+    }
+
+    fn stylesheet(&self, styles: &Tx3gStyles) -> String {
+        let mut result = format!(
+            "STYLE\n::cue {{ background-color: {}; color: {};",
+            css_color(self.background),
+            css_color(self.color)
+        );
+        if let Some(font) = self.fonts.get(&self.font_id) {
+            result.push_str(&format!(" font-family: {}, sans-serif;", css_string(font)));
+        }
+        result.push_str(" }\n");
+        for (style, index) in &styles.classes {
+            result.push_str(&format!("::cue(.tx3g{index}) {{"));
+            if let Some(font) = self.fonts.get(&style.font_id) {
+                result.push_str(&format!(" font-family: {}, sans-serif;", css_string(font)));
+            }
+            if style.font_size != 0 && self.font_size != 0 {
+                result.push_str(&format!(
+                    " font-size: {:.6}%;",
+                    f64::from(style.font_size) / f64::from(self.font_size) * 100.0
+                ));
+            }
+            result.push_str(&format!(" color: {}; }}\n", css_color(style.color)));
+        }
+        result.push('\n');
+        result
+    }
+}
+
+fn font_table(bytes: &[u8]) -> std::result::Result<BTreeMap<u16, String>, String> {
+    let mut fonts = BTreeMap::new();
+    let mut seen_table = false;
+    for atom in boxes(bytes)? {
+        if atom.kind != *b"ftab" {
+            continue;
+        }
+        if seen_table || atom.payload.len() < 2 || atom.payload.len() > 64 * 1024 {
+            return Err("Invalid tx3g font table".into());
+        }
+        seen_table = true;
+        let count = usize::from(u16::from_be_bytes([atom.payload[0], atom.payload[1]]));
+        if count > 256 {
+            return Err("tx3g font count exceeds limit".into());
+        }
+        let mut remaining = &atom.payload[2..];
+        for _ in 0..count {
+            if remaining.len() < 3 {
+                return Err("Truncated tx3g font record".into());
+            }
+            let id = u16::from_be_bytes([remaining[0], remaining[1]]);
+            let length = usize::from(remaining[2]);
+            let name = remaining
+                .get(3..3 + length)
+                .ok_or("Truncated tx3g font name")?;
+            let name = std::str::from_utf8(name).map_err(|_| "Invalid UTF-8 tx3g font name")?;
+            if name.is_empty() || fonts.insert(id, name.to_string()).is_some() {
+                return Err("Empty or duplicate tx3g font record".into());
+            }
+            remaining = &remaining[3 + length..];
+        }
+        if !remaining.is_empty() {
+            return Err("Trailing tx3g font table bytes".into());
+        }
+    }
+    Ok(fonts)
+}
+
+fn css_string(value: &str) -> String {
+    let mut result = String::from("\"");
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() || ch == ' ' {
+            result.push(ch);
+        } else {
+            result.push_str(&format!("\\{:x} ", u32::from(ch)));
+        }
+    }
+    result.push('"');
+    result
+}
+
+fn css_color([r, g, b, alpha]: [u8; 4]) -> String {
+    format!("rgba({r}, {g}, {b}, {:.6})", f64::from(alpha) / 255.0)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct Tx3gStyle {
+    font_id: u16,
+    font_size: u8,
+    color: [u8; 4],
+}
+
+#[derive(Default)]
+struct Tx3gStyles {
+    classes: BTreeMap<Tx3gStyle, usize>,
+}
+
+impl Tx3gStyles {
+    fn text(
+        &mut self,
+        text: &str,
+        face: u8,
+        style: Tx3gStyle,
+        defaults: &Tx3gDefaults,
+    ) -> std::result::Result<String, String> {
+        let text = styled(text, face);
+        if style.font_id == defaults.font_id
+            && style.font_size == defaults.font_size
+            && style.color == defaults.color
+        {
+            return Ok(text);
+        }
+        if style.font_id != defaults.font_id && !defaults.fonts.contains_key(&style.font_id) {
+            return Err("tx3g style references an unavailable font".into());
+        }
+        if style.font_size != 0 && defaults.font_size == 0 {
+            return Err("tx3g relative font size requires a nonzero default size".into());
+        }
+        let next = self.classes.len() + 1;
+        if next > 4096 && !self.classes.contains_key(&style) {
+            return Err("tx3g style count exceeds limit".into());
+        }
+        let class = self.classes.entry(style).or_insert(next);
+        Ok(format!("<c.tx3g{class}>{text}</c>"))
     }
 }
 fn unicode_text(bytes: &[u8]) -> std::result::Result<String, String> {
@@ -320,9 +479,18 @@ fn styled(text: &str, face: u8) -> String {
     }
     result
 }
+#[cfg(test)]
 fn mov_text_sample(
     bytes: &[u8],
     defaults: &Tx3gDefaults,
+) -> std::result::Result<Option<String>, String> {
+    mov_text_sample_with_styles(bytes, defaults, &mut Tx3gStyles::default())
+}
+
+fn mov_text_sample_with_styles(
+    bytes: &[u8],
+    defaults: &Tx3gDefaults,
+    styles: &mut Tx3gStyles,
 ) -> std::result::Result<Option<String>, String> {
     if bytes.len() < 2 {
         return Err("Truncated tx3g sample".into());
@@ -359,15 +527,18 @@ fn mov_text_sample(
             if start >= end || end > utf16_length || record[6] & !0x07 != 0 {
                 return Err("Invalid tx3g style character range".into());
             }
-            if font != defaults.font_id
-                || record[7] != defaults.font_size
-                || record[8..12] != defaults.color
-            {
-                return Err(
-                    "Authored tx3g font, size or color changes require native playback".into(),
-                );
-            }
-            runs.push((start, end, record[6]));
+            runs.push((
+                start,
+                end,
+                record[6],
+                Tx3gStyle {
+                    font_id: font,
+                    font_size: record[7],
+                    color: record[8..12]
+                        .try_into()
+                        .map_err(|_| "Invalid tx3g style color")?,
+                },
+            ));
         }
     }
     runs.sort_by_key(|run| run.0);
@@ -383,7 +554,7 @@ fn mov_text_sample(
     boundaries.push((utf16, text.len()));
     let mut result = String::new();
     let mut previous = 0;
-    for (start, end, face) in runs {
+    for (start, end, face, style) in runs {
         let start = boundaries
             .binary_search_by_key(&start, |entry| entry.0)
             .ok()
@@ -397,7 +568,7 @@ fn mov_text_sample(
         if start > previous {
             result.push_str(&styled(&text[previous..start], defaults.face));
         }
-        result.push_str(&styled(&text[start..end], face));
+        result.push_str(&styles.text(&text[start..end], face, style, defaults)?);
         previous = end;
     }
     if previous < text.len() {
@@ -470,12 +641,215 @@ mod tests {
             font_size: 18,
             face: 0,
             color: [255; 4],
+            background: [0; 4],
+            horizontal: 1,
+            vertical: -1,
+            fonts: BTreeMap::new(),
         }
+    }
+    fn centered_bottom_entry() -> Vec<u8> {
+        let mut entry = vec![0; 38];
+        entry[7] = 1;
+        entry[12] = 1;
+        entry[13] = 255;
+        entry[17] = 255;
+        entry[31] = 1;
+        entry[33] = 75;
+        entry[34..38].fill(255);
+        entry
+    }
+    #[test]
+    fn ordinary_centered_bottom_mp4_captions_preserve_alignment_and_background() {
+        // Common muxer defaults, matching the reported MP4's tx3g description.
+        let entry = centered_bottom_entry();
+        let defaults = Tx3gDefaults::parse(*b"tx3g", &entry).unwrap();
+        assert_eq!(defaults.cue_settings(), "align:center line:100%,end");
+        assert!(
+            defaults
+                .stylesheet(&Tx3gStyles::default())
+                .contains("background-color: rgba(0, 0, 0, 1.000000);")
+        );
+        assert_eq!(
+            mov_text_sample(&sample(b"Caption"), &defaults)
+                .unwrap()
+                .as_deref(),
+            Some("Caption")
+        );
+        for (horizontal, align) in [(255, "right"), (0, "left"), (1, "center")] {
+            for (vertical, line) in [(255, "100%,end"), (0, "0%,start"), (1, "50%,center")] {
+                let mut entry = entry.clone();
+                entry[12] = horizontal;
+                entry[13] = vertical;
+                assert_eq!(
+                    Tx3gDefaults::parse(*b"tx3g", &entry)
+                        .unwrap()
+                        .cue_settings(),
+                    format!("align:{align} line:{line}")
+                );
+            }
+        }
+        let mut colored = entry.clone();
+        colored[14..18].copy_from_slice(&[10, 20, 30, 128]);
+        assert!(
+            Tx3gDefaults::parse(*b"tx3g", &colored)
+                .unwrap()
+                .stylesheet(&Tx3gStyles::default())
+                .contains("rgba(10, 20, 30, 0.501961)")
+        );
+    }
+    #[test]
+    fn unsupported_layout_and_malformed_justification_remain_explicit() {
+        let entry = centered_bottom_entry();
+        for index in [8, 18, 25] {
+            let mut invalid = entry.clone();
+            invalid[index] = 1;
+            assert!(Tx3gDefaults::parse(*b"tx3g", &invalid).is_err());
+        }
+        for index in [12, 13] {
+            let mut invalid = entry.clone();
+            invalid[index] = 2;
+            assert!(Tx3gDefaults::parse(*b"tx3g", &invalid).is_err());
+        }
+        assert!(Tx3gDefaults::parse(*b"tx3g", &entry[..37]).is_err());
     }
     fn sample(text: &[u8]) -> Vec<u8> {
         let mut result = (text.len() as u16).to_be_bytes().to_vec();
         result.extend(text);
         result
+    }
+    fn font_atom(fonts: &[(u16, &str)]) -> Vec<u8> {
+        let mut table = (fonts.len() as u16).to_be_bytes().to_vec();
+        for (id, name) in fonts {
+            table.extend(id.to_be_bytes());
+            table.push(name.len() as u8);
+            table.extend(name.as_bytes());
+        }
+        atom(b"ftab", &table)
+    }
+    fn styled_sample(
+        text: &str,
+        start: u16,
+        end: u16,
+        font: u16,
+        face: u8,
+        size: u8,
+        color: [u8; 4],
+    ) -> Vec<u8> {
+        let mut data = sample(text.as_bytes());
+        let mut styles = 1_u16.to_be_bytes().to_vec();
+        styles.extend(start.to_be_bytes());
+        styles.extend(end.to_be_bytes());
+        styles.extend(font.to_be_bytes());
+        styles.extend([face, size]);
+        styles.extend(color);
+        data.extend(atom(b"styl", &styles));
+        data
+    }
+    #[test]
+    fn tx3g_font_size_color_and_face_runs_become_bounded_vtt_classes() {
+        let mut entry = centered_bottom_entry();
+        entry.extend(font_atom(&[(1, "Alte Haas Grotesk"), (2, "Swiss721 BT")]));
+        let defaults = Tx3gDefaults::parse(*b"tx3g", &entry).unwrap();
+        let mut styles = Tx3gStyles::default();
+        let data = styled_sample("One 😀", 4, 6, 2, 3, 39, [10, 20, 30, 128]);
+        assert_eq!(
+            mov_text_sample_with_styles(&data, &defaults, &mut styles)
+                .unwrap()
+                .as_deref(),
+            Some("One <c.tx3g1><b><i>😀</i></b></c>")
+        );
+        let stylesheet = defaults.stylesheet(&styles);
+        assert!(stylesheet.contains("font-family: \"Alte Haas Grotesk\", sans-serif;"));
+        assert!(stylesheet.contains("::cue(.tx3g1) { font-family: \"Swiss721 BT\", sans-serif; font-size: 52.000000%; color: rgba(10, 20, 30, 0.501961); }"));
+        mov_text_sample_with_styles(&data, &defaults, &mut styles).unwrap();
+        assert_eq!(
+            styles.classes.len(),
+            1,
+            "Identical styles must reuse their class"
+        );
+        assert!(
+            mov_text_sample_with_styles(
+                &styled_sample("😀", 0, 1, 2, 0, 39, [255; 4]),
+                &defaults,
+                &mut styles
+            )
+            .unwrap_err()
+            .contains("surrogate")
+        );
+        assert!(
+            mov_text_sample_with_styles(
+                &styled_sample("Text", 0, 4, 99, 0, 39, [255; 4]),
+                &defaults,
+                &mut styles
+            )
+            .unwrap_err()
+            .contains("unavailable font")
+        );
+    }
+    #[test]
+    fn tx3g_font_names_cannot_inject_vtt_css_or_header_blocks() {
+        let hostile = "Font\";}\n\nSTYLE\n::cue {color:red}\\<x>";
+        let mut entry = centered_bottom_entry();
+        entry.extend(font_atom(&[(1, hostile)]));
+        let defaults = Tx3gDefaults::parse(*b"tx3g", &entry).unwrap();
+        let stylesheet = defaults.stylesheet(&Tx3gStyles::default());
+        assert_eq!(stylesheet.matches("STYLE\n").count(), 1);
+        assert_eq!(stylesheet.matches("::cue").count(), 1);
+        assert!(!stylesheet.contains("<x>"));
+        assert!(stylesheet.contains("\\22 "));
+        assert!(stylesheet.contains("\\a "));
+        assert!(stylesheet.contains("\\5c "));
+        assert_eq!(css_string("東京"), "\"\\6771 \\4eac \"");
+    }
+    #[test]
+    fn tx3g_font_table_and_global_style_budgets_remain_enforced() {
+        for table in [
+            atom(b"ftab", &[]),
+            atom(b"ftab", &[0, 1, 0, 1, 5, b'A']),
+            font_atom(&[(1, "A"), (1, "B")]),
+            font_atom(&[(1, "")]),
+            atom(b"ftab", &[1, 1]),
+        ] {
+            assert!(font_table(&table).is_err());
+        }
+        let mut extra = font_atom(&[(1, "A")]);
+        extra.extend(font_atom(&[(2, "B")]));
+        assert!(font_table(&extra).is_err());
+        assert!(font_table(&atom(b"ftab", &[0; 65537])).is_err());
+        let mut styles = Tx3gStyles::default();
+        let defaults = defaults();
+        for index in 0..4096_u32 {
+            let mut color = index.to_be_bytes();
+            color[3] = color[3].wrapping_add(1);
+            styles
+                .text(
+                    "x",
+                    0,
+                    Tx3gStyle {
+                        font_id: 1,
+                        font_size: 18,
+                        color,
+                    },
+                    &defaults,
+                )
+                .unwrap();
+        }
+        assert_eq!(styles.classes.len(), 4096);
+        assert!(
+            styles
+                .text(
+                    "x",
+                    0,
+                    Tx3gStyle {
+                        font_id: 1,
+                        font_size: 18,
+                        color: [1, 2, 3, 4]
+                    },
+                    &defaults
+                )
+                .unwrap_err()
+                .contains("style count")
+        );
     }
     #[test]
     fn mov_text_preserves_unicode_and_escapes_markup() {
