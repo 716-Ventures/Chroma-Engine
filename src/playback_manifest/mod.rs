@@ -195,7 +195,7 @@ pub(crate) fn build_file_matroska_manifest(
     options: MatroskaManifestOptions,
 ) -> anyhow::Result<NativePlaybackManifest> {
     let metadata = parse_matroska_basic_metadata(source.as_ref());
-    let mut tracks = Vec::new();
+    let mut selected = Vec::new();
     let mut video_index = 0;
     let mut audio_index = 0;
     for track in &metadata.tracks {
@@ -207,6 +207,15 @@ pub(crate) fn build_file_matroska_manifest(
         if track.kind == MatroskaTrackKind::Audio && !options.include_audio {
             continue;
         }
+        selected.push((id, track));
+    }
+    let ids = selected
+        .iter()
+        .map(|(id, _)| id.as_str())
+        .collect::<Vec<_>>();
+    let plans = source.matroska_chunk_plans(&ids, options.chunk_target_ms)?;
+    let mut tracks = Vec::new();
+    for ((id, track), plan) in selected.into_iter().zip(plans) {
         let private = track.codec_private.as_deref();
         tracks.push(ManifestTrack {
             id: id.clone(),
@@ -235,9 +244,7 @@ pub(crate) fn build_file_matroska_manifest(
             config_box: matroska_config_box(track, private).map(str::to_string),
             decoder_config_hex: private.map(hex_string),
             peak_bitrate_bps: None,
-            chunks: source
-                .chunk_plan(Some(&id), options.chunk_target_ms)?
-                .chunks,
+            chunks: plan.chunks,
         });
     }
     Ok(NativePlaybackManifest {

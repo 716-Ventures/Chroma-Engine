@@ -415,61 +415,101 @@ pub fn plan_fixed_chunks(packets: &[PacketRef], target_ms: u64) -> ChunkPlan {
 
 /// Builds fixed-duration chunks for a named track.
 pub fn plan_track_chunks(track_id: &str, packets: &[PacketRef], target_ms: u64) -> ChunkPlan {
-    if packets.is_empty() || target_ms == 0 {
-        return ChunkPlan {
-            track_ids: Vec::new(),
+    let mut planner = TrackChunkPlanner::new(target_ms);
+    if target_ms > 0 {
+        for packet in packets {
+            planner.push(packet);
+        }
+    }
+    planner.finish(track_id)
+}
+
+/// Incremental form of the packet slice planner. Callers must finalize each
+/// packet's duration before pushing it; no packet payload or index is retained.
+pub(crate) struct TrackChunkPlanner {
+    target_ms: u64,
+    chunks: Vec<NativeChunk>,
+    count: usize,
+    start_idx: u32,
+    chunk_start_ms: u64,
+    last_end_ms: u64,
+    key_aligned: bool,
+}
+
+impl TrackChunkPlanner {
+    pub(crate) fn new(target_ms: u64) -> Self {
+        Self {
+            target_ms,
             chunks: Vec::new(),
-        };
+            count: 0,
+            start_idx: 0,
+            chunk_start_ms: 0,
+            last_end_ms: 0,
+            key_aligned: false,
+        }
     }
 
-    let mut chunks = Vec::new();
-    let mut start_idx = 0_u32;
-    let mut chunk_start_ms = packets[0].pts.as_millis();
-    let mut last_end_ms = chunk_start_ms;
-    let mut key_aligned = packets[0].keyframe;
-
-    for (idx, packet) in packets.iter().enumerate() {
+    pub(crate) fn push(&mut self, packet: &PacketRef) {
+        if self.target_ms == 0 {
+            return;
+        }
         let packet_start_ms = packet.pts.as_millis();
         let packet_end_ms = packet_start_ms.saturating_add(packet.duration.as_millis());
-        let should_cut = idx > 0
-            && packet.keyframe
-            && packet_start_ms.saturating_sub(chunk_start_ms) >= target_ms;
-        if should_cut {
-            chunks.push(NativeChunk {
-                index: chunks.len() as u32,
-                start: TimePoint::millis(chunk_start_ms),
-                duration: TimeDelta::millis(last_end_ms.saturating_sub(chunk_start_ms)),
-                packet_range: PacketRange {
-                    start: start_idx,
-                    end: idx as u32,
-                },
-                key_aligned,
-            });
-            start_idx = idx as u32;
-            chunk_start_ms = packet_start_ms;
-            key_aligned = packet.keyframe;
+        if self.count == 0 {
+            self.chunk_start_ms = packet_start_ms;
+            self.key_aligned = packet.keyframe;
         }
-        last_end_ms = packet_end_ms;
+        let should_cut = self.count > 0
+            && packet.keyframe
+            && packet_start_ms.saturating_sub(self.chunk_start_ms) >= self.target_ms;
+        if should_cut {
+            self.chunks.push(NativeChunk {
+                index: self.chunks.len() as u32,
+                start: TimePoint::millis(self.chunk_start_ms),
+                duration: TimeDelta::millis(self.last_end_ms.saturating_sub(self.chunk_start_ms)),
+                packet_range: PacketRange {
+                    start: self.start_idx,
+                    end: self.count as u32,
+                },
+                key_aligned: self.key_aligned,
+            });
+            self.start_idx = self.count as u32;
+            self.chunk_start_ms = packet_start_ms;
+            self.key_aligned = packet.keyframe;
+        }
+        self.last_end_ms = packet_end_ms;
+        self.count += 1;
     }
 
-    chunks.push(NativeChunk {
-        index: chunks.len() as u32,
-        start: TimePoint::millis(chunk_start_ms),
-        duration: TimeDelta::millis(last_end_ms.saturating_sub(chunk_start_ms)),
-        packet_range: PacketRange {
-            start: start_idx,
-            end: packets.len() as u32,
-        },
-        key_aligned,
-    });
+    pub(crate) fn finish(mut self, track_id: &str) -> ChunkPlan {
+        if self.count == 0 {
+            return ChunkPlan {
+                track_ids: Vec::new(),
+                chunks: Vec::new(),
+            };
+        }
+        self.chunks.push(NativeChunk {
+            index: self.chunks.len() as u32,
+            start: TimePoint::millis(self.chunk_start_ms),
+            duration: TimeDelta::millis(self.last_end_ms.saturating_sub(self.chunk_start_ms)),
+            packet_range: PacketRange {
+                start: self.start_idx,
+                end: self.count as u32,
+            },
+            key_aligned: self.key_aligned,
+        });
 
-    let track_ids = if track_id.is_empty() {
-        Vec::new()
-    } else {
-        vec![track_id.to_string()]
-    };
+        let track_ids = if track_id.is_empty() {
+            Vec::new()
+        } else {
+            vec![track_id.to_string()]
+        };
 
-    ChunkPlan { track_ids, chunks }
+        ChunkPlan {
+            track_ids,
+            chunks: self.chunks,
+        }
+    }
 }
 
 /// Finds the packet-copy read anchor at or before a requested timestamp.

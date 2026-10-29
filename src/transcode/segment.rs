@@ -65,7 +65,8 @@ pub struct NativeFmp4TranscodeOptions {
     pub audio_track_id: Option<String>,
     /// Target chunk duration used by packet extraction.
     pub segment_ms: u64,
-    /// Target H.264 bitrate.
+    /// Target H.264 bitrate, capped further when source fragments need a lower
+    /// rate to fit the configured retained-output budget.
     pub video_bitrate: u32,
     /// Maximum output dimensions; absent limits retain the legacy 1080p cap.
     pub max_width: Option<u32>,
@@ -790,6 +791,42 @@ struct NativeVideoCodecPipeline {
     stats: NativeVideoCodecStats,
 }
 
+/// Native fragments follow source keyframes and can be much longer than the
+/// requested segment target. Pick one rate from the complete immutable plan so
+/// a later long fragment cannot predictably overflow retained encoded payloads,
+/// and seeking/fallback never changes the encoder's rate between windows.
+fn resource_bounded_h264_bitrate(
+    requested: u32,
+    plan: &ChunkPlan,
+    policy: &crate::ResourcePolicy,
+) -> Result<u32> {
+    if requested == 0 {
+        bail!("native H.264 video bitrate must be positive");
+    }
+    // The encoder retains access units while fragment assembly owns another
+    // copy. This is the same half-output ceiling checked after every batch.
+    // Keep 25% headroom for rate-control variability and access-unit overhead.
+    let retained_bits = (policy.output_bytes / 2) as u128 * 8 * 3 / 4;
+    let mut bitrate = u128::from(requested);
+    for chunk in &plan.chunks {
+        let duration = chunk.duration;
+        if duration.units == 0 || duration.scale.units_per_second == 0 {
+            bail!("native H.264 fragment duration must be positive with a valid time scale");
+        }
+        // Round upward in the original time base; millisecond truncation could
+        // undercount a fractional final second. Allow one additional second of
+        // encoder burst beyond that complete duration. Existing payload checks
+        // remain authoritative if a backend overshoots its target.
+        let seconds =
+            u128::from(duration.units).div_ceil(u128::from(duration.scale.units_per_second)) + 1;
+        bitrate = bitrate.min(retained_bits / seconds);
+    }
+    if bitrate == 0 {
+        bail!("native H.264 fragment duration cannot fit the encoded-video output budget");
+    }
+    Ok(bitrate as u32)
+}
+
 impl NativeVideoCodecPipeline {
     #[cfg(test)]
     fn new(prepared: &PreparedTranscode, options: &NativeFmp4TranscodeOptions) -> Result<Self> {
@@ -815,6 +852,8 @@ impl NativeVideoCodecPipeline {
                 "HDR-to-SDR video transcode requires tone mapping; select compatible HDR video copy"
             );
         }
+        let video_bitrate =
+            resource_bounded_h264_bitrate(options.video_bitrate, &prepared.video_chunks, &policy)?;
         let (decode_format, encode_format) = video_formats(&prepared.video_track, options);
         let pixels = u64::from(decode_format.width) * u64::from(decode_format.height);
         policy.check(
@@ -860,9 +899,9 @@ impl NativeVideoCodecPipeline {
         Ok(Self {
             software_only,
             encoder: if software_only {
-                H264EncoderSession::new_software(encode_format, options.video_bitrate, &policy)?
+                H264EncoderSession::new_software(encode_format, video_bitrate, &policy)?
             } else {
-                H264EncoderSession::new_with_policy(encode_format, options.video_bitrate, &policy)?
+                H264EncoderSession::new_with_policy(encode_format, video_bitrate, &policy)?
             },
             policy,
             decoder,
@@ -2151,6 +2190,137 @@ fn rescale_units(units: u64, from: TimeScale, to_units_per_second: u32) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn h264_rate_plan(durations: &[TimeDelta]) -> ChunkPlan {
+        ChunkPlan {
+            track_ids: vec!["v0".into()],
+            chunks: durations
+                .iter()
+                .enumerate()
+                .map(|(index, &duration)| NativeChunk {
+                    index: index as u32,
+                    start: TimePoint::zero(duration.scale),
+                    duration,
+                    packet_range: PacketRange { start: 0, end: 1 },
+                    key_aligned: true,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn h264_rate_uses_the_longest_source_fragment_for_every_window() {
+        let policy = crate::ResourcePolicy::default();
+        let plan = h264_rate_plan(&[
+            TimeDelta::millis(5_005),
+            TimeDelta::millis(10_010),
+            TimeDelta::millis(13_764),
+        ]);
+        let bitrate = resource_bounded_h264_bitrate(100_000_000, &plan, &policy).unwrap();
+        assert_eq!(bitrate, 26_843_545);
+        assert_eq!(
+            bitrate,
+            resource_bounded_h264_bitrate(
+                100_000_000,
+                &h264_rate_plan(&[TimeDelta::millis(13_764)]),
+                &policy
+            )
+            .unwrap()
+        );
+        let retained_limit = policy.output_bytes / 2;
+        assert_eq!(retained_limit, 64 * 1024 * 1024);
+        assert!(u128::from(bitrate) * 15 / 8 <= retained_limit as u128 * 3 / 4);
+    }
+
+    #[test]
+    fn h264_rate_preserves_lower_requests_and_short_source_fragments() {
+        let policy = crate::ResourcePolicy::default();
+        let long = h264_rate_plan(&[TimeDelta::millis(13_764)]);
+        assert_eq!(
+            resource_bounded_h264_bitrate(16_000_000, &long, &policy).unwrap(),
+            16_000_000
+        );
+        let short = h264_rate_plan(&[TimeDelta::millis(2_000)]);
+        assert_eq!(
+            resource_bounded_h264_bitrate(100_000_000, &short, &policy).unwrap(),
+            100_000_000
+        );
+        assert_eq!(
+            resource_bounded_h264_bitrate(16_000_000, &h264_rate_plan(&[]), &policy).unwrap(),
+            16_000_000
+        );
+    }
+
+    #[test]
+    fn h264_rate_obeys_custom_output_budgets_and_fractional_time_bases() {
+        let policy = crate::ResourcePolicy {
+            output_bytes: 32 * 1024 * 1024,
+            ..Default::default()
+        };
+        // Just over two seconds must round up even when converting to whole
+        // milliseconds would discard that final unit.
+        let plan = h264_rate_plan(&[TimeDelta {
+            units: 180_001,
+            scale: TimeScale {
+                units_per_second: 90_000,
+            },
+        }]);
+        assert_eq!(
+            resource_bounded_h264_bitrate(100_000_000, &plan, &policy).unwrap(),
+            25_165_824
+        );
+    }
+
+    #[test]
+    fn h264_rate_rejects_invalid_or_unrepresentably_large_fragment_workloads() {
+        let policy = crate::ResourcePolicy::default();
+        for duration in [
+            TimeDelta::millis(0),
+            TimeDelta {
+                units: 1,
+                scale: TimeScale {
+                    units_per_second: 0,
+                },
+            },
+            TimeDelta {
+                units: u64::MAX,
+                scale: TimeScale {
+                    units_per_second: 1,
+                },
+            },
+        ] {
+            assert!(
+                resource_bounded_h264_bitrate(100_000_000, &h264_rate_plan(&[duration]), &policy)
+                    .is_err()
+            );
+        }
+        assert!(resource_bounded_h264_bitrate(0, &h264_rate_plan(&[]), &policy).is_err());
+        let large_budget = crate::ResourcePolicy {
+            output_bytes: usize::MAX,
+            ..Default::default()
+        };
+        assert_eq!(
+            resource_bounded_h264_bitrate(
+                100_000_000,
+                &h264_rate_plan(&[TimeDelta::millis(1)]),
+                &large_budget
+            )
+            .unwrap(),
+            100_000_000
+        );
+        let small_budget = crate::ResourcePolicy {
+            output_bytes: 2,
+            ..Default::default()
+        };
+        assert!(
+            resource_bounded_h264_bitrate(
+                100_000_000,
+                &h264_rate_plan(&[TimeDelta::millis(10_000)]),
+                &small_budget
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn chunk_durations_reach_the_next_keyframe_boundary() {

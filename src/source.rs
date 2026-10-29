@@ -7,8 +7,77 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 pub(crate) mod probe_reader;
+
+const METADATA_LOOKAHEAD_BYTES: usize = 8 * 1024;
+const MAX_METADATA_PREFIX_BYTES: usize = 64;
+
+/// One bounded lookahead window for neighbouring EBML headers. Packet payload
+/// reads remain positional and never consult this window.
+#[derive(Default)]
+struct MetadataWindow {
+    offset: u64,
+    bytes: Vec<u8>,
+}
+
+impl MetadataWindow {
+    fn read(
+        &mut self,
+        offset: u64,
+        len: usize,
+        source_len: u64,
+        capacity_limit: usize,
+        mut read: impl FnMut(&mut [u8], u64) -> io::Result<()>,
+    ) -> io::Result<Vec<u8>> {
+        if len > MAX_METADATA_PREFIX_BYTES
+            || offset
+                .checked_add(len as u64)
+                .is_none_or(|end| end > source_len)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "metadata prefix outside source",
+            ));
+        }
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+        if self.bytes.capacity() > capacity_limit.min(METADATA_LOOKAHEAD_BYTES) {
+            self.bytes = Vec::new();
+        }
+        if let Some(start) = offset
+            .checked_sub(self.offset)
+            .and_then(|relative| usize::try_from(relative).ok())
+            && let Some(end) = start.checked_add(len)
+            && let Some(bytes) = self.bytes.get(start..end)
+        {
+            return Ok(bytes.to_vec());
+        }
+        let fill = capacity_limit
+            .min(METADATA_LOOKAHEAD_BYTES)
+            .min(usize::try_from(source_len - offset).unwrap_or(usize::MAX));
+        if fill < len {
+            // Metadata can occupy the complete custom budget. Keep the old
+            // exact header read instead of retaining an over-budget cache.
+            let mut bytes = bounded_buffer(len)?;
+            read(&mut bytes, offset)?;
+            return Ok(bytes);
+        }
+        self.bytes.clear();
+        self.bytes
+            .try_reserve_exact(fill)
+            .map_err(io::Error::other)?;
+        self.bytes.resize(fill, 0);
+        if let Err(error) = read(&mut self.bytes, offset) {
+            self.bytes.clear();
+            return Err(error);
+        }
+        self.offset = offset;
+        Ok(self.bytes[..len].to_vec())
+    }
+}
 
 /// Packet reads are separate from container metadata, so parsers never need a
 /// file-sized byte slice merely to copy a selected payload.
@@ -89,6 +158,7 @@ pub struct MediaSource {
     read_bytes: AtomicU64,
     read_operations: AtomicU64,
     clusters_visited: AtomicU64,
+    metadata_window: Mutex<MetadataWindow>,
     runtime: std::sync::Arc<crate::EngineRuntime>,
     _lease: crate::resources::SessionLease,
     control: crate::WorkControl,
@@ -173,6 +243,20 @@ impl MediaSource {
         }
     }
 
+    pub(crate) fn matroska_chunk_plans(
+        &self,
+        tracks: &[&str],
+        target_ms: u64,
+    ) -> Result<Vec<crate::packet::ChunkPlan>> {
+        if tracks.is_empty() {
+            return Ok(Vec::new());
+        }
+        if target_ms == 0 {
+            anyhow::bail!("chunk target duration must be positive");
+        }
+        self.matroska_index()?.plans(self, tracks, target_ms)
+    }
+
     pub(crate) fn extract_chunk(
         &self,
         track: Option<&str>,
@@ -237,14 +321,45 @@ impl MediaSource {
     }
     pub(crate) fn element_at(&self, offset: u64, end: u64) -> Result<probe_reader::Element> {
         self.check_work()?;
-        if end > self.len {
+        if offset >= end || end > self.len {
             anyhow::bail!("element outside source");
         }
-        self.read_operations.fetch_add(1, Ordering::Relaxed);
-        let element = probe_reader::element(&self.file, offset, end)?;
-        self.read_bytes
-            .fetch_add(end.saturating_sub(offset).min(12), Ordering::Relaxed);
-        Ok(element)
+        let header = self.cached_metadata_prefix(offset, (end - offset).min(12) as usize)?;
+        probe_reader::element_from_header(&header, offset, end)
+    }
+
+    /// Only EBML integer fields and lacing/block prefixes use metadata lookahead.
+    /// Caller identity checks still surround the complete indexing/window scan.
+    pub(crate) fn read_metadata_prefix(&self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+        self.check_work().map_err(io::Error::other)?;
+        self.policy()
+            .check(
+                "compressed window",
+                len,
+                self.policy().compressed_window_bytes,
+            )
+            .map_err(io::Error::other)?;
+        self.cached_metadata_prefix(offset, len)
+    }
+
+    fn cached_metadata_prefix(&self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+        self.check_work().map_err(io::Error::other)?;
+        let capacity = self
+            .policy()
+            .metadata_bytes
+            .saturating_sub(self.bytes.len())
+            .min(self.policy().compressed_window_bytes);
+        let mut window = self
+            .metadata_window
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.check_work().map_err(io::Error::other)?;
+        let prefix = window.read(offset, len, self.len, capacity, |bytes, offset| {
+            self.read_exact_counted(bytes, offset)
+        })?;
+        drop(window);
+        self.check_work().map_err(io::Error::other)?;
+        Ok(prefix)
     }
 
     pub(crate) fn read_window_unvalidated(&self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
@@ -295,6 +410,7 @@ impl MediaSource {
             read_bytes: AtomicU64::new(0),
             read_operations: AtomicU64::new(0),
             clusters_visited: AtomicU64::new(0),
+            metadata_window: Mutex::new(MetadataWindow::default()),
             runtime,
             _lease: lease,
             control,
@@ -479,6 +595,143 @@ pub type MappedMediaFile = MediaSource;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn metadata_lookahead_coalesces_headers_and_reloads_only_outside_its_window() {
+        let source = (0..20_000)
+            .map(|index| (index % 251) as u8)
+            .collect::<Vec<_>>();
+        let mut cache = MetadataWindow::default();
+        let mut reads = Vec::new();
+        for (offset, len) in [(0, 12), (12, 2), (30, 16), (9_000, 12), (19_998, 2)] {
+            let bytes = cache
+                .read(
+                    offset,
+                    len,
+                    source.len() as u64,
+                    METADATA_LOOKAHEAD_BYTES,
+                    |output, offset| {
+                        reads.push((offset, output.len()));
+                        let start = offset as usize;
+                        output.copy_from_slice(&source[start..start + output.len()]);
+                        Ok(())
+                    },
+                )
+                .unwrap();
+            assert_eq!(bytes, source[offset as usize..offset as usize + len]);
+        }
+        assert_eq!(reads, [(0, 8_192), (9_000, 8_192), (19_998, 2)]);
+        assert!(cache.bytes.capacity() <= METADATA_LOOKAHEAD_BYTES);
+        assert!(
+            cache
+                .read(20_000, 1, 20_000, 8_192, |_, _| panic!(
+                    "out-of-bounds read"
+                ))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn failed_metadata_fill_cannot_expose_partial_or_stale_bytes() {
+        let mut cache = MetadataWindow::default();
+        assert!(
+            cache
+                .read(0, 4, 16, 16, |output, _| {
+                    output.fill(0xaa);
+                    Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "truncated source",
+                    ))
+                })
+                .is_err()
+        );
+        assert!(cache.bytes.is_empty());
+        assert_eq!(
+            cache
+                .read(0, 4, 16, 16, |output, _| {
+                    output.fill(0xbb);
+                    Ok(())
+                })
+                .unwrap(),
+            [0xbb; 4]
+        );
+    }
+
+    fn metadata_fixture() -> (tempfile::TempDir, PathBuf) {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("headers.bin");
+        let mut bytes = vec![0x81, 0x81, 2, 0x82, 0x81, 3];
+        bytes.resize(128, 0);
+        fs::write(&path, bytes).unwrap();
+        (directory, path)
+    }
+
+    #[test]
+    fn cached_headers_keep_parent_bounds_and_do_not_replace_payload_reads() {
+        let (_directory, path) = metadata_fixture();
+        let source = MediaSource::open_packet_copy(&path).unwrap();
+        assert_eq!(source.element_at(0, source.len()).unwrap().end, 3);
+        assert_eq!(source.read_metadata_prefix(2, 1).unwrap(), [2]);
+        let initial = source.io_stats();
+        assert_eq!((initial.0, initial.1), (128, 1));
+        assert!(source.element_at(0, 1).is_err());
+        assert!(source.element_at(0, 2).is_err());
+        assert!(source.element_at(source.len(), source.len()).is_err());
+        assert_eq!(source.io_stats().1, initial.1);
+        // Public packet reads remain exact, even when their bytes are cached.
+        assert_eq!(source.read_at(2, 1).unwrap(), [2]);
+        assert_eq!(source.io_stats().1, initial.1 + 1);
+        assert_eq!(source.io_stats().0, initial.0 + 1);
+        fs::write(&path, b"replaced source").unwrap();
+        assert!(source.validate_current().is_err());
+        assert!(source.read_at(2, 1).is_err());
+    }
+
+    #[test]
+    fn metadata_cache_respects_exact_and_tiny_remaining_budgets() {
+        let (_directory, path) = metadata_fixture();
+        for (metadata_bytes, expected_cache) in [(16, 0), (17, 1), (48, 32)] {
+            let runtime = crate::EngineRuntime::new(crate::ResourcePolicy {
+                metadata_bytes,
+                compressed_window_bytes: 32,
+                ..crate::ResourcePolicy::default()
+            })
+            .unwrap();
+            let source =
+                MediaSource::open_with_context(&path, runtime, crate::WorkControl::default())
+                    .unwrap();
+            assert_eq!(source.as_bytes().len(), 16);
+            assert_eq!(source.element_at(0, source.len()).unwrap().end, 3);
+            assert_eq!(source.read_metadata_prefix(2, 1).unwrap(), [2]);
+            let window = source.metadata_window.lock().unwrap();
+            assert_eq!(window.bytes.capacity(), expected_cache);
+            assert!(source.bytes.len() + window.bytes.capacity() <= metadata_bytes);
+        }
+        let runtime = crate::EngineRuntime::new(crate::ResourcePolicy {
+            compressed_window_bytes: 2,
+            ..crate::ResourcePolicy::default()
+        })
+        .unwrap();
+        let source =
+            MediaSource::open_with_context(&path, runtime, crate::WorkControl::default()).unwrap();
+        assert_eq!(source.element_at(0, source.len()).unwrap().end, 3);
+        assert!(source.read_metadata_prefix(2, 3).is_err());
+        assert!(source.metadata_window.lock().unwrap().bytes.is_empty());
+    }
+
+    #[test]
+    fn cancellation_is_checked_before_a_metadata_cache_hit() {
+        let (_directory, path) = metadata_fixture();
+        let control = crate::WorkControl::default();
+        let runtime = crate::EngineRuntime::new(crate::ResourcePolicy::default()).unwrap();
+        let source = MediaSource::open_with_context(&path, runtime, control.clone()).unwrap();
+        source.element_at(0, source.len()).unwrap();
+        let reads = source.io_stats();
+        control.cancel();
+        assert!(source.element_at(0, source.len()).is_err());
+        assert!(source.read_metadata_prefix(2, 1).is_err());
+        assert_eq!(source.io_stats(), reads);
+    }
 
     #[test]
     fn detects_same_path_replacement_and_preserves_owned_metadata() {

@@ -61,7 +61,7 @@ impl MatroskaFileIndex {
                         if child.end - child.payload > 8 {
                             bail!("invalid cluster timestamp");
                         }
-                        let bytes = source.read_window_unvalidated(
+                        let bytes = source.read_metadata_prefix(
                             child.payload,
                             (child.end - child.payload) as usize,
                         )?;
@@ -127,6 +127,78 @@ impl MatroskaFileIndex {
         Ok(crate::packet::plan_track_chunks(track, &packets, target_ms))
     }
 
+    /// Preserve the manifest's unique track plans while visiting uncued audio
+    /// blocks once. Retain one pending packet per track and one laced block.
+    pub(crate) fn plans(
+        &self,
+        source: &MediaSource,
+        tracks: &[&str],
+        target_ms: u64,
+    ) -> Result<Vec<ChunkPlan>> {
+        source.validate_current()?;
+        let selected = tracks
+            .iter()
+            .map(|track| select_chunk_track(&self.metadata.tracks, Some(track)))
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| anyhow::anyhow!("no matching Matroska track"))?;
+        let mut plans = Vec::with_capacity(tracks.len());
+        let mut audio = Vec::new();
+        for (index, (track, selected)) in tracks.iter().zip(&selected).enumerate() {
+            let cued = self
+                .cues
+                .as_ref()
+                .and_then(|cues| parse_cue_chunk_plan(cues, selected, self.scale, target_ms));
+            if let Some(mut plan) = cued {
+                if let Some(last) = plan.chunks.last_mut()
+                    && let Some(duration) = self.metadata.duration_ms
+                {
+                    last.duration =
+                        TimeDelta::millis(duration.saturating_sub(last.start.as_millis()).max(1));
+                }
+                plans.push(Some(plan));
+            } else if selected.kind == MatroskaTrackKind::Audio {
+                plans.push(None);
+                audio.push((index, AudioPlanBuilder::new(target_ms)));
+            } else {
+                plans.push(Some(self.plan(source, track, target_ms)?));
+            }
+        }
+        if !audio.is_empty() {
+            let limits = source.policy().parse_limits();
+            let mut scratch = Vec::new();
+            self.for_each_block(source, 0, u64::MAX, |block, timestamp| {
+                if timestamp == u64::MAX {
+                    return Ok(());
+                }
+                if let Some((index, builder)) = audio
+                    .iter_mut()
+                    .find(|(index, _)| selected[*index].number == block.track_number)
+                {
+                    builder.check_packet_budget(block.frames.len(), limits)?;
+                    push_block_packets(
+                        &mut scratch,
+                        block,
+                        timestamp,
+                        selected[*index].frame_duration,
+                    )
+                    .ok_or_else(|| anyhow::anyhow!("Matroska packet budget exceeded"))?;
+                    for packet in scratch.drain(..) {
+                        builder.push(packet);
+                    }
+                }
+                Ok(())
+            })?;
+            for (index, builder) in audio {
+                plans[index] = Some(builder.finish(tracks[index])?);
+            }
+        }
+        source.validate_current()?;
+        plans
+            .into_iter()
+            .map(|plan| plan.ok_or_else(|| anyhow::anyhow!("missing Matroska chunk plan")))
+            .collect()
+    }
+
     pub(crate) fn packets(
         &self,
         source: &MediaSource,
@@ -165,15 +237,76 @@ impl MatroskaFileIndex {
                 packets: Vec::new(),
             })
             .collect::<Vec<_>>();
+        let mut packet_count = 0_usize;
+        let mut video_started = vec![false; windows.len()];
+        let mut video_ended = vec![false; windows.len()];
+        let limits = source.policy().parse_limits();
+        self.for_each_block(source, start, end, |block, timestamp| {
+            if let Some(track_index) = selected
+                .iter()
+                .position(|track| track.number == block.track_number)
+            {
+                // Video windows are decode-order GOP partitions. Selecting
+                // by PTS alone can omit the next CRA while retaining its
+                // leading B pictures, which then reference a missing frame.
+                let include = if selected[track_index].kind == MatroskaTrackKind::Video {
+                    if block.keyframe && timestamp >= windows[track_index].2 {
+                        video_ended[track_index] = true;
+                    }
+                    if block.keyframe && timestamp >= windows[track_index].1 {
+                        video_started[track_index] = true;
+                    }
+                    video_started[track_index] && !video_ended[track_index]
+                } else {
+                    timestamp >= windows[track_index].1 && timestamp < windows[track_index].2
+                };
+                if include {
+                    packet_count = packet_count
+                        .checked_add(block.frames.len())
+                        .ok_or_else(|| anyhow::anyhow!("Matroska packet count overflow"))?;
+                    if packet_count > limits.max_samples_per_track
+                        || packet_count.saturating_mul(std::mem::size_of::<PacketRef>())
+                            > limits.max_index_bytes
+                    {
+                        bail!("cumulative Matroska packet budget exceeded");
+                    }
+                    push_block_packets(
+                        &mut output[track_index].packets,
+                        block,
+                        timestamp,
+                        selected[track_index].frame_duration,
+                    )
+                    .ok_or_else(|| anyhow::anyhow!("Matroska packet budget exceeded"))?;
+                }
+            }
+            Ok(())
+        })?;
+        for (output, selected) in output.iter_mut().zip(&selected) {
+            if output.packets.is_empty() {
+                bail!("no packets in Matroska time window");
+            }
+            repair_matroska_packet_timing(
+                &mut output.packets,
+                selected.kind,
+                selected.frame_duration,
+            );
+        }
+        source.validate_current()?;
+        Ok(output)
+    }
+
+    fn for_each_block(
+        &self,
+        source: &MediaSource,
+        start: u64,
+        end: u64,
+        mut consume: impl FnMut(&ClusterBlock, u64) -> Result<()>,
+    ) -> Result<()> {
         let span = matroska_timecode_to_ms(32_768, self.scale).saturating_add(1);
         let first = self
             .clusters
             .partition_point(|cluster| cluster.time_ms < start.saturating_sub(span));
         let mut visits = 0;
-        let mut packet_count = 0_usize;
-        let mut video_started = vec![false; windows.len()];
-        let mut video_ended = vec![false; windows.len()];
-        let limits = source.policy().parse_limits();
         for cluster in &self.clusters[first..] {
             if cluster.time_ms.saturating_sub(span) >= end {
                 break;
@@ -188,65 +321,89 @@ impl MatroskaFileIndex {
                     0xa0 => read_group(source, &element, &mut visits)?,
                     _ => None,
                 };
-                if let Some(block) = block
-                    && let Some(track_index) = selected
-                        .iter()
-                        .position(|track| track.number == block.track_number)
-                {
+                if let Some(block) = block {
                     let timestamp = matroska_timecode_to_ms(
                         cluster
                             .timecode
                             .saturating_add(i64::from(block.relative_timecode)),
                         self.scale,
                     );
-                    // Video windows are decode-order GOP partitions. Selecting
-                    // by PTS alone can omit the next CRA while retaining its
-                    // leading B pictures, which then reference a missing frame.
-                    let include = if selected[track_index].kind == MatroskaTrackKind::Video {
-                        if block.keyframe && timestamp >= windows[track_index].2 {
-                            video_ended[track_index] = true;
-                        }
-                        if block.keyframe && timestamp >= windows[track_index].1 {
-                            video_started[track_index] = true;
-                        }
-                        video_started[track_index] && !video_ended[track_index]
-                    } else {
-                        timestamp >= windows[track_index].1 && timestamp < windows[track_index].2
-                    };
-                    if include {
-                        packet_count = packet_count
-                            .checked_add(block.frames.len())
-                            .ok_or_else(|| anyhow::anyhow!("Matroska packet count overflow"))?;
-                        if packet_count > limits.max_samples_per_track
-                            || packet_count.saturating_mul(std::mem::size_of::<PacketRef>())
-                                > limits.max_index_bytes
-                        {
-                            bail!("cumulative Matroska packet budget exceeded");
-                        }
-                        push_block_packets(
-                            &mut output[track_index].packets,
-                            &block,
-                            timestamp,
-                            selected[track_index].frame_duration,
-                        )
-                        .ok_or_else(|| anyhow::anyhow!("Matroska packet budget exceeded"))?;
-                    }
+                    consume(&block, timestamp)?;
                 }
                 offset = element.end;
             }
         }
-        for (output, selected) in output.iter_mut().zip(&selected) {
-            if output.packets.is_empty() {
-                bail!("no packets in Matroska time window");
-            }
-            repair_matroska_packet_timing(
-                &mut output.packets,
-                selected.kind,
-                selected.frame_duration,
-            );
+        Ok(())
+    }
+}
+
+struct AudioPlanBuilder {
+    planner: crate::packet::TrackChunkPlanner,
+    pending: Option<PacketRef>,
+    last_duration: Option<TimeDelta>,
+    count: usize,
+}
+
+impl AudioPlanBuilder {
+    fn new(target_ms: u64) -> Self {
+        Self {
+            planner: crate::packet::TrackChunkPlanner::new(target_ms),
+            pending: None,
+            last_duration: None,
+            count: 0,
         }
-        source.validate_current()?;
-        Ok(output)
+    }
+
+    fn check_packet_budget(
+        &self,
+        additional: usize,
+        limits: super::super::ParseLimits,
+    ) -> Result<()> {
+        let count = self.count.checked_add(additional);
+        let defaults = super::super::ParseLimits::default();
+        if count.is_none_or(|count| {
+            count
+                > limits
+                    .max_samples_per_track
+                    .min(defaults.max_samples_per_track)
+                || count.saturating_mul(std::mem::size_of::<PacketRef>())
+                    > limits.max_index_bytes.min(defaults.max_index_bytes)
+        }) {
+            bail!("cumulative Matroska packet budget exceeded");
+        }
+        Ok(())
+    }
+
+    fn push(&mut self, packet: PacketRef) {
+        if let Some(mut previous) = self.pending.take() {
+            previous.duration = if previous.pts.scale == packet.pts.scale {
+                TimeDelta {
+                    units: packet.pts.units.saturating_sub(previous.pts.units),
+                    scale: packet.pts.scale,
+                }
+            } else {
+                TimeDelta::millis(
+                    packet
+                        .pts
+                        .as_millis()
+                        .saturating_sub(previous.pts.as_millis()),
+                )
+            };
+            self.last_duration = Some(previous.duration);
+            self.planner.push(&previous);
+        }
+        self.pending = Some(packet);
+        self.count += 1;
+    }
+
+    fn finish(mut self, track: &str) -> Result<ChunkPlan> {
+        let mut last = self
+            .pending
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("no packets in Matroska time window"))?;
+        last.duration = self.last_duration.unwrap_or_else(|| TimeDelta::millis(0));
+        self.planner.push(&last);
+        Ok(self.planner.finish(track))
     }
 }
 
@@ -290,7 +447,11 @@ fn read_block(
     let total = usize::try_from(element.end - element.payload)?;
     let mut size = total.min(16);
     loop {
-        let prefix = source.read_window_unvalidated(element.payload, size)?;
+        let prefix = if size <= 64 {
+            source.read_metadata_prefix(element.payload, size)?
+        } else {
+            source.read_window_unvalidated(element.payload, size)?
+        };
         if let Some(block) =
             parse_block_prefix(&prefix, total, usize::try_from(element.payload)?, keyframe)
         {
@@ -300,5 +461,325 @@ fn read_block(
             bail!("invalid or oversized Matroska lacing header");
         }
         size = (size * 2).min(total);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn element(id: u32, payload: &[u8]) -> Vec<u8> {
+        let id = id.to_be_bytes();
+        let first = id.iter().position(|byte| *byte != 0).unwrap();
+        [
+            &id[first..],
+            &((1_u64 << 56) | payload.len() as u64).to_be_bytes(),
+            payload,
+        ]
+        .concat()
+    }
+
+    fn track(number: u8, kind: u8, duration: Option<u64>) -> Vec<u8> {
+        let mut bytes = [
+            element(0xd7, &[number]),
+            element(0x83, &[kind]),
+            element(
+                0x86,
+                if kind == 1 {
+                    b"V_MPEG4/ISO/AVC"
+                } else {
+                    b"A_AAC"
+                },
+            ),
+        ]
+        .concat();
+        if let Some(duration) = duration {
+            bytes.extend(element(0x23e383, &duration.to_be_bytes()));
+        }
+        element(0xae, &bytes)
+    }
+
+    fn block(track: u8, time: i16, flags: u8, lace: &[u8]) -> Vec<u8> {
+        element(
+            0xa3,
+            &[
+                &[0x80 | track],
+                &time.to_be_bytes()[..],
+                &[flags],
+                lace,
+                &[7; 12],
+            ]
+            .concat(),
+        )
+    }
+
+    fn fixture(cue_audio: bool) -> (tempfile::TempDir, std::path::PathBuf) {
+        let tracks = element(
+            0x1654_ae6b,
+            &[
+                track(1, 1, Some(41_708_333)),
+                track(2, 2, Some(20_000_001)),
+                track(3, 2, None),
+            ]
+            .concat(),
+        );
+        let mut cues = Vec::new();
+        for time in [0_u64, 4_000, 8_000] {
+            let mut positions = element(0xb7, &element(0xf7, &[1]));
+            if cue_audio {
+                positions.extend(element(0xb7, &element(0xf7, &[3])));
+            }
+            cues.extend(element(
+                0xbb,
+                &[element(0xb3, &time.to_be_bytes()), positions].concat(),
+            ));
+        }
+        let clusters = [
+            (
+                0_u64,
+                vec![
+                    block(1, 0, 0x80, &[]),
+                    block(2, 0, 0x80, &[]),
+                    block(3, 0, 0, &[]),
+                    block(2, 20, 0x82, &[2, 3, 4]), // Xiph lacing.
+                    block(3, 0, 0x80, &[]),
+                    block(3, -2, 0x80, &[]),
+                ],
+            ),
+            (
+                1_000,
+                vec![
+                    block(2, 0, 0x84, &[2]),             // Fixed lacing.
+                    block(3, 0, 0x86, &[2, 0x83, 0xc0]), // EBML lacing.
+                ],
+            ),
+            (
+                4_000,
+                vec![
+                    block(1, 0, 0x80, &[]),
+                    block(2, 0, 0, &[]),
+                    block(3, 0, 0x80, &[]),
+                    block(2, 100, 0x80, &[]),
+                    block(3, -100, 0, &[]),
+                ],
+            ),
+        ]
+        .into_iter()
+        .map(|(time, blocks)| {
+            element(
+                0x1f43_b675,
+                &[
+                    element(0xe7, &time.to_be_bytes()),
+                    element(0xec, &[0; 8_192]),
+                    blocks.concat(),
+                ]
+                .concat(),
+            )
+        })
+        .collect::<Vec<_>>()
+        .concat();
+        let bytes = [
+            element(0x1a45_dfa3, &[]),
+            element(
+                0x1853_8067,
+                &[
+                    element(
+                        0x1549_a966,
+                        &[
+                            element(0x2ad7b1, &1_000_000_u64.to_be_bytes()),
+                            element(0x4489, &10_000_f64.to_be_bytes()),
+                        ]
+                        .concat(),
+                    ),
+                    tracks,
+                    element(0x1c53_bb6b, &cues),
+                    clusters,
+                ]
+                .concat(),
+            ),
+        ]
+        .concat();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("multi-audio.mkv");
+        std::fs::write(&path, bytes).unwrap();
+        (directory, path)
+    }
+
+    #[test]
+    fn batch_audio_plans_match_individual_plans_with_one_cluster_pass() {
+        for cue_audio in [false, true] {
+            let (_directory, path) = fixture(cue_audio);
+            let source = MediaSource::open_packet_copy(&path).unwrap();
+            let index = source.matroska_index().unwrap();
+            let tracks = ["v0", "a0", "a1"];
+            let before = source.io_stats();
+            let expected = tracks
+                .iter()
+                .map(|track| index.plan(&source, track, 1_000).unwrap())
+                .collect::<Vec<_>>();
+            let individual = source.io_stats();
+            let actual = index.plans(&source, &tracks, 1_000).unwrap();
+            let batch = source.io_stats();
+            assert_eq!(actual, expected, "audio cues: {cue_audio}");
+            assert_eq!(individual.2 - before.2, if cue_audio { 3 } else { 6 });
+            assert_eq!(batch.2 - individual.2, 3);
+            assert!(batch.1 - individual.1 <= individual.1 - before.1);
+            if !cue_audio {
+                assert!(batch.1 - individual.1 < individual.1 - before.1);
+            }
+            eprintln!(
+                "audio_plan_read_proof audio_cues={cue_audio} individual_read_ops={} batch_read_ops={} individual_cluster_visits={} batch_cluster_visits={}",
+                individual.1 - before.1,
+                batch.1 - individual.1,
+                individual.2 - before.2,
+                batch.2 - individual.2,
+            );
+
+            let source = MediaSource::open_packet_copy(&path).unwrap();
+            let manifest = crate::playback_manifest::build_file_matroska_manifest(
+                &source,
+                &path,
+                crate::playback_manifest::MatroskaManifestOptions {
+                    chunk_target_ms: 1_000,
+                    include_audio: true,
+                },
+            )
+            .unwrap();
+            assert_eq!(source.io_stats().2, 3);
+            for (track, expected) in manifest.tracks.iter().zip(expected) {
+                assert_eq!(track.chunks, expected.chunks);
+            }
+        }
+    }
+
+    #[test]
+    fn streaming_audio_timing_matches_repaired_packet_timing_at_edges() {
+        let nanos = TimeScale {
+            units_per_second: 1_000_000_000,
+        };
+        for times in [
+            vec![(123, nanos)],
+            vec![(0, nanos), (0, nanos), (100_000_001, nanos), (3, nanos)],
+            vec![
+                (0, TimeScale::MILLIS),
+                (250_000_001, nanos),
+                (500, TimeScale::MILLIS),
+            ],
+        ] {
+            let mut packets = times
+                .into_iter()
+                .enumerate()
+                .map(|(index, (units, scale))| PacketRef {
+                    source_offset: index as u64,
+                    size: 1,
+                    pts: TimePoint { units, scale },
+                    dts: TimePoint { units, scale },
+                    duration: TimeDelta { units: 1, scale },
+                    keyframe: index % 2 == 0,
+                })
+                .collect::<Vec<_>>();
+            let mut builder = AudioPlanBuilder::new(100);
+            for packet in packets.iter().cloned() {
+                builder.push(packet);
+            }
+            // Reproduce push_block_packets' next-PTS duration updates before
+            // the existing final-packet repair, including mixed time scales.
+            for index in 1..packets.len() {
+                let next = packets[index].pts;
+                let previous = &mut packets[index - 1];
+                previous.duration = if previous.pts.scale == next.scale {
+                    TimeDelta {
+                        units: next.units.saturating_sub(previous.pts.units),
+                        scale: next.scale,
+                    }
+                } else {
+                    TimeDelta::millis(next.as_millis().saturating_sub(previous.pts.as_millis()))
+                };
+            }
+            repair_matroska_packet_timing(&mut packets, MatroskaTrackKind::Audio, None);
+            assert_eq!(
+                builder.finish("a0").unwrap(),
+                crate::packet::plan_track_chunks("a0", &packets, 100)
+            );
+        }
+        assert!(AudioPlanBuilder::new(100).finish("a0").is_err());
+    }
+
+    #[test]
+    fn batch_audio_keeps_packet_budgets_independent_per_track() {
+        let (_directory, path) = fixture(false);
+        let source = MediaSource::open_packet_copy(&path).unwrap();
+        let index = source.matroska_index().unwrap();
+        let counts = ["a0", "a1"].map(|track| {
+            index.packets(&source, &[track], 0, u64::MAX).unwrap()[0]
+                .packets
+                .len()
+        });
+        let per_track_max = *counts.iter().max().unwrap();
+        assert!(counts.iter().sum::<usize>() > per_track_max);
+        for limit in [per_track_max, per_track_max - 1] {
+            let runtime = crate::EngineRuntime::new(crate::ResourcePolicy {
+                index_bytes: limit * std::mem::size_of::<PacketRef>(),
+                ..crate::ResourcePolicy::default()
+            })
+            .unwrap();
+            let source =
+                MediaSource::open_with_context(&path, runtime, crate::WorkControl::default())
+                    .unwrap();
+            let index = source.matroska_index().unwrap();
+            assert_eq!(
+                index.plan(&source, "a0", 1_000).is_ok(),
+                limit == per_track_max
+            );
+            assert_eq!(
+                index.plans(&source, &["a0", "a1"], 1_000).is_ok(),
+                limit == per_track_max
+            );
+        }
+        let mut builder = AudioPlanBuilder::new(100);
+        builder.count = usize::MAX;
+        assert!(
+            builder
+                .check_packet_budget(1, super::super::super::ParseLimits::default())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn batch_audio_scan_honors_cancellation_and_empty_tracks() {
+        let (_directory, path) = fixture(false);
+        let control = crate::WorkControl::default();
+        let source = MediaSource::open_with_context(
+            &path,
+            crate::EngineRuntime::new(crate::ResourcePolicy::default()).unwrap(),
+            control.clone(),
+        )
+        .unwrap();
+        let index = source.matroska_index().unwrap();
+        let mut visits = 0;
+        assert!(
+            index
+                .for_each_block(&source, 0, u64::MAX, |_, _| {
+                    visits += 1;
+                    control.cancel();
+                    Ok(())
+                })
+                .is_err()
+        );
+        assert_eq!(visits, 1);
+        assert!(index.plans(&source, &["a0", "a1"], 1_000).is_err());
+
+        let empty = [
+            element(0x1a45_dfa3, &[]),
+            element(0x1853_8067, &element(0x1654_ae6b, &track(1, 2, None))),
+        ]
+        .concat();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("empty-track.mkv");
+        std::fs::write(&path, empty).unwrap();
+        let source = MediaSource::open_packet_copy(&path).unwrap();
+        let index = source.matroska_index().unwrap();
+        assert!(index.plan(&source, "a0", 1_000).is_err());
+        assert!(index.plans(&source, &["a0"], 1_000).is_err());
     }
 }

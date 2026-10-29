@@ -45,6 +45,18 @@ and the scaler retains coordinates/output storage. These pools reduce allocator
 traffic; portable decode-to-encode still crosses BGRA and is not an end-to-end
 planar pipeline.
 
+Native H.264 fragments remain aligned with source keyframes, so an individual
+fragment can be longer than the requested segment target. The encoder target is
+capped against every source fragment in the immutable session plan and the
+existing half-output retained-payload ceiling. The calculation reserves 25% for
+rate-control variability, rounds each duration upward to whole seconds, and
+allows one additional burst second. The smallest resulting rate or the requested
+rate, whichever is lower, applies to the entire session, including new seek
+windows and software fallback. Lower requested rates are preserved. Existing
+encoded-payload and final-fragment byte checks remain authoritative; no resource
+ceiling is increased. For example, a 13.764-second source fragment lowers a
+100 Mbps request to approximately 26.84 Mbps under the default output policy.
+
 The current source-reader hard safety ceiling remains 64 MiB per owned read even
 if a custom policy requests more. Finalized modern containers are required;
 unknown-sized Matroska Segments are accepted, unknown-sized children are not.

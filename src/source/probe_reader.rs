@@ -197,6 +197,14 @@ pub(crate) struct Element {
 }
 
 pub(crate) fn element(file: &File, offset: u64, end: u64) -> Result<Element> {
+    if offset >= end {
+        bail!("element offset outside parent");
+    }
+    let header = read(file, offset, (end - offset).min(12) as usize)?;
+    element_from_header(&header, offset, end)
+}
+
+pub(crate) fn element_from_header(header: &[u8], offset: u64, end: u64) -> Result<Element> {
     READ_COUNTERS.with(|cell| {
         let mut value = cell.get();
         value.elements += 1;
@@ -205,7 +213,6 @@ pub(crate) fn element(file: &File, offset: u64, end: u64) -> Result<Element> {
     if offset >= end {
         bail!("element offset outside parent");
     }
-    let header = read(file, offset, (end - offset).min(12) as usize)?;
     let first = *header
         .first()
         .ok_or_else(|| anyhow::anyhow!("missing EBML element"))?;
@@ -224,7 +231,9 @@ pub(crate) fn element(file: &File, offset: u64, end: u64) -> Result<Element> {
     for byte in &header[id_len + 1..id_len + size_len] {
         size = (size << 8) | u64::from(*byte);
     }
-    let payload = offset + (id_len + size_len) as u64;
+    let payload = offset
+        .checked_add((id_len + size_len) as u64)
+        .ok_or_else(|| anyhow::anyhow!("EBML header offset overflow"))?;
     let unknown = size == (1_u64 << (size_len * 7)) - 1;
     let element_end = if unknown {
         end
