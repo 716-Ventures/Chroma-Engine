@@ -1,7 +1,7 @@
 //! Same-basename subtitle discovery never follows symlinks or uses authored names as output paths.
 use super::{AGGREGATE_LIMIT, SCRIPT_LIMIT, SubtitleResources, SubtitleScriptResource};
 use anyhow::{Context, Result, bail};
-use std::{fs::OpenOptions, io::Read, path::Path};
+use std::{collections::HashSet, fs::OpenOptions, io::Read, path::Path};
 
 pub(super) fn append(
     input: &Path,
@@ -9,6 +9,7 @@ pub(super) fn append(
     resources: &mut SubtitleResources,
     total: &mut usize,
     first_id: usize,
+    source: Option<&crate::source::MediaSource>,
 ) -> Result<()> {
     let directory = input
         .parent()
@@ -20,7 +21,7 @@ pub(super) fn append(
         .context("media basename is invalid")?
         .to_lowercase();
     let prefix = format!("{stem}.");
-    let mut candidates = Vec::new();
+    let mut siblings = Vec::new();
     for (index, entry) in std::fs::read_dir(&directory)?.enumerate() {
         if index >= 10_000 {
             bail!("sidecar directory entry limit exceeded");
@@ -30,7 +31,22 @@ pub(super) fn append(
         if !kind.is_file() || kind.is_symlink() {
             continue;
         }
-        let path = entry.path();
+        siblings.push(entry.path());
+    }
+    // VobSub pairs are case-insensitive, just like subtitle extension discovery.
+    // Only regular, non-symlink siblings from the bounded scan may suppress the
+    // text reader: the bitmap reader validates and opens both files separately.
+    let indexes = siblings
+        .iter()
+        .filter(|path| {
+            path.extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("idx"))
+        })
+        .filter_map(|path| path.file_name()?.to_str().map(str::to_lowercase))
+        .collect::<HashSet<_>>();
+    let mut candidates = Vec::new();
+    for path in siblings {
         let Some(extension) = path
             .extension()
             .and_then(|extension| extension.to_str())
@@ -38,8 +54,23 @@ pub(super) fn append(
         else {
             continue;
         };
-        if !["ass", "ssa", "srt", "vtt", "webvtt"].contains(&extension.as_str()) {
+        if ![
+            "ass", "ssa", "srt", "vtt", "webvtt", "ttml", "dfxp", "xml", "smi", "sami", "sub",
+            "txt", "sbv", "scc",
+        ]
+        .contains(&extension.as_str())
+        {
             continue;
+        }
+        if extension == "sub" {
+            let index = path.with_extension("idx");
+            if index
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| indexes.contains(&name.to_lowercase()))
+            {
+                continue;
+            }
         }
         let Some(name) = path.file_stem().and_then(|name| name.to_str()) else {
             continue;
@@ -61,7 +92,29 @@ pub(super) fn append(
         ));
     }
     candidates.sort_by(|left, right| left.0.cmp(&right.0));
-    for (index, (path, extension, suffix)) in candidates.into_iter().enumerate() {
+    let (source_duration, source_fps) = source
+        .map(|source| {
+            if crate::container::matroska::looks_like_ebml(source.as_ref()) {
+                let metadata = crate::container::matroska::parse_basic_metadata(source.as_ref());
+                (
+                    metadata.duration_ms,
+                    metadata.tracks.iter().find_map(|t| {
+                        t.default_duration_ns
+                            .filter(|v| *v > 0)
+                            .map(|v| 1e9 / v as f64)
+                    }),
+                )
+            } else {
+                let metadata = crate::container::mp4::parse_basic_metadata(source.as_ref());
+                (
+                    metadata.duration_ms,
+                    metadata.tracks.iter().find_map(|t| t.frame_rate),
+                )
+            }
+        })
+        .unwrap_or((None, None));
+    let mut next_id = first_id;
+    for (path, extension, suffix) in candidates {
         let mut options = OpenOptions::new();
         options.read(true);
         #[cfg(unix)]
@@ -73,8 +126,16 @@ pub(super) fn append(
             continue;
         };
         let metadata = file.metadata()?;
-        if !metadata.is_file() || metadata.len() > SCRIPT_LIMIT as u64 {
-            bail!("sidecar script size limit exceeded");
+        if !metadata.is_file() {
+            continue;
+        }
+        if metadata.len() > SCRIPT_LIMIT as u64 {
+            reject(
+                resources,
+                &mut next_id,
+                "External subtitle script size limit exceeded",
+            );
+            continue;
         }
         if path.symlink_metadata()?.file_type().is_symlink()
             || path.canonicalize()?.parent() != Some(directory.as_path())
@@ -86,46 +147,97 @@ pub(super) fn append(
             .take((SCRIPT_LIMIT + 1) as u64)
             .read_to_end(&mut bytes)?;
         if bytes.len() > SCRIPT_LIMIT {
-            bail!("sidecar script size limit exceeded");
+            reject(
+                resources,
+                &mut next_id,
+                "External subtitle script size limit exceeded",
+            );
+            continue;
         }
-        let text = if let Some(data) = bytes.strip_prefix(&[0xff, 0xfe]) {
-            let (pairs, remainder) = data.as_chunks::<2>();
-            if !remainder.is_empty() {
+        let text = match super::text_formats::encoding::decode(&extension, &bytes) {
+            Ok(text) => text,
+            Err(_) => {
+                reject(
+                    resources,
+                    &mut next_id,
+                    "Unsupported external subtitle text encoding",
+                );
                 continue;
             }
-            let units = pairs
-                .iter()
-                .map(|pair| u16::from_le_bytes(*pair))
-                .collect::<Vec<_>>();
-            let Ok(text) = String::from_utf16(&units) else {
-                continue;
-            };
-            text
-        } else if let Some(data) = bytes.strip_prefix(&[0xfe, 0xff]) {
-            let (pairs, remainder) = data.as_chunks::<2>();
-            if !remainder.is_empty() {
-                continue;
-            }
-            let units = pairs
-                .iter()
-                .map(|pair| u16::from_be_bytes(*pair))
-                .collect::<Vec<_>>();
-            let Ok(text) = String::from_utf16(&units) else {
-                continue;
-            };
-            text
-        } else {
-            let Ok(text) = String::from_utf8(bytes) else {
-                continue;
-            };
-            text
         };
+        if !["ass", "ssa", "srt", "vtt", "webvtt"].contains(&extension.as_str()) {
+            let converted = match super::text_formats::convert(
+                &extension,
+                &text,
+                source_duration,
+                source_fps,
+            ) {
+                Ok(tracks) => tracks,
+                Err(_) => {
+                    // Binary SUB belongs to the paired IDX/bitmap reader, and
+                    // ordinary same-basename XML/TXT files need not be captions.
+                    if !["sub", "xml", "txt"].contains(&extension.as_str()) {
+                        resources
+                            .unavailable_tracks
+                            .push(super::UnavailableSubtitleResource {
+                                id: format!("s{next_id}"),
+                                reason: "Malformed or unsupported external timed-text subtitle"
+                                    .into(),
+                            });
+                        next_id += 1;
+                    }
+                    continue;
+                }
+            };
+            for converted in converted {
+                if resources.tracks.len() >= 128 {
+                    bail!("subtitle track limit exceeded");
+                }
+                *total = total
+                    .checked_add(converted.webvtt.len())
+                    .context("sidecar aggregate overflow")?;
+                if *total > AGGREGATE_LIMIT {
+                    bail!("sidecar aggregate size limit exceeded");
+                }
+                let id = format!("s{next_id}");
+                next_id += 1;
+                let filename = format!("{id}.vtt");
+                crate::output::publish_bytes(&output.join(&filename), converted.webvtt.as_bytes())?;
+                let parts = suffix.split(['.', '_']).collect::<Vec<_>>();
+                resources.tracks.push(SubtitleScriptResource {
+                    id,
+                    codec: "webvtt".into(),
+                    file_name: filename.clone(),
+                    web_vtt_file_name: Some(filename),
+                    overlay_file_name: None,
+                    language: converted.language.or_else(|| {
+                        parts
+                            .iter()
+                            .find(|p| {
+                                p.len() >= 2
+                                    && p.len() <= 3
+                                    && p.bytes().all(|c| c.is_ascii_alphabetic())
+                            })
+                            .map(|p| p.to_string())
+                    }),
+                    name: converted
+                        .label
+                        .or_else(|| Some(suffix.replace(['.', '_'], " "))),
+                    default: parts.contains(&"default"),
+                    forced: parts.contains(&"forced") || parts.contains(&"foreign"),
+                    duration_ms: converted.duration_ms,
+                    external: true,
+                });
+            }
+            continue;
+        }
         let codec = match extension.as_str() {
             "srt" => "subrip",
             "vtt" | "webvtt" => "webvtt",
             codec => codec,
         };
-        let id = format!("s{}", first_id + index);
+        let id = format!("s{next_id}");
+        next_id += 1;
         let (vtt, duration_ms) = if codec == "subrip" {
             let cues = crate::codec::subtitles::parse_subrip(&text);
             if cues.is_empty() {
@@ -200,6 +312,7 @@ pub(super) fn append(
             codec: codec.into(),
             file_name,
             web_vtt_file_name,
+            overlay_file_name: None,
             language,
             name: Some(name),
             default,
@@ -209,6 +322,16 @@ pub(super) fn append(
         });
     }
     Ok(())
+}
+
+fn reject(resources: &mut SubtitleResources, next_id: &mut usize, reason: &str) {
+    resources
+        .unavailable_tracks
+        .push(super::UnavailableSubtitleResource {
+            id: format!("s{next_id}"),
+            reason: reason.into(),
+        });
+    *next_id += 1;
 }
 
 #[cfg(test)]
@@ -236,7 +359,7 @@ mod tests {
         let output = dir.path().join("output");
         std::fs::create_dir(&output).unwrap();
         let mut resources = SubtitleResources::default();
-        append(&input, &output, &mut resources, &mut 0, 4).unwrap();
+        append(&input, &output, &mut resources, &mut 0, 4, None).unwrap();
         assert_eq!(resources.tracks.len(), 3);
         assert!(resources.tracks.iter().all(|track| track.external));
         let ass = resources
@@ -262,6 +385,92 @@ mod tests {
         assert!(vtt.contains("X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:0"));
         assert!(!output.join("Unrelated.srt").exists());
     }
+    #[test]
+    fn uppercase_vobsub_pair_skips_binary_text_read_and_preserves_valid_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("Film.mkv");
+        std::fs::write(&input, b"video").unwrap();
+        std::fs::write(dir.path().join("Film.en.IDX"), b"# VobSub index file, v7\n").unwrap();
+        // Real VobSub files routinely exceed the text script budget. The text
+        // reader must leave this case-insensitive pair to the bitmap reader.
+        std::fs::File::create(dir.path().join("Film.en.SUB"))
+            .unwrap()
+            .set_len(SCRIPT_LIMIT as u64 + 1)
+            .unwrap();
+        std::fs::write(
+            dir.path().join("Film.fr.srt"),
+            "1\n00:00:01,000 --> 00:00:02,000\nValid caption\n",
+        )
+        .unwrap();
+        let output = dir.path().join("output");
+        std::fs::create_dir(&output).unwrap();
+        let mut resources = SubtitleResources::default();
+        append(&input, &output, &mut resources, &mut 0, 0, None).unwrap();
+        assert_eq!(resources.tracks.len(), 1);
+        assert!(resources.unavailable_tracks.is_empty());
+        assert_eq!(resources.tracks[0].language.as_deref(), Some("fr"));
+        assert_eq!(std::fs::read_dir(output).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn oversized_individual_sidecar_is_reported_without_disabling_valid_tracks() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("Film.mkv");
+        std::fs::write(&input, b"video").unwrap();
+        std::fs::File::create(dir.path().join("Film.aa.srt"))
+            .unwrap()
+            .set_len(SCRIPT_LIMIT as u64 + 1)
+            .unwrap();
+        std::fs::write(
+            dir.path().join("Film.en.srt"),
+            "1\n00:00:03,000 --> 00:00:04,500\nValid caption\n",
+        )
+        .unwrap();
+        let output = dir.path().join("output");
+        std::fs::create_dir(&output).unwrap();
+        let mut resources = SubtitleResources::default();
+        let mut total = 0;
+        append(&input, &output, &mut resources, &mut total, 4, None).unwrap();
+        assert_eq!(resources.unavailable_tracks.len(), 1);
+        assert_eq!(resources.unavailable_tracks[0].id, "s4");
+        assert!(
+            resources.unavailable_tracks[0]
+                .reason
+                .contains("size limit")
+        );
+        assert_eq!(resources.tracks.len(), 1);
+        assert_eq!(resources.tracks[0].id, "s5");
+        let text = std::fs::read_to_string(
+            output.join(resources.tracks[0].web_vtt_file_name.as_ref().unwrap()),
+        )
+        .unwrap();
+        assert!(text.contains("00:00:03.000 --> 00:00:04.500"));
+        assert!(text.contains("Valid caption"));
+        assert!(total > 0 && total < SCRIPT_LIMIT);
+        assert!(!output.join("s4.srt").exists());
+    }
+
+    #[test]
+    fn invalid_unicode_sidecar_is_isolated_from_valid_tracks() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("Film.mkv");
+        std::fs::write(&input, b"video").unwrap();
+        std::fs::write(dir.path().join("Film.aa.srt"), [0xff, 0xfe, 0x41]).unwrap();
+        std::fs::write(
+            dir.path().join("Film.en.srt"),
+            "1\n00:00:01,000 --> 00:00:02,000\nValid caption\n",
+        )
+        .unwrap();
+        let output = dir.path().join("output");
+        std::fs::create_dir(&output).unwrap();
+        let mut resources = SubtitleResources::default();
+        append(&input, &output, &mut resources, &mut 0, 0, None).unwrap();
+        assert_eq!(resources.unavailable_tracks.len(), 1);
+        assert!(resources.unavailable_tracks[0].reason.contains("encoding"));
+        assert_eq!(resources.tracks.len(), 1);
+        assert_eq!(resources.tracks[0].language.as_deref(), Some("en"));
+    }
+
     #[cfg(unix)]
     #[test]
     fn sidecar_symlinks_are_never_followed() {
@@ -274,7 +483,7 @@ mod tests {
         std::fs::write(&secret, b"outside content").unwrap();
         symlink(&secret, dir.path().join("Film.en.ass")).unwrap();
         let mut resources = SubtitleResources::default();
-        append(&input, dir.path(), &mut resources, &mut 0, 0).unwrap();
+        append(&input, dir.path(), &mut resources, &mut 0, 0, None).unwrap();
         assert!(resources.tracks.is_empty());
     }
 }

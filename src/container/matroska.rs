@@ -991,6 +991,8 @@ fn normalize_codec_id(id: &str) -> String {
         "S_TEXT/WEBVTT" => "webvtt",
         "S_HDMV/PGS" => "hdmv_pgs_subtitle",
         "S_VOBSUB" => "dvd_subtitle",
+        "S_DVBSUB" => "dvb_subtitle",
+        "S_TEXT/TTML" => "ttml",
         _ => id.trim(),
     }
     .to_string()

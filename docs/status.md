@@ -37,7 +37,7 @@ player/audio/video validation across the representative media matrix.
 ## Known functional limits
 
 - HDR-to-SDR tone mapping is not implemented; compatible HDR packet copy remains available.
-- Bitmap subtitle burn-in is not implemented; supported text subtitles use sidecars/renditions.
+- Text subtitles use scripts/renditions and PGS/DVD/DVB use positioned bitmap overlays for capable clients; bitmap burn-in is not implemented. See the [format matrix and verification](audits/2026-10-29-mainstream-subtitles.md).
 - Container, profile, channel-layout, and target restrictions remain explicit; see the [media profile](modern-media-support.md).
 - Linux/Windows native-surface optimization and end-to-end portable planar processing remain open.
 - NAS software-video fallback can be disabled by policy. Unsupported or oversized work must fail rather than exceed the host budget.

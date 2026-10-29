@@ -288,7 +288,16 @@ enum Command {
         video_mode: NativeFmp4VideoModeArg,
     },
     /// Extract authored ASS/SSA, native SRT/WebVTT, sidecars and font resources.
-    SubtitleResources { input: PathBuf, output_dir: PathBuf },
+    SubtitleResources {
+        input: PathBuf,
+        output_dir: PathBuf,
+        /// Extract native text renditions without bitmap or rich-overlay work.
+        #[arg(long)]
+        native_text_only: bool,
+        /// Native external text only; embedded text is rendered asynchronously.
+        #[arg(long, conflicts_with = "native_text_only")]
+        external_text_only: bool,
+    },
     /// Warm the selected encoder backend.
     Warmup,
     /// Package a source into native HLS VOD output.
@@ -799,8 +808,21 @@ pub fn run() -> Result<()> {
                 bridge_audio_chunk(&source, track.as_deref(), chunk_index, target_ms, bitrate)?;
             println!("{}", serde_json::to_string_pretty(&bridge)?);
         }
-        Command::SubtitleResources { input, output_dir } => {
-            let resources = crate::write_subtitle_resources(&input, &output_dir)?;
+        Command::SubtitleResources {
+            input,
+            output_dir,
+            native_text_only,
+            external_text_only,
+        } => {
+            let resources = if native_text_only || external_text_only {
+                crate::codec::subtitle_resources::write_native_text_resources(
+                    &input,
+                    &output_dir,
+                    external_text_only,
+                )?
+            } else {
+                crate::write_subtitle_resources(&input, &output_dir)?
+            };
             println!("{}", serde_json::to_string_pretty(&resources)?);
         }
         Command::TranscodeFmp4Init {

@@ -1,0 +1,316 @@
+{
+  "schemaVersion": 1,
+  "qualifiedDate": "2026-10-29",
+  "scope": "Native subtitle-resource extraction from six existing real-media fixtures. Only neutral technical measurements are included; source captions, frames, paths and library identifiers remain private.",
+  "build": {
+    "profile": "release",
+    "platform": "macOS arm64",
+    "sha256": "ce9d6b7ee8c188f0351f8afe4ba8e8dd1e407e569bb524448cb902e06c19412f"
+  },
+  "timingCaveat": "Sequential observed extraction times use uncontrolled, previously accessed NAS and OS caches while other validation may be running. They do not measure cold storage performance, video startup latency or guaranteed subtitle availability time.",
+  "checks": [
+    "Native worker completed successfully with no unavailable subtitle tracks.",
+    "Every published text track contains nonempty timed cues; every ASS overlay contains authored or normalized dialogue events.",
+    "Every bitmap cue has ordered nonoverlapping positive duration; every image lies inside its declared source canvas.",
+    "Every published PNG has a valid PNG signature, matching IHDR dimensions, eight-bit RGBA color type and bounded file size.",
+    "Extracted resources stay within the shared 256 MiB bitmap and 32 MiB text/font budgets."
+  ],
+  "fixtures": [
+    {
+      "fixture": "subtitle-fixture-01",
+      "container": "mkv",
+      "subtitleFamily": "hdmv_pgs_subtitle",
+      "durationMs": 1371996,
+      "video": {
+        "codec": "hevc",
+        "width": 1920,
+        "height": 1080,
+        "frameRate": 23.976024167640553,
+        "pixelFormat": "yuv420-10bit",
+        "highBitDepth": true
+      },
+      "redistributable": false,
+      "status": "passed",
+      "observedExtractionSeconds": 1.063,
+      "resources": {
+        "tracks": 2,
+        "fonts": 0,
+        "unavailable": 0,
+        "outputBytes": 7080887
+      },
+      "trackChecks": [
+        {
+          "id": "s0",
+          "codec": "hdmv_pgs_subtitle",
+          "cues": 307,
+          "images": 312,
+          "canvas": [
+            1920,
+            1080
+          ],
+          "lastEndMs": 1370912,
+          "firstCueStartMs": 5590,
+          "firstCueEndMs": 16434
+        },
+        {
+          "id": "s1",
+          "codec": "hdmv_pgs_subtitle",
+          "cues": 37,
+          "images": 37,
+          "canvas": [
+            1920,
+            1080
+          ],
+          "lastEndMs": 1370912,
+          "firstCueStartMs": 5590,
+          "firstCueEndMs": 16434
+        }
+      ]
+    },
+    {
+      "fixture": "subtitle-fixture-02",
+      "container": "mkv",
+      "subtitleFamily": "s_dvbsub",
+      "durationMs": 3720574,
+      "video": {
+        "codec": "h264",
+        "width": 1920,
+        "height": 1080,
+        "frameRate": 25.0,
+        "pixelFormat": "yuv420-8bit",
+        "highBitDepth": false
+      },
+      "redistributable": false,
+      "status": "passed",
+      "observedExtractionSeconds": 2.994,
+      "resources": {
+        "tracks": 2,
+        "fonts": 0,
+        "unavailable": 0,
+        "outputBytes": 14848714
+      },
+      "trackChecks": [
+        {
+          "id": "s1",
+          "codec": "subrip",
+          "cues": 1586,
+          "overlay": true
+        },
+        {
+          "id": "s0",
+          "codec": "dvb_subtitle",
+          "cues": 1585,
+          "images": 2505,
+          "canvas": [
+            1920,
+            1080
+          ],
+          "lastEndMs": 2821339,
+          "firstCueStartMs": 2862,
+          "firstCueEndMs": 4033
+        }
+      ]
+    },
+    {
+      "fixture": "subtitle-fixture-03",
+      "container": "mkv",
+      "subtitleFamily": "ass",
+      "durationMs": 1440082,
+      "video": {
+        "codec": "hevc",
+        "width": 1920,
+        "height": 1080,
+        "frameRate": 23.976024167640553,
+        "pixelFormat": "yuv420-10bit",
+        "highBitDepth": true
+      },
+      "redistributable": false,
+      "status": "passed",
+      "observedExtractionSeconds": 0.199,
+      "resources": {
+        "tracks": 10,
+        "fonts": 0,
+        "unavailable": 0,
+        "outputBytes": 348102
+      },
+      "trackChecks": [
+        {
+          "id": "s0",
+          "codec": "ass",
+          "cues": 325,
+          "overlay": true
+        },
+        {
+          "id": "s1",
+          "codec": "ass",
+          "cues": 319,
+          "overlay": true
+        },
+        {
+          "id": "s2",
+          "codec": "ass",
+          "cues": 348,
+          "overlay": true
+        },
+        {
+          "id": "s3",
+          "codec": "ass",
+          "cues": 309,
+          "overlay": true
+        },
+        {
+          "id": "s4",
+          "codec": "ass",
+          "cues": 345,
+          "overlay": true
+        },
+        {
+          "id": "s5",
+          "codec": "ass",
+          "cues": 337,
+          "overlay": true
+        },
+        {
+          "id": "s6",
+          "codec": "ass",
+          "cues": 374,
+          "overlay": true
+        },
+        {
+          "id": "s7",
+          "codec": "ass",
+          "cues": 308,
+          "overlay": true
+        },
+        {
+          "id": "s8",
+          "codec": "ass",
+          "cues": 326,
+          "overlay": true
+        },
+        {
+          "id": "s9",
+          "codec": "ass",
+          "cues": 345,
+          "overlay": true
+        }
+      ]
+    },
+    {
+      "fixture": "subtitle-fixture-04",
+      "container": "mkv",
+      "subtitleFamily": "subrip",
+      "durationMs": 1420053,
+      "video": {
+        "codec": "hevc",
+        "width": 1920,
+        "height": 1080,
+        "frameRate": 23.976024167640553,
+        "pixelFormat": "yuv420-8bit",
+        "highBitDepth": false
+      },
+      "redistributable": false,
+      "status": "passed",
+      "observedExtractionSeconds": 0.257,
+      "resources": {
+        "tracks": 3,
+        "fonts": 0,
+        "unavailable": 0,
+        "outputBytes": 238689
+      },
+      "trackChecks": [
+        {
+          "id": "s0",
+          "codec": "subrip",
+          "cues": 348,
+          "overlay": true
+        },
+        {
+          "id": "s1",
+          "codec": "subrip",
+          "cues": 366,
+          "overlay": true
+        },
+        {
+          "id": "s2",
+          "codec": "ass",
+          "cues": 352,
+          "overlay": true
+        }
+      ]
+    },
+    {
+      "fixture": "subtitle-fixture-05",
+      "container": "mp4",
+      "subtitleFamily": "mov_text",
+      "durationMs": 1305833,
+      "video": {
+        "codec": "h264",
+        "width": 720,
+        "height": 404,
+        "frameRate": 23.976023976023978,
+        "pixelFormat": "yuv420-8bit",
+        "highBitDepth": false
+      },
+      "redistributable": false,
+      "status": "passed",
+      "observedExtractionSeconds": 0.771,
+      "resources": {
+        "tracks": 1,
+        "fonts": 0,
+        "unavailable": 0,
+        "outputBytes": 110204
+      },
+      "trackChecks": [
+        {
+          "id": "s0",
+          "codec": "webvtt",
+          "cues": 473,
+          "overlay": true,
+          "nativeTextBytes": 45474,
+          "usedCssClasses": 0,
+          "durationMs": 1304700
+        }
+      ]
+    },
+    {
+      "fixture": "subtitle-fixture-06",
+      "container": "mp4",
+      "subtitleFamily": "mov_text",
+      "durationMs": 1421418,
+      "video": {
+        "codec": "h264",
+        "width": 1920,
+        "height": 1080,
+        "frameRate": 24.00001125638096,
+        "pixelFormat": "yuv420-8bit",
+        "highBitDepth": false
+      },
+      "redistributable": false,
+      "status": "passed",
+      "observedExtractionSeconds": 0.048,
+      "resources": {
+        "tracks": 1,
+        "fonts": 0,
+        "unavailable": 0,
+        "outputBytes": 129334
+      },
+      "trackChecks": [
+        {
+          "id": "s0",
+          "codec": "webvtt",
+          "cues": 470,
+          "overlay": true,
+          "nativeTextBytes": 44702,
+          "usedCssClasses": 9,
+          "durationMs": 1328330
+        }
+      ]
+    }
+  ],
+  "coverageLimits": [
+    "Real inputs are not redistributable and are not committed.",
+    "DVD/VobSub, external SUP/IDX/SUB, TTML, SAMI, MicroDVD, SubViewer, SBV, SCC and malformed/compressed input behavior are additionally covered by original synthetic tests; those tests are distinct from this real-media corpus.",
+    "These checks establish extraction and resource structure. Server authorization, native subtitle transport and simultaneous tvOS rendering require their separately recorded integration checks."
+  ]
+}

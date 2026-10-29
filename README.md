@@ -23,7 +23,7 @@ The target is a native media architecture, not an FFmpeg-compatible facade. Chro
 - `manifest`: emit a native playback manifest with selected tracks, decoder config, and chunk windows.
 - `chunks`: produce keyframe-aligned native chunk windows from compressed packet indexes.
 - `codec-config`: emit decoder initialization facts for a compressed MP4/MOV track.
-- `subtitle-resources`: extract original Matroska ASS/SSA scripts and fonts, native SRT/WebVTT renditions, MP4 WebVTT and common styled mov_text, and same-basename external subtitles. ASS styles, event layers, authored timings and font attachments remain intact; native text renditions retain cue times and WebVTT positioning metadata.
+- `subtitle-resources`: extract authored ASS/SSA and fonts, native timed text, positioned PGS/DVD/DVB bitmap timelines, and matching external subtitle files. Text also receives ASS derivatives for simultaneous display; bitmap resources contain timed PNG tiles. See the [format matrix and limits](docs/audits/2026-10-29-mainstream-subtitles.md).
 - `h264-nalus`: emit AVC/H.264 NAL-unit layout for a native chunk.
 - `h264-annex-b`: write a start-code framed H.264 payload for a native chunk.
 - `hevc-annex-b`: write a start-code framed HEVC payload for a native chunk.
@@ -51,7 +51,8 @@ AAC, AC-3, E-AC-3, FLAC, ALAC, and MP3 paths, plus Opus, DTS/DTS-HD core, and Tr
 bridges to AAC. Exact container/codec/profile and target combinations still matter.
 
 Legacy source containers and video codecs are outside the playback profile. Supported text
-subtitles can be converted to sidecars; bitmap subtitle burn-in is not implemented.
+subtitles produce scripts/renditions, and bitmap subtitles produce positioned overlay
+resources for capable clients. Bitmap subtitle burn-in is not implemented.
 Known HDR-to-SDR transcodes are rejected until verified tone mapping is available. Compatible
 HDR packet copy remains supported; dropping bit depth is not treated as tone mapping.
 See [modern media support](docs/modern-media-support.md) for the detailed boundary.

@@ -30,6 +30,12 @@ pub(super) fn append(
     }
     source.validate_current()?;
     let metadata = parse_basic_metadata(source.as_ref());
+    let source_canvas = metadata
+        .tracks
+        .iter()
+        .find(|track| track.kind == Mp4TrackKind::Video)
+        .and_then(|track| track.width.zip(track.height))
+        .filter(|(width, height)| *width > 0 && *height > 0);
     let tracks = metadata
         .tracks
         .iter()
@@ -55,7 +61,10 @@ pub(super) fn append(
             }
             let entry = sample_entry(source.as_ref(), packets.track_index as usize)?;
             let tx3g = if track.codec == "mov_text" {
-                Some(Tx3gDefaults::parse(entry.0, entry.1)?)
+                // A full-frame BoxRecord has nonzero bottom/right bounds and
+                // is ordinary tx3g placement, not an authored inset/effect.
+                let canvas = tx3g_canvas(source_canvas, track.width.zip(track.height));
+                Some(Tx3gDefaults::parse(entry.0, entry.1, canvas)?)
             } else {
                 None
             };
@@ -131,6 +140,7 @@ pub(super) fn append(
             codec: "webvtt".into(),
             file_name: file_name.clone(),
             web_vtt_file_name: Some(file_name),
+            overlay_file_name: None,
             language: track.language.clone(),
             name: track.title.clone(),
             default: track.default,
@@ -254,18 +264,30 @@ struct Tx3gDefaults {
     background: [u8; 4],
     horizontal: i8,
     vertical: i8,
+    canvas: Option<(u32, u32)>,
     fonts: BTreeMap<u16, String>,
 }
+fn tx3g_canvas(video: Option<(u32, u32)>, text: Option<(u32, u32)>) -> Option<(u32, u32)> {
+    let positive = |(width, height): &(u32, u32)| *width > 0 && *height > 0;
+    match (video.filter(positive), text.filter(positive)) {
+        (Some(video), Some(text)) if video != text => None,
+        (Some(video), _) => Some(video),
+        (None, text) => text,
+    }
+}
 impl Tx3gDefaults {
-    fn parse(kind: [u8; 4], payload: &[u8]) -> std::result::Result<Self, String> {
+    fn parse(
+        kind: [u8; 4],
+        payload: &[u8],
+        canvas: Option<(u32, u32)>,
+    ) -> std::result::Result<Self, String> {
         if kind != *b"tx3g" || payload.len() < 38 {
             return Err("Legacy QuickTime text sample descriptions require native playback".into());
         }
-        if payload[8..12].iter().any(|byte| *byte != 0)
-            || payload[18..26].iter().any(|byte| *byte != 0)
-        {
-            return Err("Authored tx3g display effects, backgrounds or text-box positioning require native playback".into());
+        if payload[8..12].iter().any(|byte| *byte != 0) {
+            return Err("Authored tx3g display effects require native playback".into());
         }
+        full_frame_text_box(&payload[18..26], canvas)?;
         let horizontal = payload[12] as i8;
         let vertical = payload[13] as i8;
         if ![-1, 0, 1].contains(&horizontal) || ![-1, 0, 1].contains(&vertical) {
@@ -289,6 +311,7 @@ impl Tx3gDefaults {
                 .map_err(|_| "Invalid tx3g background")?,
             horizontal,
             vertical,
+            canvas,
             fonts,
         })
     }
@@ -333,6 +356,32 @@ impl Tx3gDefaults {
         result.push('\n');
         result
     }
+}
+
+/// 3GPP TS 26.245 sections 5.16/5.17: signed top/left/bottom/right
+/// coordinates are relative to the track's text region, not effect flags.
+/// Zero bounds are the common unspecified muxer default. Other authored
+/// geometry must remain explicit until the output can preserve its clipping.
+fn full_frame_text_box(
+    bytes: &[u8],
+    canvas: Option<(u32, u32)>,
+) -> std::result::Result<(), String> {
+    let bytes: &[u8; 8] = bytes
+        .try_into()
+        .map_err(|_| "Invalid tx3g text-box length")?;
+    let values: [i16; 4] =
+        std::array::from_fn(|index| i16::from_be_bytes([bytes[index * 2], bytes[index * 2 + 1]]));
+    if values == [0; 4] {
+        return Ok(());
+    }
+    let [top, left, bottom, right] = values;
+    if top < 0 || left < 0 || bottom <= top || right <= left {
+        return Err("Invalid tx3g text-box coordinates".into());
+    }
+    if top == 0 && left == 0 && canvas == Some((right as u32, bottom as u32)) {
+        return Ok(());
+    }
+    Err("Authored tx3g text-box positioning requires native playback".into())
 }
 
 fn font_table(bytes: &[u8]) -> std::result::Result<BTreeMap<u16, String>, String> {
@@ -506,7 +555,16 @@ fn mov_text_sample_with_styles(
     }
     let utf16_length = text.encode_utf16().count();
     let mut runs = Vec::new();
+    let mut text_box = false;
     for atom in boxes(&bytes[end..])? {
+        if atom.kind == *b"tbox" {
+            if text_box {
+                return Err("Duplicate tx3g text-box override".into());
+            }
+            full_frame_text_box(atom.payload, defaults.canvas)?;
+            text_box = true;
+            continue;
+        }
         if atom.kind != *b"styl" {
             return Err(format!(
                 "tx3g {} modifier requires native playback",
@@ -644,6 +702,7 @@ mod tests {
             background: [0; 4],
             horizontal: 1,
             vertical: -1,
+            canvas: Some((720, 404)),
             fonts: BTreeMap::new(),
         }
     }
@@ -662,7 +721,7 @@ mod tests {
     fn ordinary_centered_bottom_mp4_captions_preserve_alignment_and_background() {
         // Common muxer defaults, matching the reported MP4's tx3g description.
         let entry = centered_bottom_entry();
-        let defaults = Tx3gDefaults::parse(*b"tx3g", &entry).unwrap();
+        let defaults = Tx3gDefaults::parse(*b"tx3g", &entry, None).unwrap();
         assert_eq!(defaults.cue_settings(), "align:center line:100%,end");
         assert!(
             defaults
@@ -681,7 +740,7 @@ mod tests {
                 entry[12] = horizontal;
                 entry[13] = vertical;
                 assert_eq!(
-                    Tx3gDefaults::parse(*b"tx3g", &entry)
+                    Tx3gDefaults::parse(*b"tx3g", &entry, None)
                         .unwrap()
                         .cue_settings(),
                     format!("align:{align} line:{line}")
@@ -691,11 +750,83 @@ mod tests {
         let mut colored = entry.clone();
         colored[14..18].copy_from_slice(&[10, 20, 30, 128]);
         assert!(
-            Tx3gDefaults::parse(*b"tx3g", &colored)
+            Tx3gDefaults::parse(*b"tx3g", &colored, None)
                 .unwrap()
                 .stylesheet(&Tx3gStyles::default())
                 .contains("rgba(10, 20, 30, 0.501961)")
         );
+    }
+    #[test]
+    fn ordinary_full_frame_text_box_matches_actual_720_by_404_track() {
+        // The real corpus track has an identity 720x404 text region, flags=0,
+        // transparent background and BoxRecord {0,0,404,720} (TS26.245 5.16).
+        let mut entry = centered_bottom_entry();
+        entry[14..18].fill(0);
+        entry[18..26].copy_from_slice(&[0, 0, 0, 0, 1, 148, 2, 208]);
+        entry[33] = 18;
+        let defaults = Tx3gDefaults::parse(*b"tx3g", &entry, Some((720, 404))).unwrap();
+        // A zero track region is an unspecified size; the source video still
+        // supplies the full-frame coordinates used by ordinary captions.
+        for region in [None, Some((0, 0)), Some((0, 404)), Some((720, 0))] {
+            let canvas = tx3g_canvas(Some((720, 404)), region);
+            assert!(Tx3gDefaults::parse(*b"tx3g", &entry, canvas).is_ok());
+        }
+        assert!(
+            Tx3gDefaults::parse(
+                *b"tx3g",
+                &entry,
+                tx3g_canvas(Some((720, 404)), Some((640, 360)))
+            )
+            .is_err()
+        );
+        assert_eq!(defaults.cue_settings(), "align:center line:100%,end");
+        assert!(
+            defaults
+                .stylesheet(&Tx3gStyles::default())
+                .contains("background-color: rgba(0, 0, 0, 0.000000);")
+        );
+        let plain = sample(b"Caption");
+        let mut boxed = plain.clone();
+        boxed.extend(atom(b"tbox", &entry[18..26]));
+        assert_eq!(
+            mov_text_sample(&plain, &defaults).unwrap(),
+            mov_text_sample(&boxed, &defaults).unwrap()
+        );
+        assert_eq!(
+            mov_text_sample(&boxed, &defaults).unwrap().as_deref(),
+            Some("Caption")
+        );
+        assert!(Tx3gDefaults::parse(*b"tx3g", &entry, None).is_err());
+        assert!(Tx3gDefaults::parse(*b"tx3g", &entry, Some((1920, 1080))).is_err());
+        boxed.extend(atom(b"tbox", &entry[18..26]));
+        assert!(
+            mov_text_sample(&boxed, &defaults)
+                .unwrap_err()
+                .contains("Duplicate")
+        );
+    }
+    #[test]
+    fn authored_insets_and_invalid_text_box_overrides_remain_explicit() {
+        for coordinates in [
+            [10i16, 20, 380, 700],
+            [-1, 0, 404, 720],
+            [0, 0, 0, 720],
+            [0, 20, 404, 10],
+        ] {
+            let record = coordinates
+                .into_iter()
+                .flat_map(i16::to_be_bytes)
+                .collect::<Vec<_>>();
+            let mut entry = centered_bottom_entry();
+            entry[18..26].copy_from_slice(&record);
+            assert!(Tx3gDefaults::parse(*b"tx3g", &entry, Some((720, 404))).is_err());
+            let mut cue = sample(b"Text");
+            cue.extend(atom(b"tbox", &record));
+            assert!(mov_text_sample(&cue, &defaults()).is_err());
+        }
+        let mut truncated = sample(b"Text");
+        truncated.extend(atom(b"tbox", &[0; 7]));
+        assert!(mov_text_sample(&truncated, &defaults()).is_err());
     }
     #[test]
     fn unsupported_layout_and_malformed_justification_remain_explicit() {
@@ -703,14 +834,14 @@ mod tests {
         for index in [8, 18, 25] {
             let mut invalid = entry.clone();
             invalid[index] = 1;
-            assert!(Tx3gDefaults::parse(*b"tx3g", &invalid).is_err());
+            assert!(Tx3gDefaults::parse(*b"tx3g", &invalid, None).is_err());
         }
         for index in [12, 13] {
             let mut invalid = entry.clone();
             invalid[index] = 2;
-            assert!(Tx3gDefaults::parse(*b"tx3g", &invalid).is_err());
+            assert!(Tx3gDefaults::parse(*b"tx3g", &invalid, None).is_err());
         }
-        assert!(Tx3gDefaults::parse(*b"tx3g", &entry[..37]).is_err());
+        assert!(Tx3gDefaults::parse(*b"tx3g", &entry[..37], None).is_err());
     }
     fn sample(text: &[u8]) -> Vec<u8> {
         let mut result = (text.len() as u16).to_be_bytes().to_vec();
@@ -749,7 +880,7 @@ mod tests {
     fn tx3g_font_size_color_and_face_runs_become_bounded_vtt_classes() {
         let mut entry = centered_bottom_entry();
         entry.extend(font_atom(&[(1, "Alte Haas Grotesk"), (2, "Swiss721 BT")]));
-        let defaults = Tx3gDefaults::parse(*b"tx3g", &entry).unwrap();
+        let defaults = Tx3gDefaults::parse(*b"tx3g", &entry, None).unwrap();
         let mut styles = Tx3gStyles::default();
         let data = styled_sample("One 😀", 4, 6, 2, 3, 39, [10, 20, 30, 128]);
         assert_eq!(
@@ -791,7 +922,7 @@ mod tests {
         let hostile = "Font\";}\n\nSTYLE\n::cue {color:red}\\<x>";
         let mut entry = centered_bottom_entry();
         entry.extend(font_atom(&[(1, hostile)]));
-        let defaults = Tx3gDefaults::parse(*b"tx3g", &entry).unwrap();
+        let defaults = Tx3gDefaults::parse(*b"tx3g", &entry, None).unwrap();
         let stylesheet = defaults.stylesheet(&Tx3gStyles::default());
         assert_eq!(stylesheet.matches("STYLE\n").count(), 1);
         assert_eq!(stylesheet.matches("::cue").count(), 1);

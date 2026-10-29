@@ -18,6 +18,7 @@ pub(super) fn cues(
     source: &MediaSource,
     tracks: &[&MatroskaTrack],
 ) -> Result<HashMap<u64, Vec<Cue>>> {
+    let compression = super::bitmap::compression::parse(source)?;
     let mut offset = 0;
     let mut visits = 0;
     let segment = loop {
@@ -96,7 +97,7 @@ pub(super) fn cues(
                 }
                 if let Some(block) = block {
                     let len = usize::try_from(block.end - block.payload)?;
-                    let prefix = source.read_at(block.payload, len.min(12))?;
+                    let prefix = source.read_metadata_prefix(block.payload, len.min(12))?;
                     let (number, track_len) =
                         vint(&prefix).context("invalid subtitle block track")?;
                     if let Some(track) = tracks.iter().find(|track| track.number == number) {
@@ -134,6 +135,28 @@ pub(super) fn cues(
                         }
                         let bytes =
                             source.read_at(block.payload + (track_len + 3) as u64, payload_len)?;
+                        let bytes = if let Some(encoding) = compression.get(&number) {
+                            match encoding.decode(&bytes, 1, super::SCRIPT_LIMIT) {
+                                Ok(decoded) => decoded,
+                                Err(_) => {
+                                    invalid_tracks.insert(number);
+                                    child_offset = child.end;
+                                    continue;
+                                }
+                            }
+                        } else {
+                            bytes
+                        };
+                        let extra = bytes.len().saturating_sub(payload_len);
+                        *size = size
+                            .checked_add(extra)
+                            .context("expanded subtitle size overflow")?;
+                        total = total
+                            .checked_add(extra)
+                            .context("expanded subtitle aggregate overflow")?;
+                        if *size > super::SCRIPT_LIMIT || total > super::AGGREGATE_LIMIT {
+                            bail!("expanded subtitle resource size limit exceeded");
+                        }
                         let Ok(text) = String::from_utf8(bytes) else {
                             invalid_tracks.insert(number);
                             child_offset = child.end;

@@ -1,4 +1,4 @@
-//! Native subtitle scripts, source-timed text renditions, and bounded font extraction.
+//! Source-timed text, positioned bitmap subtitles, and bounded authored fonts.
 use crate::{
     container::matroska::{MatroskaTrackKind, looks_like_ebml, parse_basic_metadata},
     output::publish_bytes,
@@ -8,9 +8,12 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+mod bitmap;
 mod matroska;
 mod mp4;
 mod sidecars;
+mod text_formats;
+mod text_overlay;
 
 const SCRIPT_LIMIT: usize = 8 * 1024 * 1024;
 const FONT_LIMIT: usize = 8 * 1024 * 1024;
@@ -22,12 +25,15 @@ const AGGREGATE_LIMIT: usize = 32 * 1024 * 1024;
 pub struct SubtitleScriptResource {
     /// Stable native track ID.
     pub id: String,
-    /// Resource format: ASS, SSA, SubRip, or WebVTT.
+    /// Resource codec: ASS/SSA, text, or a bitmap timeline's original codec.
     pub codec: String,
     /// Safe, generated file name relative to the output folder.
     pub file_name: String,
     /// Native HLS text rendition, when an authored text track can be represented in WebVTT.
     pub web_vtt_file_name: Option<String>,
+    /// Optional ASS rendering resource for simultaneous subtitle overlays.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overlay_file_name: Option<String>,
     /// Track language from the container.
     pub language: Option<String>,
     /// Authored track name.
@@ -75,13 +81,58 @@ pub struct UnavailableSubtitleResource {
     pub reason: String,
 }
 
-/// Extracts original Matroska ASS/SSA and native text caption resources.
+/// Extracts original Matroska scripts, timed text, positioned bitmap resources,
+/// and matching external subtitle files.
 /// MP4 text captions produce source-timed WebVTT with compatible authored styling;
 /// incompatible MP4 features are reported in `unavailable_tracks`. Compressed
 /// video/audio payloads are never read.
 pub fn write_subtitle_resources(input: &Path, output: &Path) -> Result<SubtitleResources> {
+    write_resources(input, output, false, false)
+}
+
+/// HLS startup needs native text renditions, not episode-wide bitmap decoding.
+pub(crate) fn write_native_text_resources(
+    input: &Path,
+    output: &Path,
+    external_only: bool,
+) -> Result<SubtitleResources> {
+    write_resources(input, output, true, external_only)
+}
+
+fn write_resources(
+    input: &Path,
+    output: &Path,
+    native_text_only: bool,
+    external_only: bool,
+) -> Result<SubtitleResources> {
     let source = MediaSource::open_packet_copy(input)?;
     let mut resources = SubtitleResources::default();
+    if external_only {
+        std::fs::create_dir_all(output)?;
+        let first_id = if looks_like_ebml(source.as_ref()) {
+            parse_basic_metadata(source.as_ref())
+                .tracks
+                .iter()
+                .filter(|t| t.kind == MatroskaTrackKind::Subtitle)
+                .count()
+        } else {
+            crate::container::mp4::parse_basic_metadata(source.as_ref())
+                .tracks
+                .iter()
+                .filter(|t| t.kind == crate::container::mp4::Mp4TrackKind::Subtitle)
+                .count()
+        };
+        sidecars::append(
+            input,
+            output,
+            &mut resources,
+            &mut 0,
+            first_id,
+            Some(&source),
+        )?;
+        source.validate_current()?;
+        return Ok(resources);
+    }
     if !looks_like_ebml(source.as_ref()) {
         std::fs::create_dir_all(output)?;
         let mut total = 0;
@@ -91,11 +142,59 @@ pub fn write_subtitle_resources(input: &Path, output: &Path) -> Result<SubtitleR
             .into_iter()
             .map(|(id, reason)| UnavailableSubtitleResource { id, reason })
             .collect();
-        sidecars::append(input, output, &mut resources, &mut total, report.next_id)?;
+        sidecars::append(
+            input,
+            output,
+            &mut resources,
+            &mut total,
+            report.next_id,
+            Some(&source),
+        )?;
+        if !native_text_only {
+            bitmap::append(&source, input, output, &mut resources)?;
+            text_overlay::append(&source, output, &mut resources, &mut total)?;
+        }
         source.validate_current()?;
         return Ok(resources);
     }
-    let metadata = parse_basic_metadata(source.as_ref());
+    let mut metadata = parse_basic_metadata(source.as_ref());
+    let compression = bitmap::compression::parse(&source)?;
+    let mut invalid_private = std::collections::HashSet::new();
+    let mut private_bytes = 0usize;
+    for (index, track) in metadata
+        .tracks
+        .iter_mut()
+        .filter(|t| t.kind == MatroskaTrackKind::Subtitle)
+        .enumerate()
+    {
+        if !["ass", "ssa", "webvtt"].contains(&track.codec.as_str())
+            || (native_text_only && ["ass", "ssa"].contains(&track.codec.as_str()))
+        {
+            continue;
+        }
+        if let (Some(encoding), Some(private)) =
+            (compression.get(&track.number), track.codec_private.as_ref())
+        {
+            match encoding.decode(private, 2, SCRIPT_LIMIT.min(source.policy().metadata_bytes)) {
+                Ok(decoded)
+                    if private_bytes.saturating_add(decoded.len())
+                        <= AGGREGATE_LIMIT.min(source.policy().metadata_bytes) =>
+                {
+                    private_bytes += decoded.len();
+                    track.codec_private = Some(decoded);
+                }
+                _ => {
+                    invalid_private.insert(track.number);
+                    resources
+                        .unavailable_tracks
+                        .push(UnavailableSubtitleResource {
+                            id: format!("s{index}"),
+                            reason: "Unsupported compressed subtitle initialization".into(),
+                        });
+                }
+            }
+        }
+    }
     let mut total = 0_usize;
     std::fs::create_dir_all(output)?;
     let selected = metadata
@@ -104,6 +203,8 @@ pub fn write_subtitle_resources(input: &Path, output: &Path) -> Result<SubtitleR
         .filter(|track| {
             track.kind == MatroskaTrackKind::Subtitle
                 && ["ass", "ssa", "subrip", "webvtt"].contains(&track.codec.as_str())
+                && (!native_text_only || !["ass", "ssa"].contains(&track.codec.as_str()))
+                && !invalid_private.contains(&track.number)
         })
         .collect::<Vec<_>>();
     if selected.len() > 128 {
@@ -214,6 +315,7 @@ pub fn write_subtitle_resources(input: &Path, output: &Path) -> Result<SubtitleR
             codec,
             file_name,
             web_vtt_file_name,
+            overlay_file_name: None,
             language: track.language.clone(),
             name: track.name.clone(),
             default: track.default,
@@ -222,13 +324,26 @@ pub fn write_subtitle_resources(input: &Path, output: &Path) -> Result<SubtitleR
             external: false,
         });
     }
-    extract_fonts(&source, output, &mut resources, &mut total)?;
+    if !native_text_only {
+        extract_fonts(&source, output, &mut resources, &mut total)?;
+    }
     let next_id = metadata
         .tracks
         .iter()
         .filter(|track| track.kind == MatroskaTrackKind::Subtitle)
         .count();
-    sidecars::append(input, output, &mut resources, &mut total, next_id)?;
+    sidecars::append(
+        input,
+        output,
+        &mut resources,
+        &mut total,
+        next_id,
+        Some(&source),
+    )?;
+    if !native_text_only {
+        bitmap::append(&source, input, output, &mut resources)?;
+        text_overlay::append(&source, output, &mut resources, &mut total)?;
+    }
     source.validate_current()?;
     Ok(resources)
 }

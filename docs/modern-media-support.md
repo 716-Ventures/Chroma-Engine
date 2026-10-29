@@ -21,10 +21,12 @@ than silently invoking an external compatibility transcoder.
 | Audio | FLAC, ALAC, MP3 | Packet copy in supported fMP4/native paths |
 | Audio | Opus | Pure-Rust decode and AAC-LC bridge |
 | Audio | DTS/DTS-HD core, TrueHD | Native decode and AAC-LC bridge, up to six output channels |
-| Subtitles | WebVTT and supported text subtitle tracks | Native sidecar conversion/rendition |
+| Subtitles | SRT/WebVTT, ASS/SSA, MP4 timed text and supported external text | Native renditions and authored/normalized ASS overlays |
+| Subtitles | PGS, DVD/VobSub, DVB bitmap tracks | Source-timed positioned PNG overlays for capable clients |
 
 VP8/VP9, MPEG-1/2/4 Part 2, VC-1, Theora, and other legacy video codecs are outside the
-transcoding profile. Bitmap subtitles are identified by probing but are not burned in. Opus
+transcoding profile. Bitmap subtitles use overlay resources and are not burned in. The
+[subtitle matrix](audits/2026-10-29-mainstream-subtitles.md) lists input transports and limits. Opus
 mapping families other than 0 and 1, nonstandard channel maps, and layouts above eight input
 channels are rejected explicitly.
 
