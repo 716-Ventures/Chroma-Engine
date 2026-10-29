@@ -1,5 +1,6 @@
 use anyhow::{Result, bail};
 
+use crate::container::mp4::{MAX_COPY_VIDEO_SAMPLE_ENTRY_BYTES, Mp4SourceVideoSampleEntry};
 use crate::packet::{ChunkSample, PacketRef};
 use crate::transcode::{EncodedAudioFrame, EncodedVideoFrame};
 
@@ -36,6 +37,12 @@ pub enum Fmp4SampleEntry {
     },
     Hevc {
         codec_config: Vec<u8>,
+        width: u16,
+        height: u16,
+    },
+    /// Packet-copy a source sample entry without changing HEVC/HDR signaling.
+    SourceHevc {
+        source: Mp4SourceVideoSampleEntry,
         width: u16,
         height: u16,
     },
@@ -97,6 +104,14 @@ pub(crate) fn init_segment_with_edits(
 ) -> Result<Vec<u8>> {
     if tracks.is_empty() {
         bail!("fMP4 init segment requires at least one track");
+    }
+    for track in tracks {
+        if let Fmp4SampleEntry::SourceHevc { source, .. } = &track.sample_entry
+            && (!matches!(&source.codec_fourcc, b"hvc1" | b"hev1" | b"dvh1" | b"dvhe")
+                || !(78..=MAX_COPY_VIDEO_SAMPLE_ENTRY_BYTES).contains(&source.payload.len()))
+        {
+            bail!("invalid or oversized source HEVC sample entry");
+        }
     }
     let mut out = Vec::new();
     write_box(&mut out, *b"ftyp", |out| {
@@ -551,7 +566,8 @@ fn write_tkhd(out: &mut Vec<u8>, track: &Fmp4Track) {
         write_identity_matrix(out);
         match &track.sample_entry {
             Fmp4SampleEntry::Avc { width, height, .. }
-            | Fmp4SampleEntry::Hevc { width, height, .. } => {
+            | Fmp4SampleEntry::Hevc { width, height, .. }
+            | Fmp4SampleEntry::SourceHevc { width, height, .. } => {
                 be_u32(out, u32::from(*width) << 16);
                 be_u32(out, u32::from(*height) << 16);
             }
@@ -645,6 +661,14 @@ fn write_stsd(out: &mut Vec<u8>, track: &Fmp4Track) {
                 width,
                 height,
             } => write_hevc_sample_entry(out, *width, *height, codec_config),
+            Fmp4SampleEntry::SourceHevc { source, .. } => {
+                write_box(out, source.codec_fourcc, |out| {
+                    out.extend_from_slice(&source.payload[..6]);
+                    // The new init has exactly one self-contained data reference.
+                    be_u16(out, 1);
+                    out.extend_from_slice(&source.payload[8..]);
+                });
+            }
             Fmp4SampleEntry::Aac {
                 decoder_config,
                 channel_count,
@@ -1078,6 +1102,115 @@ mod tests {
                 1, 1, 0x60, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xfa, 0, 0, 0, 0xf3, 0,
             ]
         }));
+    }
+
+    #[test]
+    fn copied_hevc_init_preserves_source_hdr_boxes_and_eac3_config() {
+        let mut payload = vec![0; 78];
+        payload[6..8].copy_from_slice(&7_u16.to_be_bytes());
+        payload[24..26].copy_from_slice(&3840_u16.to_be_bytes());
+        payload[26..28].copy_from_slice(&2160_u16.to_be_bytes());
+        let mut hvcc = vec![0; 23];
+        hvcc[0] = 1;
+        hvcc[1] = 0x22;
+        hvcc[2..6].copy_from_slice(&0x2000_0000_u32.to_be_bytes());
+        hvcc[6] = 0xb0;
+        hvcc[12] = 153;
+        write_box(&mut payload, *b"hvcC", |out| out.extend_from_slice(&hvcc));
+        write_box(&mut payload, *b"colr", |out| {
+            out.extend_from_slice(b"nclx");
+            out.extend_from_slice(&[0, 9, 0, 16, 0, 9, 0]);
+        });
+        write_box(&mut payload, *b"mdcv", |out| {
+            out.extend_from_slice(&[1; 24])
+        });
+        write_box(&mut payload, *b"clli", |out| out.extend_from_slice(&[2; 4]));
+        let dec3 = vec![0x18, 0, 0x20, 0x0f, 0];
+        for fourcc in [*b"hvc1", *b"hev1"] {
+            let init = init_segment(&[
+                Fmp4Track {
+                    id: 1,
+                    kind: Fmp4TrackKind::Video,
+                    timescale: 16_000,
+                    default_sample_duration: 667,
+                    default_sample_size: 0,
+                    default_sample_flags: 0x0101_0000,
+                    sample_entry: Fmp4SampleEntry::SourceHevc {
+                        source: Mp4SourceVideoSampleEntry {
+                            codec_fourcc: fourcc,
+                            payload: payload.clone(),
+                        },
+                        width: 3840,
+                        height: 2160,
+                    },
+                },
+                Fmp4Track {
+                    id: 2,
+                    kind: Fmp4TrackKind::Audio,
+                    timescale: 48_000,
+                    default_sample_duration: 1536,
+                    default_sample_size: 0,
+                    default_sample_flags: 0x0200_0000,
+                    sample_entry: Fmp4SampleEntry::Eac3 {
+                        dec3: dec3.clone(),
+                        channel_count: 6,
+                        sample_rate: 48_000,
+                    },
+                },
+            ])
+            .unwrap();
+            let config = crate::container::mp4::parse_codec_config(&init, Some("v0")).unwrap();
+            let copied = config.source_video_sample_entry.unwrap();
+            let mut expected = payload.clone();
+            expected[6..8].copy_from_slice(&1_u16.to_be_bytes());
+            assert_eq!(copied.codec_fourcc, fourcc);
+            assert_eq!(copied.payload, expected);
+            assert_eq!(copied.video_range(), Some("PQ"));
+            assert_eq!(
+                config.codec_string,
+                Some(format!(
+                    "{}.2.4.H153.B0",
+                    std::str::from_utf8(&fourcc).unwrap()
+                ))
+            );
+            let audio = crate::container::mp4::parse_codec_config(&init, Some("a0")).unwrap();
+            assert_eq!(audio.sample_entry, "ec-3");
+            let mut expected_dec3 = Vec::new();
+            write_box(&mut expected_dec3, *b"dec3", |out| {
+                out.extend_from_slice(&dec3)
+            });
+            assert!(
+                init.windows(expected_dec3.len())
+                    .any(|bytes| bytes == expected_dec3)
+            );
+        }
+    }
+
+    #[test]
+    fn copied_hevc_init_rejects_oversized_or_invalid_source_entries() {
+        for (fourcc, size) in [
+            (*b"hvc1", MAX_COPY_VIDEO_SAMPLE_ENTRY_BYTES + 1),
+            (*b"hvc1", 77),
+            (*b"avc1", 78),
+        ] {
+            let track = Fmp4Track {
+                id: 1,
+                kind: Fmp4TrackKind::Video,
+                timescale: 16_000,
+                default_sample_duration: 667,
+                default_sample_size: 0,
+                default_sample_flags: 0,
+                sample_entry: Fmp4SampleEntry::SourceHevc {
+                    source: Mp4SourceVideoSampleEntry {
+                        codec_fourcc: fourcc,
+                        payload: vec![0; size],
+                    },
+                    width: 3840,
+                    height: 2160,
+                },
+            };
+            assert!(init_segment(&[track]).is_err());
+        }
     }
 
     #[test]

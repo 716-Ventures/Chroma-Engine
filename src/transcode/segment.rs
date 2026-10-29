@@ -746,6 +746,7 @@ struct PreparedVideoTrack {
     height: u32,
     frame_rate: Option<f64>,
     hdr: bool,
+    source_sample_entry: Option<crate::container::mp4::Mp4SourceVideoSampleEntry>,
 }
 
 #[derive(Debug, Clone)]
@@ -1009,11 +1010,18 @@ fn prepare_mp4_transcode(
     if matches!(prepared_audio.codec.as_str(), "aac" | "flac" | "alac") {
         prepared_audio.codec_private = Some(mp4_decoder_config(bytes, &audio_track_id, "audio")?);
     }
-
+    let mut prepared_video = PreparedVideoTrack::from(video_track);
+    if video_codec == VideoCodec::Hevc && options.video_mode == NativeFmp4VideoMode::Copy {
+        prepared_video.source_sample_entry = Some(
+            parse_mp4_codec_config(bytes, Some(&video_track_id))
+                .and_then(|config| config.source_video_sample_entry)
+                .ok_or_else(|| anyhow::anyhow!("missing or oversized source HEVC sample entry"))?,
+        );
+    }
     Ok(PreparedTranscode {
         video_track_id,
         audio_track_id,
-        video_track: PreparedVideoTrack::from(video_track),
+        video_track: prepared_video,
         audio_track: prepared_audio,
         video_codec,
         decoder_config,
@@ -1072,6 +1080,7 @@ impl From<&MatroskaTrack> for PreparedVideoTrack {
             height: track.height.unwrap_or(1_080),
             frame_rate,
             hdr: matches!(track.transfer_characteristics, Some(16 | 18)),
+            source_sample_entry: None,
         }
     }
 }
@@ -1089,6 +1098,7 @@ impl From<&Mp4Track> for PreparedVideoTrack {
                     | crate::container::mp4::Mp4DynamicRange::DolbyVision
                     | crate::container::mp4::Mp4DynamicRange::Hlg
             ),
+            source_sample_entry: None,
         }
     }
 }
@@ -1518,6 +1528,14 @@ fn native_video_sample_entry(
     match track.codec.as_str() {
         "h264" => Ok(Fmp4SampleEntry::Avc {
             codec_config,
+            width: track.width.min(u32::from(u16::MAX)) as u16,
+            height: track.height.min(u32::from(u16::MAX)) as u16,
+        }),
+        "hevc" if track.source_sample_entry.is_some() => Ok(Fmp4SampleEntry::SourceHevc {
+            source: track
+                .source_sample_entry
+                .clone()
+                .expect("checked source sample entry"),
             width: track.width.min(u32::from(u16::MAX)) as u16,
             height: track.height.min(u32::from(u16::MAX)) as u16,
         }),
@@ -2580,6 +2598,7 @@ fn failed_pipeline_is_recreated_before_retrying_next_segment() {
             height: 32,
             frame_rate: Some(24.0),
             hdr: false,
+            source_sample_entry: None,
         },
         audio_track: PreparedAudioTrack {
             codec: "aac".into(),

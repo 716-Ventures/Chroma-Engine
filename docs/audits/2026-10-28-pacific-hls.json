@@ -1,0 +1,1138 @@
+{
+  "scope": "Mac-only source/code investigation and explicitly approved temporary production playback diagnostics. No TV access, device control/install, new authorization minted by this agent, or progress/history/preferences/media changes. Parent owns and completed diagnostic-client revocation and session/cache cleanup.",
+  "sourceLabel": "Pacific Rim",
+  "identifiedDefects": {
+    "initTagBefore": "hev1",
+    "manifestTagBefore": "hvc1",
+    "explicitColorBoxDroppedBefore": true,
+    "constraintSuffixMissingBefore": "B0",
+    "masterVideoRangeMissingBefore": true
+  },
+  "fix": {
+    "sourceVisualSampleEntryPreserved": true,
+    "sourceMetadataEntryLimitBytes": 262144,
+    "dataReferenceIndexNormalizedTo": 1,
+    "genericMatroskaRemainsHev1": true,
+    "dvTypesPreservedWithActualProfileLevel": true,
+    "manifestVideoRangeFromExplicitTransferOrDefinedDvProfile5": true
+  },
+  "sourceLayout": {
+    "range": "569-584 seconds, source decode timeline",
+    "metadataBytesRead": 8547247,
+    "topLevelBoxes": [
+      {
+        "kind": "ftyp",
+        "offsetBytes": 0,
+        "sizeBytes": 32
+      },
+      {
+        "kind": "moov",
+        "offsetBytes": 32,
+        "sizeBytes": 8587291
+      },
+      {
+        "kind": "mdat",
+        "offsetBytes": 8587323,
+        "sizeBytes": 61798576847,
+        "headerBytes": 16
+      }
+    ],
+    "videoChunksReviewed": 360,
+    "bytesBetweenSuccessiveVideoChunks": {
+      "6144": 250,
+      "12288": 109
+    }
+  },
+  "packetProof": {
+    "scope": "Mac local files only; no production HTTP/auth/TV or progress writes",
+    "firstSegment": 131,
+    "lastSegment": 140,
+    "videoCodec": "HEVC Main10",
+    "audioCodec": "EAC3",
+    "zeroVideoDecodeEncode": true,
+    "zeroAudioEncode": true,
+    "clockGaps": [],
+    "metadata": {
+      "sourceVideoSampleEntry": "hvc1",
+      "outputVideoSampleEntry": "hvc1",
+      "visualSampleEntryPayloadByteExact": true,
+      "hevcDecoderConfigByteExact": true,
+      "explicitColorBoxByteExact": true,
+      "eac3DecoderConfigByteExact": true,
+      "videoRange": "PQ",
+      "primaries": 9,
+      "transfer": 16,
+      "matrix": 9
+    },
+    "engineSha256": "d217d87ca8317c5bd666a61eb7293c1d0c3d21af8d340da04e511c9568bcf2ff",
+    "finalManifestVideo": {
+      "codec": "hevc",
+      "codecString": "hvc1.2.4.H153.B0",
+      "videoRange": "PQ",
+      "width": 3840,
+      "height": 2160,
+      "frameRate": 24.390243902439025,
+      "peakBitrateBps": 93196565
+    },
+    "finalBinaryOutputUnchanged": {
+      "init": true,
+      "segment131": true
+    },
+    "segmentCount": 10,
+    "firstVideoPayloadByteExact": true,
+    "allReviewedEac3PayloadsByteExact": true
+  },
+  "localAVPlayerOriginal": {
+    "scope": "Mac-only local file",
+    "seekCompleted": true,
+    "seekElapsedSeconds": 0.5037540197372437,
+    "actualSeekTimeSeconds": 569.0,
+    "finalTimeSeconds": 602.831886709,
+    "mediaSecondsAdvanced": 33.831886708999946,
+    "sampledVideoFrames": 136,
+    "width": 3840,
+    "height": 2160,
+    "error": "nil",
+    "errorLogEvents": 0,
+    "waitingTransitionsAfterPlay": 0,
+    "pixelColorPrimaries": "ITU_R_2020",
+    "pixelTransfer": "SMPTE_ST_2084_PQ",
+    "preferredForwardBufferSeconds": 20
+  },
+  "localAVPlayerCopiedFragmentFile": {
+    "scope": "Mac-only local file",
+    "seekCompleted": true,
+    "seekElapsedSeconds": 0.24282300472259521,
+    "actualSeekTimeSeconds": 0.5566666666666666,
+    "finalTimeSeconds": 35.217752583,
+    "mediaSecondsAdvanced": 34.661085916333334,
+    "sampledVideoFrames": 139,
+    "width": 3840,
+    "height": 2160,
+    "error": "nil",
+    "errorLogEvents": 0,
+    "waitingTransitionsAfterPlay": 0,
+    "pixelColorPrimaries": "ITU_R_2020",
+    "pixelTransfer": "SMPTE_ST_2084_PQ",
+    "preferredForwardBufferSeconds": 20
+  },
+  "validation": {
+    "engineTopLevelTestsPassed": 332,
+    "engineRawTestsPassedIncludingNestedDuplicate": 333,
+    "ignored": 6,
+    "strictClippy": true,
+    "format": true,
+    "diffWhitespace": true,
+    "releaseBuild": true,
+    "logs": [
+      "/private/tmp/chroma-pacific-hdr-copy-engine-tests.log",
+      "/private/tmp/chroma-pacific-hdr-copy-engine-clippy.log",
+      "/private/tmp/chroma-pacific-hdr-copy-engine-release.log"
+    ],
+    "serverTopLevelTestsPassed": 246,
+    "serverRawPassesIncludingNestedDuplicate": 247,
+    "serverIgnoredLiveBenchmark": 1,
+    "serverStrictClippy": true,
+    "nativeUnitTestsPassed": 90,
+    "simulatorNavigationCasesPassed": 11,
+    "nativeSignedReleaseVerified": true,
+    "typescriptContractTestsPassed": 5,
+    "typescriptContractTypecheck": true
+  },
+  "productionHlsReplay": {
+    "canonicalHdrMaster": {
+      "route": "Canonical truthful HDR master",
+      "macEligibleForHDRPlayback": false,
+      "videoFrames": 0,
+      "avFoundationErrorCode": -11868,
+      "typedError": "AVErrorNoCompatibleAlternatesForExternalDisplay",
+      "underlyingCoreMediaErrorCode": -17223,
+      "matchesRecordedLog": true,
+      "scope": "Correct HDR variant/display eligibility rejection on this Mac. Not a successful canonical-master playback qualification on an HDR-eligible Apple TV or display. No physical TV tested.",
+      "log": "/private/tmp/chroma-pacific-production-hls-final-master.log"
+    },
+    "hlsMediaRoute": {
+      "route": "Approved production HDR-capable maximum-quality HLS media playlist; canonical master selection deliberately isolated because Mac is HDR-ineligible",
+      "sourcePositionRequestedSeconds": 569,
+      "actualSeekSeconds": 569.0,
+      "itemReadyElapsedSeconds": 0.2756199836730957,
+      "seekCompletedElapsedSeconds": 0.4217410087585449,
+      "firstPlayingElapsedSeconds": 0.44460904598236084,
+      "finalPositionSeconds": 749.42186475,
+      "actualMediaSecondsAdvanced": 180.42186475000005,
+      "sampledVideoFrames": 723,
+      "videoWidth": 3840,
+      "videoHeight": 2160,
+      "completedRequired180Seconds": true,
+      "waitingTransitionsAfterFirstPlay": 0,
+      "accessLogEvents": [
+        {
+          "stalls": 0,
+          "droppedFrames": 0
+        },
+        {
+          "stalls": 0,
+          "droppedFrames": 0
+        }
+      ],
+      "reportedStalls": 0,
+      "reportedDroppedFrames": 0,
+      "negativeAccessCountersMean": "unavailable, not zero",
+      "finalError": "nil",
+      "errorLogEventCount": 0,
+      "pixelColorPrimaries": "ITU_R_2020",
+      "pixelTransferFunction": "SMPTE_ST_2084_PQ",
+      "macEligibleForHDRPlayback": false,
+      "configuredForwardBufferSeconds": 20,
+      "externalPlaybackAllowed": false,
+      "log": "/private/tmp/chroma-pacific-production-hls-final-media.log"
+    },
+    "sdrDisplayProgressive": {
+      "route": "Approved production hdr=0 SDR-display policy: progressive original HEVC/EAC3 DirectPlay; source HDR metadata retained",
+      "sourcePositionRequestedSeconds": 569,
+      "actualSeekSeconds": 569.0,
+      "itemReadyElapsedSeconds": 0.5080130100250244,
+      "seekCompletedElapsedSeconds": 0.727073073387146,
+      "firstPlayingElapsedSeconds": 0.8685780763626099,
+      "finalPositionSeconds": 749.45900575,
+      "actualMediaSecondsAdvanced": 180.45900574999996,
+      "sampledVideoFrames": 724,
+      "videoWidth": 3840,
+      "videoHeight": 2160,
+      "completedRequired180Seconds": true,
+      "waitingTransitionsAfterFirstPlay": 0,
+      "accessLogEvents": [
+        {
+          "stalls": -1,
+          "droppedFrames": -1
+        },
+        {
+          "stalls": 0,
+          "droppedFrames": 0
+        }
+      ],
+      "reportedStalls": 0,
+      "reportedDroppedFrames": 0,
+      "negativeAccessCountersMean": "unavailable, not zero",
+      "finalError": "nil",
+      "errorLogEventCount": 0,
+      "pixelColorPrimaries": "ITU_R_2020",
+      "pixelTransferFunction": "SMPTE_ST_2084_PQ",
+      "macEligibleForHDRPlayback": false,
+      "configuredForwardBufferSeconds": 20,
+      "externalPlaybackAllowed": false,
+      "log": "/private/tmp/chroma-pacific-production-sdr-final-progressive.log"
+    },
+    "sequentialNoHeavyWorkloadOverlap": true,
+    "physicalAppleTVQualified": false,
+    "sourceHdrAudioConversionPerformed": false
+  },
+  "references": [
+    {
+      "title": "Apple HLS authoring specification",
+      "url": "https://developer.apple.com/streaming/hls-authoring-specification-for-apple-devices.html"
+    },
+    {
+      "title": "Apple HDR metadata for devices",
+      "url": "https://developer.apple.com/av-foundation/High-Dynamic-Range-Metadata-for-Apple-Devices.pdf"
+    },
+    {
+      "title": "Dolby Vision codec string",
+      "url": "https://ott.dolby.com/OnDelKits/Dolby_Vision_Online_Delivery_Kit/v1/Documentation/Specs/Visio_Profiles/help_files/topics/c_profiles_levels_string.html"
+    }
+  ],
+  "independentSourceReview": "CLEAR: bounded sample-entry copy and DV prefix/profile/range follow-up reviewed separately",
+  "masterIsolation": {
+    "scope": "Loopback-only temporary master referencing the same explicitly approved expiring production media session. No production cache/source/auth/history mutations or TV access.",
+    "closedTemporaryListener": true,
+    "results": [
+      {
+        "variant": "baseline-no-lf",
+        "streamInf": "#EXT-X-STREAM-INF:BANDWIDTH=103387269,CODECS=\"hvc1.2.4.H153.B0,ec-3\",VIDEO-RANGE=PQ",
+        "terminalLF": false,
+        "exitCode": 0,
+        "seekSucceeded": false,
+        "reachedTwoSeconds": false,
+        "unsupportedUrlError": false,
+        "sampledFrames": 0,
+        "finalTimeSeconds": 0.0,
+        "errorCodes": [
+          -12646
+        ]
+      },
+      {
+        "variant": "baseline-with-lf",
+        "streamInf": "#EXT-X-STREAM-INF:BANDWIDTH=103387269,CODECS=\"hvc1.2.4.H153.B0,ec-3\",VIDEO-RANGE=PQ",
+        "terminalLF": true,
+        "exitCode": 0,
+        "seekSucceeded": false,
+        "reachedTwoSeconds": false,
+        "unsupportedUrlError": false,
+        "sampledFrames": 0,
+        "finalTimeSeconds": 0.0,
+        "errorCodes": [
+          -12646
+        ]
+      },
+      {
+        "variant": "resolution-fps-pq",
+        "streamInf": "#EXT-X-STREAM-INF:BANDWIDTH=103387269,CODECS=\"hvc1.2.4.H153.B0,ec-3\",VIDEO-RANGE=PQ,RESOLUTION=3840x2160,FRAME-RATE=23.976",
+        "terminalLF": true,
+        "exitCode": 0,
+        "seekSucceeded": false,
+        "reachedTwoSeconds": false,
+        "unsupportedUrlError": false,
+        "sampledFrames": 0,
+        "finalTimeSeconds": 0.0,
+        "errorCodes": [
+          -11868,
+          -17223
+        ]
+      },
+      {
+        "variant": "resolution-fps-no-range",
+        "streamInf": "#EXT-X-STREAM-INF:BANDWIDTH=103387269,CODECS=\"hvc1.2.4.H153.B0,ec-3\",RESOLUTION=3840x2160,FRAME-RATE=23.976",
+        "terminalLF": true,
+        "exitCode": 0,
+        "seekSucceeded": false,
+        "reachedTwoSeconds": false,
+        "unsupportedUrlError": false,
+        "sampledFrames": 0,
+        "finalTimeSeconds": 0.0,
+        "errorCodes": [
+          -12927
+        ]
+      },
+      {
+        "variant": "no-codecs-pq",
+        "streamInf": "#EXT-X-STREAM-INF:BANDWIDTH=103387269,VIDEO-RANGE=PQ,RESOLUTION=3840x2160,FRAME-RATE=23.976",
+        "terminalLF": true,
+        "exitCode": 0,
+        "seekSucceeded": false,
+        "reachedTwoSeconds": false,
+        "unsupportedUrlError": false,
+        "sampledFrames": 0,
+        "finalTimeSeconds": 0.0,
+        "errorCodes": [
+          -11868,
+          -17223
+        ]
+      },
+      {
+        "variant": "no-codecs-no-range",
+        "streamInf": "#EXT-X-STREAM-INF:BANDWIDTH=103387269,RESOLUTION=3840x2160,FRAME-RATE=23.976",
+        "terminalLF": true,
+        "exitCode": 0,
+        "seekSucceeded": false,
+        "reachedTwoSeconds": false,
+        "unsupportedUrlError": false,
+        "sampledFrames": 0,
+        "finalTimeSeconds": 0.0,
+        "errorCodes": [
+          -12927
+        ]
+      },
+      {
+        "variant": "without-constraint-pq",
+        "streamInf": "#EXT-X-STREAM-INF:BANDWIDTH=103387269,CODECS=\"hvc1.2.4.H153,ec-3\",VIDEO-RANGE=PQ,RESOLUTION=3840x2160,FRAME-RATE=23.976",
+        "terminalLF": true,
+        "exitCode": 0,
+        "seekSucceeded": false,
+        "reachedTwoSeconds": false,
+        "unsupportedUrlError": false,
+        "sampledFrames": 0,
+        "finalTimeSeconds": 0.0,
+        "errorCodes": [
+          -11868,
+          -17223
+        ]
+      },
+      {
+        "variant": "minimal-codec-pq",
+        "streamInf": "#EXT-X-STREAM-INF:BANDWIDTH=103387269,CODECS=\"hvc1,ec-3\",VIDEO-RANGE=PQ,RESOLUTION=3840x2160,FRAME-RATE=23.976",
+        "terminalLF": true,
+        "exitCode": 0,
+        "seekSucceeded": false,
+        "reachedTwoSeconds": false,
+        "unsupportedUrlError": false,
+        "sampledFrames": 0,
+        "finalTimeSeconds": 0.0,
+        "errorCodes": [
+          -11868,
+          -17223
+        ]
+      }
+    ]
+  },
+  "productionHttpMetadata": {
+    "scope": "Temporary explicitly approved Mac diagnostic production HLS session; no TV or watch-history writes",
+    "masterStreamInf": "#EXT-X-STREAM-INF:BANDWIDTH=103387269,CODECS=\"hvc1.2.4.H153.B0,ec-3\",VIDEO-RANGE=PQ,RESOLUTION=3840x2160,FRAME-RATE=24.390",
+    "playlistSegmentCount": 1822,
+    "playlistVOD": true,
+    "initBytes": 1268,
+    "tracks": [
+      {
+        "kind": "vide",
+        "sampleEntry": "hvc1",
+        "childBoxKinds": [
+          "hvcC",
+          "colr",
+          "pasp",
+          "btrt"
+        ],
+        "color": {
+          "type": "nclx",
+          "primaries": 9,
+          "transfer": 16,
+          "matrix": 9
+        },
+        "entireInitMatchesLocallyValidatedFinalBinary": true
+      },
+      {
+        "kind": "soun",
+        "sampleEntry": "ec-3",
+        "childBoxKinds": [
+          "dec3"
+        ],
+        "dec3Hex": "1800200f00"
+      }
+    ],
+    "masterTerminalLF": true,
+    "mediaTerminalLF": true,
+    "entireInitMatchesLocallyValidatedFinalBinary": true
+  },
+  "productionClockProof": {
+    "scope": "Read-only exact approved diagnostic session cache headers; no source payload benchmark or other session access",
+    "segments": [
+      {
+        "segment": 131,
+        "tracks": [
+          {
+            "id": 1,
+            "baseDecodeTime": 9095088,
+            "duration": 64064,
+            "sampleCount": 96
+          },
+          {
+            "id": 2,
+            "baseDecodeTime": 27291648,
+            "duration": 192000,
+            "sampleCount": 125
+          }
+        ]
+      },
+      {
+        "segment": 132,
+        "tracks": [
+          {
+            "id": 1,
+            "baseDecodeTime": 9159152,
+            "duration": 73408,
+            "sampleCount": 110
+          },
+          {
+            "id": 2,
+            "baseDecodeTime": 27483648,
+            "duration": 221184,
+            "sampleCount": 144
+          }
+        ]
+      },
+      {
+        "segment": 133,
+        "tracks": [
+          {
+            "id": 1,
+            "baseDecodeTime": 9232560,
+            "duration": 72736,
+            "sampleCount": 109
+          },
+          {
+            "id": 2,
+            "baseDecodeTime": 27704832,
+            "duration": 218112,
+            "sampleCount": 142
+          }
+        ]
+      },
+      {
+        "segment": 134,
+        "tracks": [
+          {
+            "id": 1,
+            "baseDecodeTime": 9305296,
+            "duration": 64736,
+            "sampleCount": 97
+          },
+          {
+            "id": 2,
+            "baseDecodeTime": 27922944,
+            "duration": 193536,
+            "sampleCount": 126
+          }
+        ]
+      },
+      {
+        "segment": 135,
+        "tracks": [
+          {
+            "id": 1,
+            "baseDecodeTime": 9370032,
+            "duration": 71392,
+            "sampleCount": 107
+          },
+          {
+            "id": 2,
+            "baseDecodeTime": 28116480,
+            "duration": 215040,
+            "sampleCount": 140
+          }
+        ]
+      },
+      {
+        "segment": 136,
+        "tracks": [
+          {
+            "id": 1,
+            "baseDecodeTime": 9441424,
+            "duration": 64064,
+            "sampleCount": 96
+          },
+          {
+            "id": 2,
+            "baseDecodeTime": 28331520,
+            "duration": 192000,
+            "sampleCount": 125
+          }
+        ]
+      },
+      {
+        "segment": 137,
+        "tracks": [
+          {
+            "id": 1,
+            "baseDecodeTime": 9505488,
+            "duration": 64736,
+            "sampleCount": 97
+          },
+          {
+            "id": 2,
+            "baseDecodeTime": 28523520,
+            "duration": 193536,
+            "sampleCount": 126
+          }
+        ]
+      },
+      {
+        "segment": 138,
+        "tracks": [
+          {
+            "id": 1,
+            "baseDecodeTime": 9570224,
+            "duration": 67408,
+            "sampleCount": 101
+          },
+          {
+            "id": 2,
+            "baseDecodeTime": 28717056,
+            "duration": 202752,
+            "sampleCount": 132
+          }
+        ]
+      },
+      {
+        "segment": 139,
+        "tracks": [
+          {
+            "id": 1,
+            "baseDecodeTime": 9637632,
+            "duration": 64064,
+            "sampleCount": 96
+          },
+          {
+            "id": 2,
+            "baseDecodeTime": 28919808,
+            "duration": 192000,
+            "sampleCount": 125
+          }
+        ]
+      },
+      {
+        "segment": 140,
+        "tracks": [
+          {
+            "id": 1,
+            "baseDecodeTime": 9701696,
+            "duration": 66720,
+            "sampleCount": 100
+          },
+          {
+            "id": 2,
+            "baseDecodeTime": 29111808,
+            "duration": 199680,
+            "sampleCount": 130
+          }
+        ]
+      },
+      {
+        "segment": 141,
+        "tracks": [
+          {
+            "id": 1,
+            "baseDecodeTime": 9768416,
+            "duration": 73408,
+            "sampleCount": 110
+          },
+          {
+            "id": 2,
+            "baseDecodeTime": 29311488,
+            "duration": 221184,
+            "sampleCount": 144
+          }
+        ]
+      },
+      {
+        "segment": 142,
+        "tracks": [
+          {
+            "id": 1,
+            "baseDecodeTime": 9841824,
+            "duration": 64064,
+            "sampleCount": 96
+          },
+          {
+            "id": 2,
+            "baseDecodeTime": 29532672,
+            "duration": 192000,
+            "sampleCount": 125
+          }
+        ]
+      },
+      {
+        "segment": 143,
+        "tracks": [
+          {
+            "id": 1,
+            "baseDecodeTime": 9905888,
+            "duration": 67408,
+            "sampleCount": 101
+          },
+          {
+            "id": 2,
+            "baseDecodeTime": 29724672,
+            "duration": 201216,
+            "sampleCount": 131
+          }
+        ]
+      },
+      {
+        "segment": 144,
+        "tracks": [
+          {
+            "id": 1,
+            "baseDecodeTime": 9973296,
+            "duration": 65392,
+            "sampleCount": 98
+          },
+          {
+            "id": 2,
+            "baseDecodeTime": 29925888,
+            "duration": 196608,
+            "sampleCount": 128
+          }
+        ]
+      },
+      {
+        "segment": 145,
+        "tracks": [
+          {
+            "id": 1,
+            "baseDecodeTime": 10038688,
+            "duration": 64736,
+            "sampleCount": 97
+          },
+          {
+            "id": 2,
+            "baseDecodeTime": 30122496,
+            "duration": 195072,
+            "sampleCount": 127
+          }
+        ]
+      },
+      {
+        "segment": 146,
+        "tracks": [
+          {
+            "id": 1,
+            "baseDecodeTime": 10103424,
+            "duration": 65392,
+            "sampleCount": 98
+          },
+          {
+            "id": 2,
+            "baseDecodeTime": 30317568,
+            "duration": 195072,
+            "sampleCount": 127
+          }
+        ]
+      },
+      {
+        "segment": 147,
+        "tracks": [
+          {
+            "id": 1,
+            "baseDecodeTime": 10168816,
+            "duration": 68736,
+            "sampleCount": 103
+          },
+          {
+            "id": 2,
+            "baseDecodeTime": 30512640,
+            "duration": 207360,
+            "sampleCount": 135
+          }
+        ]
+      },
+      {
+        "segment": 148,
+        "tracks": [
+          {
+            "id": 1,
+            "baseDecodeTime": 10237552,
+            "duration": 68736,
+            "sampleCount": 103
+          },
+          {
+            "id": 2,
+            "baseDecodeTime": 30720000,
+            "duration": 205824,
+            "sampleCount": 134
+          }
+        ]
+      },
+      {
+        "segment": 149,
+        "tracks": [
+          {
+            "id": 1,
+            "baseDecodeTime": 10306288,
+            "duration": 68080,
+            "sampleCount": 102
+          },
+          {
+            "id": 2,
+            "baseDecodeTime": 30925824,
+            "duration": 204288,
+            "sampleCount": 133
+          }
+        ]
+      },
+      {
+        "segment": 150,
+        "tracks": [
+          {
+            "id": 1,
+            "baseDecodeTime": 10374368,
+            "duration": 68064,
+            "sampleCount": 102
+          },
+          {
+            "id": 2,
+            "baseDecodeTime": 31130112,
+            "duration": 204288,
+            "sampleCount": 133
+          }
+        ]
+      },
+      {
+        "segment": 151,
+        "tracks": [
+          {
+            "id": 1,
+            "baseDecodeTime": 10442432,
+            "duration": 66736,
+            "sampleCount": 100
+          },
+          {
+            "id": 2,
+            "baseDecodeTime": 31334400,
+            "duration": 199680,
+            "sampleCount": 130
+          }
+        ]
+      },
+      {
+        "segment": 152,
+        "tracks": [
+          {
+            "id": 1,
+            "baseDecodeTime": 10509168,
+            "duration": 70736,
+            "sampleCount": 106
+          },
+          {
+            "id": 2,
+            "baseDecodeTime": 31534080,
+            "duration": 211968,
+            "sampleCount": 138
+          }
+        ]
+      },
+      {
+        "segment": 153,
+        "tracks": [
+          {
+            "id": 1,
+            "baseDecodeTime": 10579904,
+            "duration": 70064,
+            "sampleCount": 105
+          },
+          {
+            "id": 2,
+            "baseDecodeTime": 31746048,
+            "duration": 210432,
+            "sampleCount": 137
+          }
+        ]
+      },
+      {
+        "segment": 154,
+        "tracks": [
+          {
+            "id": 1,
+            "baseDecodeTime": 10649968,
+            "duration": 72080,
+            "sampleCount": 108
+          },
+          {
+            "id": 2,
+            "baseDecodeTime": 31956480,
+            "duration": 216576,
+            "sampleCount": 141
+          }
+        ]
+      },
+      {
+        "segment": 155,
+        "tracks": [
+          {
+            "id": 1,
+            "baseDecodeTime": 10722048,
+            "duration": 64064,
+            "sampleCount": 96
+          },
+          {
+            "id": 2,
+            "baseDecodeTime": 32173056,
+            "duration": 192000,
+            "sampleCount": 125
+          }
+        ]
+      },
+      {
+        "segment": 156,
+        "tracks": [
+          {
+            "id": 1,
+            "baseDecodeTime": 10786112,
+            "duration": 64064,
+            "sampleCount": 96
+          },
+          {
+            "id": 2,
+            "baseDecodeTime": 32365056,
+            "duration": 192000,
+            "sampleCount": 125
+          }
+        ]
+      },
+      {
+        "segment": 157,
+        "tracks": [
+          {
+            "id": 1,
+            "baseDecodeTime": 10850176,
+            "duration": 72736,
+            "sampleCount": 109
+          },
+          {
+            "id": 2,
+            "baseDecodeTime": 32557056,
+            "duration": 218112,
+            "sampleCount": 142
+          }
+        ]
+      },
+      {
+        "segment": 158,
+        "tracks": [
+          {
+            "id": 1,
+            "baseDecodeTime": 10922912,
+            "duration": 69408,
+            "sampleCount": 104
+          },
+          {
+            "id": 2,
+            "baseDecodeTime": 32775168,
+            "duration": 208896,
+            "sampleCount": 136
+          }
+        ]
+      },
+      {
+        "segment": 159,
+        "tracks": [
+          {
+            "id": 1,
+            "baseDecodeTime": 10992320,
+            "duration": 74064,
+            "sampleCount": 111
+          },
+          {
+            "id": 2,
+            "baseDecodeTime": 32984064,
+            "duration": 221184,
+            "sampleCount": 144
+          }
+        ]
+      },
+      {
+        "segment": 160,
+        "tracks": [
+          {
+            "id": 1,
+            "baseDecodeTime": 11066384,
+            "duration": 67408,
+            "sampleCount": 101
+          },
+          {
+            "id": 2,
+            "baseDecodeTime": 33205248,
+            "duration": 202752,
+            "sampleCount": 132
+          }
+        ]
+      },
+      {
+        "segment": 161,
+        "tracks": [
+          {
+            "id": 1,
+            "baseDecodeTime": 11133792,
+            "duration": 70064,
+            "sampleCount": 105
+          },
+          {
+            "id": 2,
+            "baseDecodeTime": 33408000,
+            "duration": 210432,
+            "sampleCount": 137
+          }
+        ]
+      },
+      {
+        "segment": 162,
+        "tracks": [
+          {
+            "id": 1,
+            "baseDecodeTime": 11203856,
+            "duration": 64736,
+            "sampleCount": 97
+          },
+          {
+            "id": 2,
+            "baseDecodeTime": 33618432,
+            "duration": 193536,
+            "sampleCount": 126
+          }
+        ]
+      },
+      {
+        "segment": 163,
+        "tracks": [
+          {
+            "id": 1,
+            "baseDecodeTime": 11268592,
+            "duration": 77408,
+            "sampleCount": 116
+          },
+          {
+            "id": 2,
+            "baseDecodeTime": 33811968,
+            "duration": 233472,
+            "sampleCount": 152
+          }
+        ]
+      },
+      {
+        "segment": 164,
+        "tracks": [
+          {
+            "id": 1,
+            "baseDecodeTime": 11346000,
+            "duration": 64736,
+            "sampleCount": 97
+          },
+          {
+            "id": 2,
+            "baseDecodeTime": 34045440,
+            "duration": 193536,
+            "sampleCount": 126
+          }
+        ]
+      },
+      {
+        "segment": 165,
+        "tracks": [
+          {
+            "id": 1,
+            "baseDecodeTime": 11410736,
+            "duration": 70064,
+            "sampleCount": 105
+          },
+          {
+            "id": 2,
+            "baseDecodeTime": 34238976,
+            "duration": 210432,
+            "sampleCount": 137
+          }
+        ]
+      },
+      {
+        "segment": 166,
+        "tracks": [
+          {
+            "id": 1,
+            "baseDecodeTime": 11480800,
+            "duration": 66736,
+            "sampleCount": 100
+          },
+          {
+            "id": 2,
+            "baseDecodeTime": 34449408,
+            "duration": 199680,
+            "sampleCount": 130
+          }
+        ]
+      },
+      {
+        "segment": 167,
+        "tracks": [
+          {
+            "id": 1,
+            "baseDecodeTime": 11547536,
+            "duration": 66064,
+            "sampleCount": 99
+          },
+          {
+            "id": 2,
+            "baseDecodeTime": 34649088,
+            "duration": 198144,
+            "sampleCount": 129
+          }
+        ]
+      },
+      {
+        "segment": 168,
+        "tracks": [
+          {
+            "id": 1,
+            "baseDecodeTime": 11613600,
+            "duration": 70736,
+            "sampleCount": 106
+          },
+          {
+            "id": 2,
+            "baseDecodeTime": 34847232,
+            "duration": 211968,
+            "sampleCount": 138
+          }
+        ]
+      },
+      {
+        "segment": 169,
+        "tracks": [
+          {
+            "id": 1,
+            "baseDecodeTime": 11684336,
+            "duration": 66064,
+            "sampleCount": 99
+          },
+          {
+            "id": 2,
+            "baseDecodeTime": 35059200,
+            "duration": 198144,
+            "sampleCount": 129
+          }
+        ]
+      },
+      {
+        "segment": 170,
+        "tracks": [
+          {
+            "id": 1,
+            "baseDecodeTime": 11750400,
+            "duration": 65408,
+            "sampleCount": 98
+          },
+          {
+            "id": 2,
+            "baseDecodeTime": 35257344,
+            "duration": 196608,
+            "sampleCount": 128
+          }
+        ]
+      },
+      {
+        "segment": 171,
+        "tracks": [
+          {
+            "id": 1,
+            "baseDecodeTime": 11815808,
+            "duration": 71392,
+            "sampleCount": 107
+          },
+          {
+            "id": 2,
+            "baseDecodeTime": 35453952,
+            "duration": 215040,
+            "sampleCount": 140
+          }
+        ]
+      }
+    ],
+    "decodeClockGaps": [],
+    "productionSegment131ByteExactToValidatedLocalSourceCopy": true
+  },
+  "cleanupReportedByParent": {
+    "approvedClientRevoked": true,
+    "ownedSessionsRemaining": 0,
+    "ownedCacheDirectoriesRemaining": 0,
+    "oldStreamingUrlsReturn404": true,
+    "all1594MatchesAndLocksUnchanged": true,
+    "allWatchProgressUnchanged": true,
+    "noFurtherNetworkRequestsMadeByThisAgentAfterCleanup": true
+  },
+  "integrity": {
+    "diagnosticRevoked": true,
+    "originalExpiryUnchanged": true,
+    "remainingDiagnosticSessions": 0,
+    "remainingFinalDiagnosticCacheDirectories": 0,
+    "retiredStreamStatusCodes": [
+      404,
+      404
+    ],
+    "catalogCount": 1594,
+    "catalogMatchesAndLocksUnchanged": true,
+    "allWatchProgressUnchanged": true,
+    "diagnosticTvAccessPerformed": false
+  },
+  "deployment": {
+    "serverFixesLive": true,
+    "engineSha256": "d217d87ca8317c5bd666a61eb7293c1d0c3d21af8d340da04e511c9568bcf2ff",
+    "signedClientExecutableSha256": "f741e77efa370a0e56e34baddd474a73a5e7a6d5f356d3e4209b1facd80bdd27",
+    "physicalPlaybackVerified": false,
+    "installApprovalSeparateFromDiagnostics": true
+  }
+}

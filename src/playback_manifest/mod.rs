@@ -14,7 +14,7 @@ use crate::{
     packet::NativeChunk,
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 /// Native playback manifest produced during media analysis.
 pub struct NativePlaybackManifest {
@@ -31,7 +31,7 @@ pub struct NativePlaybackManifest {
     pub tracks: Vec<ManifestTrack>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 /// Track-level playback metadata and packet chunk plan.
 pub struct ManifestTrack {
@@ -43,6 +43,19 @@ pub struct ManifestTrack {
     pub codec: String,
     /// Browser or platform codec string when available.
     pub codec_string: Option<String>,
+    /// Explicit source transfer range using HLS values PQ, HLG, or SDR.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_range: Option<String>,
+    /// Positive encoded video dimensions when known; absent for audio.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    /// Positive encoded video height when known; absent for audio.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    /// Maximum MP4 sample timing frequency, or Matroska declared default rate.
+    /// Never an unlabeled average of variable frame durations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_rate: Option<f64>,
     /// ISO language tag when available.
     pub language: Option<String>,
     /// Track title from the container when available.
@@ -200,6 +213,19 @@ pub(crate) fn build_file_matroska_manifest(
             kind: matroska_track_kind_name(track.kind).into(),
             codec: track.codec.clone(),
             codec_string: matroska_codec_string(track, private),
+            video_range: (track.kind == MatroskaTrackKind::Video)
+                .then(|| {
+                    crate::container::mp4::video_range_from_transfer(track.transfer_characteristics)
+                })
+                .flatten()
+                .map(str::to_string),
+            width: track
+                .width
+                .filter(|value| track.kind == MatroskaTrackKind::Video && *value > 0),
+            height: track
+                .height
+                .filter(|value| track.kind == MatroskaTrackKind::Video && *value > 0),
+            frame_rate: matroska_declared_frame_rate(track),
             language: track.language.clone(),
             title: track.name.clone(),
             channels: track.channels,
@@ -322,20 +348,42 @@ fn manifest_track(bytes: &[u8], track_id: &str, target_ms: u64) -> Option<Manife
         parse_chunk_plan_with_peak_bitrate(bytes, Some(track_id), target_ms)?;
     let metadata = parse_basic_metadata(bytes);
     let track_meta = mp4_track_by_semantic_id(&metadata.tracks, track_id);
-    let codec_string = config
-        .codec_string
-        .clone()
-        .or_else(|| {
-            codec_string_from_decoder_config(
-                config.codec.as_str(),
-                config.description_hex.as_deref(),
-            )
-        })
-        .or_else(|| fallback_codec_string(config.codec.as_str()));
+    let codec_string = if matches!(config.sample_entry.as_str(), "dvh1" | "dvhe") {
+        // A Dolby Vision sample entry requires its own configuration record.
+        // Do not relabel a malformed/missing record as an HEVC base layer.
+        config.codec_string.clone()
+    } else {
+        config
+            .codec_string
+            .clone()
+            .or_else(|| {
+                codec_string_from_decoder_config(
+                    config.codec.as_str(),
+                    config.description_hex.as_deref(),
+                )
+            })
+            .or_else(|| fallback_codec_string(config.codec.as_str()))
+    };
     Some(ManifestTrack {
         id: config.track_id,
         kind: config.track_kind,
         codec_string,
+        video_range: config
+            .source_video_sample_entry
+            .as_ref()
+            .and_then(|entry| entry.video_range())
+            .map(str::to_string),
+        width: track_meta
+            .filter(|track| track.kind == Mp4TrackKind::Video)
+            .and_then(|track| track.width)
+            .filter(|value| *value > 0),
+        height: track_meta
+            .filter(|track| track.kind == Mp4TrackKind::Video)
+            .and_then(|track| track.height)
+            .filter(|value| *value > 0),
+        frame_rate: config
+            .maximum_frame_rate
+            .filter(|value| value.is_finite() && *value > 0.0),
         codec: config.codec,
         language: track_meta.and_then(|track| track.language.clone()),
         title: track_meta.and_then(|track| track.title.clone()),
@@ -429,6 +477,19 @@ fn matroska_manifest_track(
         kind: matroska_track_kind_name(track.kind).to_string(),
         codec: track.codec.clone(),
         codec_string: matroska_codec_string(track, private),
+        video_range: (track.kind == MatroskaTrackKind::Video)
+            .then(|| {
+                crate::container::mp4::video_range_from_transfer(track.transfer_characteristics)
+            })
+            .flatten()
+            .map(str::to_string),
+        width: track
+            .width
+            .filter(|value| track.kind == MatroskaTrackKind::Video && *value > 0),
+        height: track
+            .height
+            .filter(|value| track.kind == MatroskaTrackKind::Video && *value > 0),
+        frame_rate: matroska_declared_frame_rate(track),
         language: track.language.clone(),
         title: track.name.clone(),
         channels: track.channels,
@@ -440,6 +501,15 @@ fn matroska_manifest_track(
         peak_bitrate_bps: None,
         chunks,
     })
+}
+
+fn matroska_declared_frame_rate(track: &MatroskaTrack) -> Option<f64> {
+    if track.kind != MatroskaTrackKind::Video {
+        return None;
+    }
+    let duration = track.default_duration_ns.filter(|duration| *duration > 0)?;
+    let frequency = 1_000_000_000.0 / duration as f64;
+    (frequency.is_finite() && frequency > 0.0).then_some(frequency)
 }
 
 fn duration_chunks(duration_ms: u64, target_ms: u64) -> Vec<NativeChunk> {
@@ -495,24 +565,7 @@ fn matroska_codec_string(track: &MatroskaTrack, private: Option<&[u8]>) -> Optio
 }
 
 fn hevc_codec_string(config: &[u8]) -> Option<String> {
-    if config.len() < 13 {
-        return None;
-    }
-    let profile_space = match (config[1] >> 6) & 0x03 {
-        0 => "",
-        1 => "A",
-        2 => "B",
-        3 => "C",
-        _ => "",
-    };
-    let tier = if config[1] & 0x20 != 0 { "H" } else { "L" };
-    let profile_idc = config[1] & 0x1f;
-    let compatibility = u32::from_be_bytes(config[2..6].try_into().ok()?);
-    let level_idc = config[12];
-    Some(format!(
-        "hev1.{profile_space}{profile_idc}.{:X}.{tier}{level_idc}",
-        compatibility.reverse_bits()
-    ))
+    crate::container::mp4::hevc_codec_string(config, b"hev1")
 }
 
 fn hex_string(bytes: &[u8]) -> String {
@@ -548,6 +601,18 @@ mod tests {
         assert_eq!(manifest.duration_ms, Some(3_000));
         assert_eq!(manifest.tracks.len(), 3);
         assert_eq!(manifest.tracks[0].id, "v0");
+        assert_eq!(manifest.tracks[0].width, Some(1920));
+        assert_eq!(manifest.tracks[0].height, Some(1080));
+        assert_eq!(manifest.tracks[0].frame_rate, Some(1.0));
+        assert!(
+            manifest
+                .tracks
+                .iter()
+                .skip(1)
+                .all(|track| track.width.is_none()
+                    && track.height.is_none()
+                    && track.frame_rate.is_none())
+        );
         assert_eq!(
             manifest.tracks[0].codec_string.as_deref(),
             Some("avc1.64001F")
@@ -583,16 +648,76 @@ mod tests {
         config[12] = 153;
 
         assert_eq!(hevc_codec_string(&config).as_deref(), Some("hev1.2.4.H153"));
+        config[6] = 0xb0;
+        assert_eq!(
+            hevc_codec_string(&config).as_deref(),
+            Some("hev1.2.4.H153.B0")
+        );
+    }
+
+    #[test]
+    fn manifest_video_range_requires_explicit_source_color_transfer() {
+        for (transfer, expected) in [
+            (None, None),
+            (Some(16), Some("PQ")),
+            (Some(18), Some("HLG")),
+            (Some(1), Some("SDR")),
+            (Some(2), None),
+        ] {
+            let data = fixture_mp4_with_color(transfer);
+            let manifest = build_mp4_playback_manifest(
+                &data,
+                Path::new("sample.mp4"),
+                Mp4ManifestOptions::default(),
+            )
+            .unwrap();
+            assert_eq!(manifest.tracks[0].video_range.as_deref(), expected);
+            assert!(
+                manifest
+                    .tracks
+                    .iter()
+                    .skip(1)
+                    .all(|track| track.video_range.is_none())
+            );
+            let encoded = serde_json::to_value(&manifest).unwrap();
+            assert_eq!(
+                encoded["tracks"][0]
+                    .get("videoRange")
+                    .and_then(|value| value.as_str()),
+                expected
+            );
+            let mut legacy = encoded;
+            for field in ["videoRange", "width", "height", "frameRate"] {
+                legacy["tracks"][0].as_object_mut().unwrap().remove(field);
+            }
+            assert!(
+                serde_json::from_value::<NativePlaybackManifest>(legacy)
+                    .unwrap()
+                    .tracks[0]
+                    .video_range
+                    .is_none()
+            );
+        }
     }
 
     fn fixture_mp4() -> Vec<u8> {
+        fixture_mp4_with_color(None)
+    }
+
+    fn fixture_mp4_with_color(transfer: Option<u16>) -> Vec<u8> {
+        let mut config = atom(b"avcC", &[1, 0x64, 0x00, 0x1f, 0xff, 0xe1, 0, 0]);
+        if let Some(transfer) = transfer {
+            let mut color = b"nclx".to_vec();
+            color.extend_from_slice(&9_u16.to_be_bytes());
+            color.extend_from_slice(&transfer.to_be_bytes());
+            color.extend_from_slice(&9_u16.to_be_bytes());
+            color.push(0);
+            config.extend_from_slice(&atom(b"colr", &color));
+        }
         let video = trak(
             b"vide",
             b"avc1",
-            video_sample_entry_payload(
-                Some((1920, 1080)),
-                &atom(b"avcC", &[1, 0x64, 0x00, 0x1f, 0xff, 0xe1, 0, 0]),
-            ),
+            video_sample_entry_payload(Some((1920, 1080)), &config),
             &[100, 120, 140],
             &[1000, 1000, 1000],
             &[1, 3],

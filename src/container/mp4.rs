@@ -142,7 +142,7 @@ pub struct Mp4TrackPacketIndex {
     pub packets: Vec<PacketRef>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Mp4CodecConfig {
     pub track_id: String,
@@ -153,6 +153,61 @@ pub struct Mp4CodecConfig {
     pub codec_string: Option<String>,
     pub nalu_length_size: Option<u8>,
     pub description_hex: Option<String>,
+    /// Bounded original HEVC visual sample entry for lossless fMP4 repackaging.
+    #[serde(skip)]
+    pub source_video_sample_entry: Option<Mp4SourceVideoSampleEntry>,
+    /// Maximum sample timing frequency, not an average VFR estimate.
+    #[serde(skip)]
+    pub maximum_frame_rate: Option<f64>,
+}
+
+/// Original HEVC sample description, including its explicit HDR metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mp4SourceVideoSampleEntry {
+    pub codec_fourcc: [u8; 4],
+    pub payload: Vec<u8>,
+}
+
+/// Keeps optional vendor metadata from creating an unbounded init segment.
+pub const MAX_COPY_VIDEO_SAMPLE_ENTRY_BYTES: usize = 256 * 1024;
+
+impl Mp4SourceVideoSampleEntry {
+    /// HLS range derived only from an explicitly declared color transfer.
+    pub fn video_range(&self) -> Option<&'static str> {
+        let children =
+            sample_entry_child_boxes(Mp4TrackKind::Video, self.codec_fourcc, &self.payload)?;
+        if let Some(color) = AtomIter::new(children).find(|atom| atom.kind == *b"colr")
+            && matches!(color.payload.get(..4), Some(b"nclx" | b"nclc"))
+            && let Some(range) =
+                video_range_from_transfer(color.payload.get(6..8).and_then(read_u16).map(u64::from))
+        {
+            return Some(range);
+        }
+        // Dolby Vision profile 5 defines a PQ signal even though its colr
+        // transfer is intentionally unspecified. Other profiles require their
+        // explicit transfer; bit depth or the Dolby Vision brand is insufficient.
+        (dolby_vision_profile_level(self.codec_fourcc, &self.payload)?.0 == 5).then_some("PQ")
+    }
+}
+
+fn dolby_vision_profile_level(fourcc: [u8; 4], payload: &[u8]) -> Option<(u8, u8)> {
+    if !matches!(&fourcc, b"dvh1" | b"dvhe") {
+        return None;
+    }
+    let children = sample_entry_child_boxes(Mp4TrackKind::Video, fourcc, payload)?;
+    let config = AtomIter::new(children).find(|atom| matches!(&atom.kind, b"dvcC" | b"dvvC"))?;
+    let profile = config.payload.get(2)? >> 1;
+    let level = ((config.payload.get(2)? & 1) << 5) | (config.payload.get(3)? >> 3);
+    (profile != 0 && level != 0).then_some((profile, level))
+}
+
+pub(crate) fn video_range_from_transfer(transfer: Option<u64>) -> Option<&'static str> {
+    match transfer? {
+        16 => Some("PQ"),
+        18 => Some("HLG"),
+        1 | 6 | 13 | 14 | 15 => Some("SDR"),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -614,6 +669,20 @@ fn parse_trak_codec_config(
             .and_then(|config| config.codec_string.clone()),
         nalu_length_size: config.as_ref().and_then(|config| config.nalu_length_size),
         description_hex: config.map(|config| hex_string(config.description)),
+        source_video_sample_entry: (kind == Mp4TrackKind::Video
+            && (78..=MAX_COPY_VIDEO_SAMPLE_ENTRY_BYTES).contains(&entry.payload.len()))
+        .then(|| Mp4SourceVideoSampleEntry {
+            codec_fourcc: entry.codec_fourcc,
+            payload: entry.payload.to_vec(),
+        }),
+        maximum_frame_rate: (kind == Mp4TrackKind::Video)
+            .then(|| {
+                maximum_frame_rate_from_stts(
+                    parse_mdhd_timescale(find_atom(mdia, b"mdhd")?)?,
+                    find_atom(stbl, b"stts")?,
+                )
+            })
+            .flatten(),
     })
 }
 
@@ -912,6 +981,26 @@ fn frame_rate_from_sample_timing(
         return None;
     }
     Some((timing.sample_count as f64 * timescale as f64) / timing.total_duration_units as f64)
+}
+
+fn maximum_frame_rate_from_stts(timescale: u32, payload: &[u8]) -> Option<f64> {
+    if timescale == 0 {
+        return None;
+    }
+    let count = checked_table_entry_count(payload, 8, 8, ParseLimits::default())?;
+    let mut minimum_delta = None;
+    for row in payload.get(8..)?.as_chunks::<8>().0.iter().take(count) {
+        if read_u32(&row[..4])? == 0 {
+            continue;
+        }
+        let delta = read_u32(&row[4..])?;
+        if delta == 0 {
+            return None;
+        }
+        minimum_delta = Some(minimum_delta.map_or(delta, |previous: u32| previous.min(delta)));
+    }
+    let frequency = f64::from(timescale) / f64::from(minimum_delta?);
+    (frequency.is_finite() && frequency > 0.0).then_some(frequency)
 }
 
 fn bitrate_from_sample_timing(timescale: Option<u32>, timing: Option<SampleTiming>) -> Option<u64> {
@@ -1222,7 +1311,18 @@ fn codec_config_from_sample_entry(
             kind if kind == *b"hvcC" => {
                 return Some(SampleEntryCodecConfig {
                     box_type: atom.kind,
-                    codec_string: hevc_codec_string(atom.payload, &entry.codec_fourcc),
+                    codec_string: if matches!(&entry.codec_fourcc, b"dvh1" | b"dvhe") {
+                        dolby_vision_profile_level(entry.codec_fourcc, entry.payload).map(
+                            |(profile, level)| {
+                                format!(
+                                    "{}.{profile:02}.{level:02}",
+                                    std::str::from_utf8(&entry.codec_fourcc).expect("known fourcc")
+                                )
+                            },
+                        )
+                    } else {
+                        hevc_codec_string(atom.payload, &entry.codec_fourcc)
+                    },
                     nalu_length_size: hevc_nalu_length_size(atom.payload),
                     description: atom.payload.to_vec(),
                 });
@@ -1299,7 +1399,7 @@ fn avc_nalu_length_size(payload: &[u8]) -> Option<u8> {
     payload.get(4).map(|byte| (byte & 0x03) + 1)
 }
 
-fn hevc_codec_string(payload: &[u8], sample_entry: &[u8; 4]) -> Option<String> {
+pub(crate) fn hevc_codec_string(payload: &[u8], sample_entry: &[u8; 4]) -> Option<String> {
     if payload.len() < 13 {
         return None;
     }
@@ -1322,10 +1422,17 @@ fn hevc_codec_string(payload: &[u8], sample_entry: &[u8; 4]) -> Option<String> {
         3 => "C",
         _ => "",
     };
-    Some(format!(
+    let mut codec = format!(
         "{prefix}.{space}{profile_idc}.{:X}.{tier}{level}",
         compatibility.reverse_bits()
-    ))
+    );
+    // RFC 6381 / ISO 14496-15: omit only trailing zero constraint bytes.
+    if let Some(last) = payload[6..12].iter().rposition(|byte| *byte != 0) {
+        for byte in &payload[6..=6 + last] {
+            codec.push_str(&format!(".{byte:02X}"));
+        }
+    }
+    Some(codec)
 }
 
 fn hevc_nalu_length_size(payload: &[u8]) -> Option<u8> {
@@ -2564,6 +2671,84 @@ mod tests {
             hevc_codec_string(&config, b"hvc1").as_deref(),
             Some("hvc1.2.4.H153")
         );
+        config[6] = 0xb0;
+        config[8] = 0x01;
+        assert_eq!(
+            hevc_codec_string(&config, b"hvc1").as_deref(),
+            Some("hvc1.2.4.H153.B0.00.01")
+        );
+        assert_eq!(
+            hevc_codec_string(&config, b"hev1").as_deref(),
+            Some("hev1.2.4.H153.B0.00.01")
+        );
+    }
+
+    #[test]
+    fn maximum_frame_rate_uses_shortest_sample_timing_not_vfr_average() {
+        let mut timing = vec![0; 4];
+        timing.extend_from_slice(&2_u32.to_be_bytes());
+        timing.extend_from_slice(&10_u32.to_be_bytes());
+        timing.extend_from_slice(&1000_u32.to_be_bytes());
+        timing.extend_from_slice(&2_u32.to_be_bytes());
+        timing.extend_from_slice(&500_u32.to_be_bytes());
+        assert_eq!(maximum_frame_rate_from_stts(1000, &timing), Some(2.0));
+        assert_eq!(maximum_frame_rate_from_stts(0, &timing), None);
+        assert_eq!(
+            maximum_frame_rate_from_stts(1000, &timing[..timing.len() - 1]),
+            None
+        );
+        timing[20..24].copy_from_slice(&0_u32.to_be_bytes());
+        assert_eq!(maximum_frame_rate_from_stts(1000, &timing), None);
+        assert_eq!(maximum_frame_rate_from_stts(1000, &[0; 8]), None);
+    }
+
+    #[test]
+    fn dolby_vision_source_entries_keep_matching_codec_and_profile_range() {
+        for (fourcc, config_box) in [(b"dvh1", b"dvcC"), (b"dvhe", b"dvvC")] {
+            let mut dolby = vec![0; 24];
+            dolby[0] = 1;
+            dolby[2] = 5 << 1;
+            dolby[3] = (6 << 3) | 5; // Profile5, level6, RPU and base layer.
+            let children = [
+                atom(b"hvcC", &[0; 23]),
+                atom(config_box, &dolby),
+                colr_nclx(2, 2, 2, false),
+            ]
+            .concat();
+            let mut data = ftyp();
+            data.extend_from_slice(&atom(
+                b"moov",
+                &trak_with_sample_entry_payload(
+                    b"vide",
+                    fourcc,
+                    video_sample_entry_payload(Some((3840, 2160)), &children),
+                    1000,
+                    1000,
+                ),
+            ));
+            let config = parse_codec_config(&data, Some("v0")).unwrap();
+            assert_eq!(
+                config.codec_string,
+                Some(format!("{}.05.06", std::str::from_utf8(fourcc).unwrap()))
+            );
+            assert_eq!(
+                config.source_video_sample_entry.unwrap().video_range(),
+                Some("PQ")
+            );
+        }
+    }
+
+    #[test]
+    fn dolby_vision_config_requires_profile_and_level_bytes() {
+        for dolby in [vec![], vec![1, 0, 10], vec![1, 0, 0, 0]] {
+            let payload = video_sample_entry_payload(Some((3840, 2160)), &atom(b"dvcC", &dolby));
+            assert_eq!(dolby_vision_profile_level(*b"dvh1", &payload), None);
+            let source = Mp4SourceVideoSampleEntry {
+                codec_fourcc: *b"dvh1",
+                payload,
+            };
+            assert_eq!(source.video_range(), None);
+        }
     }
 
     #[test]

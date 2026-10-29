@@ -1183,13 +1183,11 @@ fn hls_tracks_from_mp4(
             width: clamped_u16(video_meta.width.unwrap_or(0)),
             height: clamped_u16(video_meta.height.unwrap_or(0)),
         }),
-        "hevc" => Some(Fmp4SampleEntry::Hevc {
-            codec_config: hex_to_bytes(
-                video_config
-                    .description_hex
-                    .as_deref()
-                    .ok_or_else(|| anyhow!("missing hvcC"))?,
-            )?,
+        "hevc" => Some(Fmp4SampleEntry::SourceHevc {
+            source: video_config
+                .source_video_sample_entry
+                .clone()
+                .ok_or_else(|| anyhow!("missing or oversized source HEVC sample entry"))?,
             width: clamped_u16(video_meta.width.unwrap_or(0)),
             height: clamped_u16(video_meta.height.unwrap_or(0)),
         }),

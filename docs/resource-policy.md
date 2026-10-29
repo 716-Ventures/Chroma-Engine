@@ -102,6 +102,14 @@ tables can be absent in this header-only view. Source media is never rewritten.
 
 ## Timing, color and measurements
 
+MP4 HEVC packet-copy initialization preserves the original visual sample entry,
+including explicit HDR/Dolby metadata, within a 256 KiB entry limit. Oversized or
+malformed entries fail explicitly. The output data-reference index is normalized
+to its own local media data. Manifest video dimensions and maximum frame rate
+come from source metadata and bounded timing-table scans; absent facts are not
+invented. Hosts must keep HDR range declarations truthful and account for the
+display's playback eligibility when selecting an HLS variant.
+
 Sequential TrueHD/DTS/Opus conversion retains decoder, PCM residuals, AAC overlap,
 and sample clock. CPU AAC `encode` now means **push**, not end-of-stream: call
 `finish` exactly once to flush the final tail. Output may be empty while initial
