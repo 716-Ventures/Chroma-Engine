@@ -105,6 +105,13 @@
     "reason": "Upstream README attributes the BSD-2-Clause Rust wrapper to Ralf Biedert but supplies no wrapper-specific full license file. Cisco codec notices are collected separately."
   },
   {
+    "name": "rusty-chromaprint",
+    "version": "0.3.0",
+    "license": "MIT",
+    "upstream": "https://github.com/darksv/rusty-chromaprint/tree/97d67dfed02854ac5d5eaa9ac965b9abe3dff690",
+    "reason": "The published crate and inspected upstream revision declare MIT but omit a full license file. Canonical MIT text is explicitly labelled; no copyright attribution is invented."
+  },
+  {
     "name": "simd_helpers",
     "version": "0.1.0",
     "license": "MIT",

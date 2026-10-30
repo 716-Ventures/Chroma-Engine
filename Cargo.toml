@@ -34,6 +34,7 @@ oxideav-dts = { version = "=0.0.1", git = "https://github.com/OxideAV/oxideav-dt
 opus-pure = "=0.2.0"
 rusty_aac = { version = "=0.5.0", path = "third_party/rusty_aac", default-features = false }
 rust_h265 = "0.1.0"
+rusty-chromaprint = "=0.3.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"

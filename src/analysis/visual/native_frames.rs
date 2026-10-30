@@ -1,5 +1,5 @@
 use crate::{
-    packet::{ChunkPlan, PacketRange, PacketRef, packet_samples_for_range},
+    packet::{PacketRange, PacketRef, packet_samples_for_range},
     source::MediaSource,
     transcode::{
         BgraDecoderSession, RawVideoFormat, RawVideoPixelFormat, VideoCodec,
@@ -26,10 +26,10 @@ pub(super) struct Sampler {
     configuration: Vec<u8>,
     format: RawVideoFormat,
     duration: u64,
-    plan: ChunkPlan,
-    mp4_packets: Option<Vec<PacketRef>>,
-    cached_chunk: Option<u32>,
+    packets: Vec<PacketRef>,
+    cached_chunk: Option<usize>,
     cache: Vec<Frame>,
+    decoder: Option<(BgraDecoderSession, RawVideoFormat)>,
     decoded: usize,
     calls: usize,
 }
@@ -119,10 +119,30 @@ impl Sampler {
             frame_rate_den: 1000,
             pixel_format: RawVideoPixelFormat::Bgra,
         };
-        let plan = source.chunk_plan(Some("v0"), 1000)?;
+        // Build the selected tail packet metadata once. Repeated tiny Matroska
+        // windows used to re-read a +/-32 second cluster neighborhood per GOP.
+        let start = duration
+            .saturating_sub(super::search_window(duration))
+            .saturating_sub(10000);
+        let packets = if let Some(all) = mp4_packets {
+            let first = all
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| p.keyframe && p.pts.as_millis() <= start)
+                .map(|(i, _)| i)
+                .next_back()
+                .unwrap_or(0);
+            all[first..].to_vec()
+        } else {
+            source
+                .matroska_index()?
+                .packets(&source, &["v0"], start, duration)?
+                .remove(0)
+                .packets
+        };
         ensure!(
-            plan.chunks.len() <= 100_000,
-            "Video seek index exceeds analysis limit"
+            packets.len() <= 100000 && packets.iter().filter(|p| p.keyframe).count() <= 4000,
+            "Visual packet index exceeds analysis limit"
         );
         Ok(Self {
             source,
@@ -130,10 +150,10 @@ impl Sampler {
             configuration,
             format,
             duration,
-            plan,
-            mp4_packets,
+            packets,
             cached_chunk: None,
             cache: Vec::new(),
+            decoder: None,
             decoded: 0,
             calls: 0,
         })
@@ -143,150 +163,161 @@ impl Sampler {
     }
     pub(super) fn finish(&self) -> Result<()> {
         self.source.check_work()?;
-        self.source.validate_current()
-    }
-    pub(super) fn frame(&mut self, time_ms: u64) -> Result<Option<&Frame>> {
-        self.source.check_work()?;
-        self.calls += 1;
-        ensure!(
-            self.calls <= 2000
-                && self.decoded <= 60_000
-                && self.source.io_stats().0 <= 2 * 1024 * 1024 * 1024,
-            "Visual analysis work budget exceeded"
+        self.source.validate_current()?;
+        let (bytes, reads, clusters) = self.source.io_stats();
+        eprintln!(
+            "Visual evidence: decoded={} calls={} read_bytes={bytes} reads={reads} clusters={clusters}",
+            self.decoded, self.calls
         );
-        let Some(chunk) = self
-            .plan
-            .chunks
+        Ok(())
+    }
+    pub(super) fn keyframe_times(&self) -> Vec<u64> {
+        self.packets
             .iter()
-            .rfind(|chunk| chunk.start.as_millis() <= time_ms)
+            .filter(|p| p.keyframe)
+            .map(|p| p.pts.as_millis())
+            .collect()
+    }
+    pub(super) fn keyframe(&mut self, time_ms: u64) -> Result<Option<Frame>> {
+        let Some(packet) = self
+            .packets
+            .iter()
+            .find(|p| p.keyframe && p.pts.as_millis() == time_ms)
             .cloned()
         else {
             return Ok(None);
         };
-        if self.cached_chunk != Some(chunk.index) {
-            self.cache.clear();
-            self.cached_chunk = None;
+        Ok(self
+            .decode(&[packet])?
+            .into_iter()
+            .min_by_key(|f| f.time_ms.abs_diff(time_ms)))
+    }
+    pub(super) fn frame(&mut self, time_ms: u64) -> Result<Option<&Frame>> {
+        let Some(first) = self
+            .packets
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.keyframe && p.pts.as_millis() <= time_ms)
+            .map(|(i, _)| i)
+            .next_back()
+        else {
+            return Ok(None);
+        };
+        if self.cached_chunk != Some(first) {
+            let end = self.packets[first + 1..]
+                .iter()
+                .position(|p| p.keyframe)
+                .map(|i| first + 1 + i)
+                .unwrap_or(self.packets.len());
+            let packets = self.packets[first..end].to_vec();
             ensure!(
-                chunk.key_aligned && chunk.duration.as_millis() <= 10_000,
+                packets.len() <= 1200
+                    && packets.last().is_none_or(|p| p
+                        .pts
+                        .as_millis()
+                        .abs_diff(packets[0].pts.as_millis())
+                        <= 10000),
                 "Video random-access interval exceeds analysis limit"
             );
-            let packets = if let Some(packets) = &self.mp4_packets {
-                packets
-                    .get(chunk.packet_range.start as usize..chunk.packet_range.end as usize)
-                    .context("Invalid video packet range")?
-                    .to_vec()
-            } else {
-                self.source
-                    .matroska_index()?
-                    .packets(
-                        &self.source,
-                        &["v0"],
-                        chunk.start.as_millis(),
-                        chunk
-                            .start
-                            .as_millis()
-                            .saturating_add(chunk.duration.as_millis()),
-                    )?
-                    .into_iter()
-                    .next()
-                    .context("Video packet window missing")?
-                    .packets
-            };
-            ensure!(
-                !packets.is_empty()
-                    && packets.len() <= 1200
-                    && packets.first().is_some_and(|p| p.keyframe),
-                "Video packet window is not bounded/random-access aligned"
-            );
-            let compressed = packets
-                .iter()
-                .try_fold(0usize, |total, packet| {
-                    total.checked_add(packet.size as usize)
-                })
-                .context("Video packet byte count overflow")?;
-            ensure!(
-                compressed <= 32 * 1024 * 1024,
-                "Video analysis window exceeds byte limit"
-            );
-            let scale = (640.0 / f64::from(self.format.width))
-                .min(360.0 / f64::from(self.format.height))
-                .min(1.0);
-            let preferred = RawVideoFormat {
-                width: ((f64::from(self.format.width) * scale).round() as u32).clamp(32, 640) & !1,
-                height: ((f64::from(self.format.height) * scale).round() as u32).clamp(32, 360)
-                    & !1,
-                ..self.format
-            };
-            let (mut decoder, actual) = BgraDecoderSession::new_scaled_with_policy(
+            self.cache = self.decode(&packets)?;
+            self.cache.sort_by_key(|f| f.time_ms);
+            self.cached_chunk = Some(first);
+        }
+        Ok(self
+            .cache
+            .iter()
+            .min_by_key(|f| f.time_ms.abs_diff(time_ms))
+            .filter(|f| f.time_ms.abs_diff(time_ms) <= 200))
+    }
+    fn decode(&mut self, packets: &[PacketRef]) -> Result<Vec<Frame>> {
+        self.source.check_work()?;
+        self.calls += 1;
+        ensure!(
+            self.calls <= 4500
+                && self.decoded <= 60000
+                && self.source.io_stats().0 <= 2 * 1024 * 1024 * 1024,
+            "Visual analysis work budget exceeded"
+        );
+        let compressed = packets
+            .iter()
+            .try_fold(0usize, |n, p| n.checked_add(p.size as usize))
+            .context("Video packet size overflow")?;
+        ensure!(
+            compressed <= 32 * 1024 * 1024,
+            "Video analysis window exceeds byte limit"
+        );
+        let scale = (640.0 / f64::from(self.format.width))
+            .min(360.0 / f64::from(self.format.height))
+            .min(1.0);
+        let preferred = RawVideoFormat {
+            width: ((f64::from(self.format.width) * scale).round() as u32).clamp(32, 640) & !1,
+            height: ((f64::from(self.format.height) * scale).round() as u32).clamp(32, 360) & !1,
+            ..self.format
+        };
+        if self.decoder.is_none() {
+            self.decoder = Some(BgraDecoderSession::new_scaled_with_policy(
                 self.codec,
                 self.format,
                 preferred,
                 &self.configuration,
                 self.source.policy(),
-            )?;
-            let frame_bytes =
-                usize::try_from(u64::from(actual.width) * u64::from(actual.height) * 4)?;
-            ensure!(
-                frame_bytes <= self.source.policy().decoded_batch_bytes / 2,
-                "Native frame dimensions exceed bounded analysis memory"
-            );
-            let batch =
-                (self.source.policy().decoded_batch_bytes / frame_bytes.max(1)).clamp(1, 16);
-            for (index, group) in packets.chunks(batch).enumerate() {
-                self.source.check_work()?;
-                let bytes = self.source.read_packets(group)?;
-                let samples = packet_samples_for_range(
-                    group,
-                    PacketRange {
-                        start: 0,
-                        end: group.len() as u32,
-                    },
-                )?;
-                let input = build_video_decode_input(
-                    self.codec,
-                    group[0].pts.scale,
-                    Some(&self.configuration),
-                    &samples,
-                    &bytes,
-                    (index + 1) * batch >= packets.len(),
-                )?;
-                let decoded = decoder.decode(&input)?;
-                let decoded_bytes = decoded
-                    .frames
-                    .iter()
-                    .try_fold(0usize, |total, frame| total.checked_add(frame.pixels.len()))
-                    .context("Decoded frame count overflow")?;
-                ensure!(
-                    decoded_bytes <= self.source.policy().decoded_batch_bytes,
-                    "Decoded analysis batch exceeds memory limit"
-                );
-                self.decoded += decoded.frames.len();
-                for frame in decoded.frames {
-                    let time = frame.pts.as_millis();
-                    if self
-                        .cache
-                        .last()
-                        .is_some_and(|last| time < last.time_ms.saturating_add(100))
-                    {
-                        continue;
-                    }
-                    ensure!(self.cache.len() < 128, "Analysis frame cache exceeds limit");
-                    self.cache.push(reduce(
-                        &frame.pixels,
-                        frame.format.width,
-                        frame.format.height,
-                        time,
-                    )?);
-                }
-            }
-            self.cache.sort_by_key(|frame| frame.time_ms);
-            self.cached_chunk = Some(chunk.index);
+            )?);
         }
-        let nearest = self
-            .cache
-            .iter()
-            .min_by_key(|frame| frame.time_ms.abs_diff(time_ms));
-        Ok(nearest.filter(|frame| frame.time_ms.abs_diff(time_ms) <= 200))
+        let (decoder, actual) = self.decoder.as_mut().unwrap();
+        let frame_bytes = usize::try_from(u64::from(actual.width) * u64::from(actual.height) * 4)?;
+        ensure!(
+            frame_bytes <= self.source.policy().decoded_batch_bytes / 2,
+            "Native frame dimensions exceed bounded analysis memory"
+        );
+        let batch = (self.source.policy().decoded_batch_bytes / frame_bytes.max(1)).clamp(1, 16);
+        let mut frames = Vec::new();
+        for (index, group) in packets.chunks(batch).enumerate() {
+            self.source.check_work()?;
+            let bytes = self.source.read_packets(group)?;
+            let samples = packet_samples_for_range(
+                group,
+                PacketRange {
+                    start: 0,
+                    end: group.len() as u32,
+                },
+            )?;
+            let input = build_video_decode_input(
+                self.codec,
+                group[0].pts.scale,
+                Some(&self.configuration),
+                &samples,
+                &bytes,
+                (index + 1) * batch >= packets.len(),
+            )?;
+            let decoded = decoder.decode(&input)?;
+            let decoded_bytes = decoded
+                .frames
+                .iter()
+                .try_fold(0usize, |n, f| n.checked_add(f.pixels.len()))
+                .context("Decoded frame size overflow")?;
+            ensure!(
+                decoded_bytes <= self.source.policy().decoded_batch_bytes,
+                "Decoded analysis batch exceeds memory limit"
+            );
+            self.decoded += decoded.frames.len();
+            for frame in decoded.frames {
+                let time = frame.pts.as_millis();
+                if frames
+                    .last()
+                    .is_some_and(|last: &Frame| time < last.time_ms.saturating_add(100))
+                {
+                    continue;
+                }
+                ensure!(frames.len() < 128, "Analysis frame cache exceeds limit");
+                frames.push(reduce(
+                    &frame.pixels,
+                    frame.format.width,
+                    frame.format.height,
+                    time,
+                )?);
+            }
+        }
+        Ok(frames)
     }
 }
 fn reduce(bytes: &[u8], width: u32, height: u32, time_ms: u64) -> Result<Frame> {

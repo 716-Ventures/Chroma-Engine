@@ -29,7 +29,7 @@ fn language(value: Option<&str>) -> Option<String> {
     })
 }
 fn supported(codec: &str) -> bool {
-    matches!(codec, "aac" | "ac3" | "eac3")
+    matches!(codec, "aac" | "ac3" | "eac3" | "opus" | "dts" | "truehd")
 }
 
 pub(super) fn open(path: &Path, wanted: Option<&str>) -> Result<(MediaSource, Spec)> {
@@ -114,7 +114,7 @@ pub(super) fn open(path: &Path, wanted: Option<&str>) -> Result<(MediaSource, Sp
     let (spec, _) = tracks
         .into_iter()
         .find(|(t, _)| wanted.is_none_or(|w| t.language.as_deref() == Some(w)))
-        .context("No matching supported AAC/AC-3/E-AC-3 audio program")?;
+        .context("No matching supported audio program")?;
     ensure!(
         spec.config.len() <= 64 * 1024,
         "Audio configuration exceeds bounds"
@@ -172,6 +172,9 @@ enum Decoder {
     Aac(Box<rusty_aac::AacDecoder>),
     Eac3(Box<oxideav_ac3::eac3::decoder::Eac3DecoderState>),
     Ac3(Box<dyn oxideav_core::Decoder>),
+    Opus(Box<crate::transcode::OpusAudioDecoderSession>),
+    Dts(Box<crate::transcode::DtsAudioDecoderSession>),
+    TrueHd(Box<crate::transcode::TrueHdAudioDecoderSession>),
 }
 impl Decoder {
     fn new(spec: &Spec) -> Result<Self> {
@@ -188,11 +191,61 @@ impl Decoder {
                 p.sample_format = Some(oxideav_core::SampleFormat::S16);
                 Ok(Self::Ac3(oxideav_ac3::decoder::make_decoder(&p)?))
             }
+            "opus" => Ok(Self::Opus(Box::new(
+                crate::transcode::OpusAudioDecoderSession::new(&spec.config)?,
+            ))),
+            "dts" => Ok(Self::Dts(Box::default())),
+            "truehd" => Ok(Self::TrueHd(Box::default())),
             _ => bail!("Unsupported acoustic analysis codec"),
         }
     }
     fn push(&mut self, bytes: &[u8], pts: u64, rate: u32, builder: &mut Builder) -> Result<()> {
+        use crate::{
+            packet::{TimeDelta, TimePoint, TimeScale},
+            transcode::{AudioDecodeCodec, AudioDecodeInput, CompressedAudioPacket},
+        };
+        let native_codec = match self {
+            Self::Opus(_) => Some(AudioDecodeCodec::Opus),
+            Self::Dts(_) => Some(AudioDecodeCodec::Dts),
+            Self::TrueHd(_) => Some(AudioDecodeCodec::TrueHd),
+            _ => None,
+        };
+        if let Some(codec) = native_codec {
+            let input = AudioDecodeInput {
+                codec,
+                time_scale: TimeScale::MILLIS,
+                packets: vec![CompressedAudioPacket {
+                    index: 0,
+                    pts: TimePoint::millis(pts),
+                    dts: TimePoint::millis(pts),
+                    duration: TimeDelta::millis(0),
+                    bytes,
+                }],
+                end_of_stream: false,
+            };
+            let decoded = match self {
+                Self::Opus(d) => d.decode(&input)?,
+                Self::Dts(d) => d.decode(&input)?,
+                Self::TrueHd(d) => d.decode(&input)?,
+                _ => unreachable!(),
+            };
+            for frame in decoded.frames {
+                let samples = frame
+                    .samples
+                    .iter()
+                    .map(|v| f32::from(*v) / 32768.0)
+                    .collect::<Vec<_>>();
+                builder.push(
+                    frame.timing.pts.as_millis(),
+                    &samples,
+                    decoded.format.sample_rate,
+                    decoded.format.channels as usize,
+                )?;
+            }
+            return Ok(());
+        }
         match self {
+            Self::Opus(_) | Self::Dts(_) | Self::TrueHd(_) => unreachable!(),
             Self::Aac(decoder) => {
                 let decoded = decoder
                     .decode(bytes, None)
@@ -256,7 +309,7 @@ impl Decoder {
 
 pub(super) fn capture(source: &MediaSource, spec: &Spec) -> Result<Vec<Window>> {
     let duration = spec.duration_ms;
-    let early_end = 360_000.min(duration / 2);
+    let early_end = 600_000.min(duration / 4);
     let late_start = duration.saturating_sub(300_000).max(early_end);
     let mut output = Vec::new();
     let mut total_bytes = 0usize;

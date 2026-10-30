@@ -186,3 +186,17 @@ time-window extraction, not packet-indexed clients. The default manifest command
 keeps its complete packet index. Missing initial audio samples fall back to the
 complete manifest path. MP4 sample-table indexing is unchanged. This optional
 representation does not invalidate completed library preparation.
+
+
+### Marker evidence
+
+Marker analysis streams standard Chromaprint algorithm-2 fingerprints into a
+source/configuration-bound v2 cache (20,000 entries / 512 MiB). Visual analysis
+retains only tail packet metadata, one bounded decoded GOP and numeric keyframe /
+boundary observations. Limits are 100,000 retained packet references, 4,000 tail
+keyframes, 60,000 decoded frames, 4,500 decode requests and 2 GiB logical source
+reads per sampler. Every decoded batch stays within the selected resource policy.
+Evidence checkpoints are at most 4 MiB each and validate the source around atomic
+publication. Complete cached boundaries require no native decoder. Server scheduling
+limits concurrent marker work to two independent seasons (one in the small-NAS
+profile) and foreground playback retains cancellation/admission priority.

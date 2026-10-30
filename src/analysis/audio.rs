@@ -15,7 +15,7 @@ use std::{
     time::UNIX_EPOCH,
 };
 
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 const CACHE_LIMIT: usize = 2 * 1024 * 1024;
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -58,7 +58,7 @@ fn valid(cached: &Cached, stamp: &str, duration: u64) -> bool {
     for window in &cached.windows {
         if window.start_ms >= window.end_ms
             || window.end_ms > duration
-            || window.end_ms - window.start_ms > 360_000
+            || window.end_ms - window.start_ms > 600_000
         {
             return false;
         }
@@ -142,7 +142,10 @@ fn fingerprints(
 fn prune(cache: &Path) -> Result<()> {
     let mut entries = Vec::new();
     for (index, item) in fs::read_dir(cache)?.enumerate() {
-        ensure!(index < 4096, "Acoustic cache directory exceeds entry limit");
+        ensure!(
+            index < 25_000,
+            "Acoustic cache directory exceeds entry limit"
+        );
         let item = item?;
         let path = item.path();
         let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
@@ -164,7 +167,7 @@ fn prune(cache: &Path) -> Result<()> {
     let mut bytes = entries.iter().map(|entry| entry.1).sum::<u64>();
     let mut count = entries.len();
     for (_, size, path) in entries {
-        if count <= 64 && bytes <= 64 * 1024 * 1024 {
+        if count <= 20_000 && bytes <= 512 * 1024 * 1024 {
             break;
         }
         if fs::remove_file(path).is_ok() {
@@ -194,7 +197,7 @@ pub(super) fn detect(
         );
         peer_paths.push(path);
     }
-    let cache = cache_dir.join("acoustic-v1");
+    let cache = cache_dir.join("chromaprint-v2");
     fs::create_dir_all(&cache)?;
     let metadata = cache.symlink_metadata()?;
     ensure!(
@@ -218,7 +221,7 @@ pub(super) fn detect(
             start_time_offset: found.start_ms,
             end_time_offset: found.end_ms,
             confidence: found.quality,
-            method: "native-audio-repetition-v1".into(),
+            method: "chromaprint-algorithm2-v2".into(),
             reference_count: 2,
         })
         .collect();
@@ -315,7 +318,7 @@ mod tests {
         value.version += 1;
         assert!(!valid(&value, "identity", 600_000));
         value.version = VERSION;
-        value.windows[0].end_ms = 400_000;
+        value.windows[0].end_ms = 600_001;
         assert!(!valid(&value, "identity", 600_000));
     }
     #[test]

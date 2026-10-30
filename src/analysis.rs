@@ -7,6 +7,7 @@ use std::{
 };
 
 mod audio;
+mod evidence_cache;
 mod visual;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
