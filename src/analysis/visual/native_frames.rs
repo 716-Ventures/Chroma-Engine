@@ -41,6 +41,20 @@ fn codec(value: &str) -> Result<VideoCodec> {
         _ => bail!("Video codec has no bounded native credit sampler"),
     }
 }
+// AV1 sequence headers are in-band; only AVC/HEVC require private config.
+fn decoder_configuration(codec: VideoCodec, hex: Option<String>) -> Result<Vec<u8>> {
+    let hex = hex
+        .or_else(|| (codec == VideoCodec::Av1).then(String::new))
+        .context("Video decoder configuration missing")?;
+    ensure!(
+        hex.len() <= 128 * 1024 && hex.len().is_multiple_of(2) && hex.is_ascii(),
+        "Video decoder configuration exceeds limit"
+    );
+    (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).map_err(Into::into))
+        .collect()
+}
 impl Sampler {
     pub(super) fn open(input: &Path) -> Result<Self> {
         let source = MediaSource::open_with_context(
@@ -57,20 +71,11 @@ impl Sampler {
                     .iter()
                     .find(|track| track.kind == crate::container::mp4::Mp4TrackKind::Video)
                     .context("Video track missing")?;
-                let config = crate::container::mp4::parse_codec_config(&metadata, Some("v0"))
-                    .context("Video decoder configuration missing")?;
-                let hex = config
-                    .description_hex
-                    .context("Video decoder configuration missing")?;
-                ensure!(
-                    hex.len() <= 128 * 1024 && hex.len().is_multiple_of(2),
-                    "Video decoder configuration exceeds limit"
-                );
-                let mut configuration = Vec::with_capacity(hex.len() / 2);
-                for pair in hex.as_bytes().as_chunks::<2>().0 {
-                    let text = std::str::from_utf8(pair)?;
-                    configuration.push(u8::from_str_radix(text, 16)?);
-                }
+                let configuration = decoder_configuration(
+                    codec(&track.codec)?,
+                    crate::container::mp4::parse_codec_config(&metadata, Some("v0"))
+                        .and_then(|c| c.description_hex),
+                )?;
                 let packets = crate::container::mp4::parse_packet_track(&metadata, Some("v0"))
                     .context("Video packet table missing")?
                     .packets;
@@ -389,6 +394,18 @@ fn reduce(bytes: &[u8], width: u32, height: u32, time_ms: u64) -> Result<Frame> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn only_in_band_av1_allows_missing_private_decoder_configuration() {
+        assert!(
+            decoder_configuration(VideoCodec::Av1, None)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(decoder_configuration(VideoCodec::H264, None).is_err());
+        assert!(decoder_configuration(VideoCodec::Hevc, None).is_err());
+        assert!(decoder_configuration(VideoCodec::Av1, Some("🙂".into())).is_err());
+        assert!(decoder_configuration(VideoCodec::H264, Some("0".into())).is_err());
+    }
     #[test]
     fn reduction_is_bounded_and_rejects_malformed_frame_layouts() {
         assert!(reduce(&[], 0, 0, 0).is_err());

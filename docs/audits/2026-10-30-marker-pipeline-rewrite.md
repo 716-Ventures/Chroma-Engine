@@ -77,3 +77,16 @@ screening evidence, the corrected refinement completed in 3.568 seconds, decoded
 152 frames, read 22,782,777 logical bytes and returned four measured credit ranges
 with no unavailable notice. No full rescan was necessary. A follow-up cached run
 and native regression tests verify the corrected path before its deployment.
+
+
+## Format qualification follow-up
+
+The final live audit distinguished a legacy MPEG-4 Part 2 (`mp4v`) file, whose
+visual codec is outside Engine's H264/HEVC/AV1 sampler, from an AV1 configuration
+guard bug. AV1 carries its sequence headers in-band and no longer incorrectly
+requires AVC/HEVC private configuration. A regression enforces that exception
+only for AV1, retaining malformed/oversized configuration rejection. The private
+AV1 file then completed 155 keyframe probes in 10.525 seconds with no unavailable
+notice and no fabricated ranges. The legacy codec limitation remains explicit;
+its authored/imported markers are still usable. This audit does not claim every
+codec or credit style has automatic visual detection coverage.
