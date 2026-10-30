@@ -254,6 +254,11 @@ impl Sampler {
             height: ((f64::from(self.format.height) * scale).round() as u32).clamp(32, 360) & !1,
             ..self.format
         };
+        // Refinement jumps backwards from the completed screening pass. Start
+        // a clean GOP decoder; retain the session across keyframe-only probes.
+        if packets.len() > 1 {
+            self.decoder = None;
+        }
         if self.decoder.is_none() {
             self.decoder = Some(BgraDecoderSession::new_scaled_with_policy(
                 self.codec,
@@ -281,7 +286,7 @@ impl Sampler {
                     end: group.len() as u32,
                 },
             )?;
-            let input = build_video_decode_input(
+            let mut input = build_video_decode_input(
                 self.codec,
                 group[0].pts.scale,
                 Some(&self.configuration),
@@ -289,6 +294,24 @@ impl Sampler {
                 &bytes,
                 (index + 1) * batch >= packets.len(),
             )?;
+            if self.codec == VideoCodec::Hevc && packets.len() > 1 {
+                let length_size =
+                    crate::codec::hevc::parse_hevc_decoder_config(&self.configuration)?
+                        .nalu_length_size;
+                // HEVC RASL pictures may reference the preceding GOP and must
+                // be discarded when entering an open GOP at its CRA picture.
+                let mut retained = Vec::with_capacity(input.packets.len());
+                for packet in input.packets {
+                    let leading = matches!(
+                        crate::codec::hevc::sample_vcl_type(packet.bytes, length_size)?,
+                        Some(8 | 9)
+                    );
+                    if !leading {
+                        retained.push(packet);
+                    }
+                }
+                input.packets = retained;
+            }
             let decoded = decoder.decode(&input)?;
             let decoded_bytes = decoded
                 .frames

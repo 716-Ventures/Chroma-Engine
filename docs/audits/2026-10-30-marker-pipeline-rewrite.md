@@ -64,3 +64,16 @@ this report does not claim every first scan is instantaneous.
 
 Private titles, paths, library IDs, source frames and captions are excluded here.
 No Apple TV or UI changes.
+
+
+## HEVC open-GOP refinement
+
+Live validation exposed one additional failure on a private 59 GB Dolby Vision
+source: screening completed, but VideoToolbox rejected a boundary GOP containing
+RASL leading pictures. Refinement now starts a fresh decoder when jumping back
+from screening and excludes HEVC RASL pictures that can reference the preceding
+GOP. The keyframe-only pass retains its decoder. Reusing the completed numeric
+screening evidence, the corrected refinement completed in 3.568 seconds, decoded
+152 frames, read 22,782,777 logical bytes and returned four measured credit ranges
+with no unavailable notice. No full rescan was necessary. A follow-up cached run
+and native regression tests verify the corrected path before its deployment.
