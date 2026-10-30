@@ -273,7 +273,7 @@ pub(super) fn capture(source: &MediaSource, spec: &Spec) -> Result<Vec<Window>> 
         let mut builder = Builder::new(start, end);
         let mut decoder = Decoder::new(spec)?;
         // Bound packet coalescing and validate source identity around each batch;
-        // read_packets never copies gaps or unselected interleaved video bytes.
+        // read_packets returns only selected bytes and bounds any mux-header lookahead.
         for batch in packets.chunks(256) {
             source.check_work()?;
             let read_started = Instant::now();

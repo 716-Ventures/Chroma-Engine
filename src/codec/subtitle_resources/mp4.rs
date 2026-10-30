@@ -85,7 +85,7 @@ pub(super) fn append(
                     return Err("MP4 subtitle payload exceeds limit".into());
                 }
                 let bytes = source
-                    .read_at(packet.source_offset, packet.size as usize)
+                    .read_window_unvalidated(packet.source_offset, packet.size as usize)
                     .map_err(|error| format!("MP4 subtitle packet unavailable: {error}"))?;
                 let start = packet.pts.as_millis();
                 let end = start.saturating_add(packet.duration.as_millis());

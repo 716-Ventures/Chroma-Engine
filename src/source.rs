@@ -11,8 +11,24 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 pub(crate) mod probe_reader;
 
-const METADATA_LOOKAHEAD_BYTES: usize = 8 * 1024;
+const METADATA_LOOKAHEAD_BYTES: usize = 1024 * 1024;
+const METADATA_INITIAL_BYTES: usize = 8 * 1024;
+const PACKET_GAP_BYTES: u64 = 256;
+const PACKET_COALESCE_BYTES: usize = 64 * 1024;
 const MAX_METADATA_PREFIX_BYTES: usize = 64;
+
+/// A bounded diagnostic/tuning ceiling; default adapts up to one MiB. The
+/// resource policy's remaining metadata budget always takes precedence.
+fn metadata_lookahead_limit() -> usize {
+    static LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *LIMIT.get_or_init(|| {
+        std::env::var("CHROMA_METADATA_LOOKAHEAD_BYTES")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(METADATA_LOOKAHEAD_BYTES)
+            .clamp(METADATA_INITIAL_BYTES, METADATA_LOOKAHEAD_BYTES)
+    })
+}
 
 /// One bounded lookahead window for neighbouring EBML headers. Packet payload
 /// reads remain positional and never consult this window.
@@ -55,8 +71,19 @@ impl MetadataWindow {
         {
             return Ok(bytes.to_vec());
         }
+        // Grow only for a forward, dense walk. Sparse cluster/seek lookups
+        // keep the small first-read cost instead of pulling a MiB per jump.
+        let dense = !self.bytes.is_empty()
+            && offset >= self.offset
+            && offset - self.offset <= (self.bytes.len() as u64).saturating_add(128 * 1024);
+        let lookahead = if dense {
+            self.bytes.len().saturating_mul(2)
+        } else {
+            METADATA_INITIAL_BYTES
+        };
         let fill = capacity_limit
             .min(METADATA_LOOKAHEAD_BYTES)
+            .min(lookahead)
             .min(usize::try_from(source_len - offset).unwrap_or(usize::MAX));
         if fill < len {
             // Metadata can occupy the complete custom budget. Keep the old
@@ -348,7 +375,8 @@ impl MediaSource {
             .policy()
             .metadata_bytes
             .saturating_sub(self.bytes.len())
-            .min(self.policy().compressed_window_bytes);
+            .min(self.policy().compressed_window_bytes)
+            .min(metadata_lookahead_limit());
         let mut window = self
             .metadata_window
             .lock()
@@ -379,6 +407,28 @@ impl MediaSource {
                 io::ErrorKind::UnexpectedEof,
                 "window outside source",
             ));
+        }
+        // Scanners validate the source around the complete pass. Reuse bytes
+        // already fetched for neighbouring headers instead of issuing a second
+        // network read for a lace table or subtitle payload inside that window.
+        let cached = {
+            let window = self
+                .metadata_window
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            offset
+                .checked_sub(window.offset)
+                .and_then(|relative| usize::try_from(relative).ok())
+                .and_then(|start| {
+                    start
+                        .checked_add(len)
+                        .and_then(|end| window.bytes.get(start..end))
+                })
+                .map(<[u8]>::to_vec)
+        };
+        if let Some(bytes) = cached {
+            self.check_work().map_err(io::Error::other)?;
+            return Ok(bytes);
         }
         let mut output = bounded_buffer(len)?;
         self.read_exact_counted(&mut output, offset)?;
@@ -497,22 +547,46 @@ impl MediaSource {
         let mut index = 0;
         while index < packets.len() {
             self.check_work().map_err(io::Error::other)?;
-            let first = &packets[index];
-            let offset = first.source_offset;
-            let mut length = first.size as usize;
+            let first_index = index;
+            let offset = packets[index].source_offset;
+            let mut span = u64::from(packets[index].size);
+            let mut payload = packets[index].size as usize;
             index += 1;
-            // Coalesce only physically adjacent spans. Preserve decode order and
-            // never read unselected interleaved payload or allocate a gap buffer.
             while let Some(next) = packets.get(index) {
-                if offset.checked_add(length as u64) != Some(next.source_offset) {
+                let Some(gap) = next.source_offset.checked_sub(offset + span) else {
+                    break;
+                };
+                let next_span = next.source_offset + u64::from(next.size) - offset;
+                let next_payload = payload + next.size as usize;
+                // Adjacent payloads still read directly into the output. Tiny
+                // mux headers may be crossed only within strict I/O and memory
+                // bounds; interleaved video and out-of-order packets stay separate.
+                let contiguous = gap == 0 && span == payload as u64;
+                let bounded_gap = gap <= PACKET_GAP_BYTES
+                    && next_span <= PACKET_COALESCE_BYTES as u64
+                    && next_span <= (next_payload as u64).saturating_mul(2)
+                    && next_span
+                        <= self.policy().compressed_window_bytes.saturating_sub(size) as u64;
+                if !contiguous && !bounded_gap {
                     break;
                 }
-                length += next.size as usize;
+                span = next_span;
+                payload = next_payload;
                 index += 1;
             }
-            let end = cursor + length;
-            self.read_exact_counted(&mut output[cursor..end], offset)?;
-            cursor = end;
+            if span == payload as u64 {
+                self.read_exact_counted(&mut output[cursor..cursor + payload], offset)?;
+                cursor += payload;
+            } else {
+                let mut window = bounded_buffer(span as usize)?;
+                self.read_exact_counted(&mut window, offset)?;
+                for packet in &packets[first_index..index] {
+                    let start = (packet.source_offset - offset) as usize;
+                    let len = packet.size as usize;
+                    output[cursor..cursor + len].copy_from_slice(&window[start..start + len]);
+                    cursor += len;
+                }
+            }
         }
         self.validate_current().map_err(io::Error::other)?;
         Ok(output)
@@ -609,7 +683,7 @@ mod tests {
                     offset,
                     len,
                     source.len() as u64,
-                    METADATA_LOOKAHEAD_BYTES,
+                    8 * 1024,
                     |output, offset| {
                         reads.push((offset, output.len()));
                         let start = offset as usize;
@@ -621,7 +695,7 @@ mod tests {
             assert_eq!(bytes, source[offset as usize..offset as usize + len]);
         }
         assert_eq!(reads, [(0, 8_192), (9_000, 8_192), (19_998, 2)]);
-        assert!(cache.bytes.capacity() <= METADATA_LOOKAHEAD_BYTES);
+        assert!(cache.bytes.capacity() <= 8 * 1024);
         assert!(
             cache
                 .read(20_000, 1, 20_000, 8_192, |_, _| panic!(
@@ -755,6 +829,126 @@ mod tests {
         assert!(source.read_at(0, 65 * 1024 * 1024).is_err());
         fs::write(&path, b"x").unwrap();
         assert!(source.read_at(0, 8).is_err());
+    }
+
+    #[test]
+    fn larger_metadata_window_reduces_sequential_header_reads_without_changing_bytes() {
+        let data = vec![0x5a; 1024 * 1024];
+        let scan = |capacity| {
+            let mut window = MetadataWindow::default();
+            let mut reads = 0;
+            for offset in (0..data.len() - 12).step_by(300) {
+                let got = window
+                    .read(offset as u64, 12, data.len() as u64, capacity, |out, at| {
+                        reads += 1;
+                        out.copy_from_slice(&data[at as usize..at as usize + out.len()]);
+                        Ok(())
+                    })
+                    .unwrap();
+                assert_eq!(got, &data[offset..offset + 12]);
+            }
+            assert!(window.bytes.capacity() <= capacity);
+            reads
+        };
+        assert!(scan(METADATA_LOOKAHEAD_BYTES) * 6 < scan(8 * 1024));
+    }
+
+    fn packet(offset: u64, size: u32) -> crate::packet::PacketRef {
+        crate::packet::PacketRef {
+            source_offset: offset,
+            size,
+            pts: crate::packet::TimePoint::millis(0),
+            dts: crate::packet::TimePoint::millis(0),
+            duration: crate::packet::TimeDelta::millis(1),
+            keyframe: true,
+        }
+    }
+
+    #[test]
+    fn packet_coalescing_skips_mux_headers_and_preserves_decode_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fixture.bin");
+        let data = (0..200_000).map(|i| (i % 251) as u8).collect::<Vec<_>>();
+        fs::write(&path, &data).unwrap();
+        let source = MediaSource::open_packet_copy(&path).unwrap();
+        let packets = (0..100).map(|i| packet(i * 108, 100)).collect::<Vec<_>>();
+        let before = source.io_stats();
+        let got = source.read_packets(&packets).unwrap();
+        let expected = packets
+            .iter()
+            .flat_map(|p| {
+                data[p.source_offset as usize..p.source_offset as usize + p.size as usize].to_vec()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(got, expected);
+        assert_eq!(source.io_stats().1 - before.1, 1);
+        assert!(source.io_stats().0 - before.0 <= 2 * got.len() as u64);
+        let unordered = [
+            packet(10000, 100),
+            packet(100, 100),
+            packet(200, 100),
+            packet(100, 50),
+        ];
+        assert_eq!(
+            source.read_packets(&unordered).unwrap(),
+            unordered
+                .iter()
+                .flat_map(|p| data
+                    [p.source_offset as usize..p.source_offset as usize + p.size as usize]
+                    .to_vec())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn packet_gap_reads_obey_amplification_gap_and_memory_limits() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fixture.bin");
+        fs::write(&path, vec![0x5a; 200_000]).unwrap();
+        let source = MediaSource::open_packet_copy(&path).unwrap();
+        for packets in [
+            [packet(0, 1), packet(100, 1)],
+            [packet(0, 100), packet(10000, 100)],
+        ] {
+            let before = source.io_stats();
+            assert!(source.read_packets(&packets).is_ok());
+            assert_eq!(source.io_stats().1 - before.1, 2);
+            assert_eq!(
+                source.io_stats().0 - before.0,
+                packets.iter().map(|p| u64::from(p.size)).sum::<u64>()
+            );
+        }
+        let runtime = crate::EngineRuntime::new(crate::ResourcePolicy {
+            compressed_window_bytes: 200,
+            ..crate::ResourcePolicy::default()
+        })
+        .unwrap();
+        let bounded =
+            MediaSource::open_with_context(&path, runtime, crate::WorkControl::default()).unwrap();
+        let before = bounded.io_stats();
+        assert_eq!(
+            bounded
+                .read_packets(&[packet(0, 100), packet(108, 100)])
+                .unwrap()
+                .len(),
+            200
+        );
+        assert_eq!(bounded.io_stats().1 - before.1, 2);
+    }
+
+    #[test]
+    fn scan_windows_reuse_buffered_bytes_but_keep_bounds_and_public_identity_checks() {
+        let (_dir, path) = metadata_fixture();
+        let source = MediaSource::open_packet_copy(&path).unwrap();
+        source.element_at(0, source.len()).unwrap();
+        let before = source.io_stats();
+        let got = source.read_window_unvalidated(2, 20).unwrap();
+        assert_eq!(got, fs::read(&path).unwrap()[2..22]);
+        assert_eq!(source.io_stats(), before);
+        assert!(source.read_window_unvalidated(source.len(), 1).is_err());
+        fs::write(&path, b"replaced source").unwrap();
+        assert!(source.validate_current().is_err());
+        assert!(source.read_at(0, 1).is_err());
     }
 
     #[test]

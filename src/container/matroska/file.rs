@@ -606,6 +606,46 @@ mod tests {
     }
 
     #[test]
+    fn streaming_manifest_skips_global_audio_index_and_keeps_video_and_decoder_metadata() {
+        let (_dir, path) = fixture(false);
+        let full_source = MediaSource::open_packet_copy(&path).unwrap();
+        let full = crate::playback_manifest::build_file_matroska_manifest(
+            &full_source,
+            &path,
+            Default::default(),
+        )
+        .unwrap();
+        let source = MediaSource::open_packet_copy(&path).unwrap();
+        let streaming = crate::playback_manifest::build_file_matroska_streaming_manifest(
+            &source,
+            &path,
+            Default::default(),
+        )
+        .unwrap();
+        assert!(
+            streaming
+                .tracks
+                .iter()
+                .filter(|track| track.kind == "audio")
+                .all(|track| track.time_window_addressed && track.chunks.is_empty())
+        );
+        let mut normalized = streaming.clone();
+        for track in &mut normalized.tracks {
+            if track.time_window_addressed {
+                track.time_window_addressed = false;
+                track.chunks = full
+                    .tracks
+                    .iter()
+                    .find(|old| old.id == track.id)
+                    .unwrap()
+                    .chunks
+                    .clone();
+            }
+        }
+        assert_eq!(normalized, full);
+    }
+
+    #[test]
     fn batch_audio_plans_match_individual_plans_with_one_cluster_pass() {
         for cue_audio in [false, true] {
             let (_directory, path) = fixture(cue_audio);

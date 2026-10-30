@@ -78,6 +78,9 @@ pub struct ManifestTrack {
     pub peak_bitrate_bps: Option<u64>,
     /// Keyframe-aligned chunks for this track.
     pub chunks: Vec<NativeChunk>,
+    /// Audio is extracted by source time windows, without a global packet index.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub time_window_addressed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -194,6 +197,25 @@ pub(crate) fn build_file_matroska_manifest(
     source_path: &Path,
     options: MatroskaManifestOptions,
 ) -> anyhow::Result<NativePlaybackManifest> {
+    build_file_matroska_manifest_mode(source, source_path, options, false)
+}
+
+/// Import-time HLS needs video seek points and audio decoder metadata. Audio
+/// packets are selected from the source by time at segment extraction.
+pub(crate) fn build_file_matroska_streaming_manifest(
+    source: &crate::source::MediaSource,
+    source_path: &Path,
+    options: MatroskaManifestOptions,
+) -> anyhow::Result<NativePlaybackManifest> {
+    build_file_matroska_manifest_mode(source, source_path, options, true)
+}
+
+fn build_file_matroska_manifest_mode(
+    source: &crate::source::MediaSource,
+    source_path: &Path,
+    options: MatroskaManifestOptions,
+    streaming: bool,
+) -> anyhow::Result<NativePlaybackManifest> {
     let metadata = parse_matroska_basic_metadata(source.as_ref());
     let mut selected = Vec::new();
     let mut video_index = 0;
@@ -211,11 +233,45 @@ pub(crate) fn build_file_matroska_manifest(
     }
     let ids = selected
         .iter()
+        .filter(|(_, track)| !streaming || track.kind != MatroskaTrackKind::Audio)
         .map(|(id, _)| id.as_str())
         .collect::<Vec<_>>();
     let plans = source.matroska_chunk_plans(&ids, options.chunk_target_ms)?;
     let mut tracks = Vec::new();
-    for ((id, track), plan) in selected.into_iter().zip(plans) {
+    if streaming {
+        let audio_ids = selected
+            .iter()
+            .filter(|(_, track)| track.kind == MatroskaTrackKind::Audio)
+            .map(|(id, _)| id.as_str())
+            .collect::<Vec<_>>();
+        if !audio_ids.is_empty() {
+            let first_end = plans
+                .first()
+                .and_then(|plan| plan.chunks.first())
+                .map(|chunk| chunk.start.as_millis().saturating_add(1000))
+                .unwrap_or(1000);
+            let sample = source
+                .matroska_index()?
+                .packets(source, &audio_ids, 0, first_end);
+            if !sample.is_ok_and(|tracks| {
+                tracks.len() == audio_ids.len()
+                    && tracks.iter().all(|track| !track.packets.is_empty())
+            }) {
+                return build_file_matroska_manifest_mode(source, source_path, options, false);
+            }
+        }
+    }
+    let mut plans = plans.into_iter();
+    for (id, track) in selected {
+        let time_window_addressed = streaming && track.kind == MatroskaTrackKind::Audio;
+        let chunks = if time_window_addressed {
+            Vec::new()
+        } else {
+            plans
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("missing Matroska track plan"))?
+                .chunks
+        };
         let private = track.codec_private.as_deref();
         tracks.push(ManifestTrack {
             id: id.clone(),
@@ -244,7 +300,8 @@ pub(crate) fn build_file_matroska_manifest(
             config_box: matroska_config_box(track, private).map(str::to_string),
             decoder_config_hex: private.map(hex_string),
             peak_bitrate_bps: None,
-            chunks: plan.chunks,
+            chunks,
+            time_window_addressed,
         });
     }
     Ok(NativePlaybackManifest {
@@ -402,6 +459,7 @@ fn manifest_track(bytes: &[u8], track_id: &str, target_ms: u64) -> Option<Manife
         decoder_config_hex: config.description_hex,
         peak_bitrate_bps,
         chunks: plan.chunks,
+        time_window_addressed: false,
     })
 }
 
@@ -507,6 +565,7 @@ fn matroska_manifest_track(
         decoder_config_hex: private.map(hex_string),
         peak_bitrate_bps: None,
         chunks,
+        time_window_addressed: false,
     })
 }
 

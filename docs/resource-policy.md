@@ -156,3 +156,33 @@ OS high-water/container telemetry too. POSIX runs also record per-child
 `--report PATH` creates a new JSON report.
 Five samples, tiny frames, and uncontrolled caches cannot establish production
 latency or a performance improvement over the reviewed revision.
+
+### Network-source read coalescing
+
+Dense forward EBML walks start with an 8 KiB look-ahead and grow up to 1 MiB;
+sparse seek/cluster jumps reset to 8 KiB. The remaining metadata and compressed
+window budgets cap every fill. `CHROMA_METADATA_LOOKAHEAD_BYTES` optionally limits
+the adaptive ceiling to 8192–1048576 bytes; 8192 retains the small-window profile
+for diagnostics or bandwidth-constrained storage. No media is memory-mapped.
+
+Packet reads can combine gaps of at most 256 bytes (such as Matroska mux headers)
+within a 64 KiB span and at most 2× selected-payload amplification. Output contains
+only selected payload bytes, in decode order. The temporary span plus output
+must fit the existing compressed-window budget; larger gaps, overlapping or
+backward spans fall back to separate reads. Cancellation and source identity
+checks remain active. `CHROMA_PROBE_DIAGNOSTICS` includes manifest positional
+read bytes, operations and visited clusters on stderr without changing JSON.
+
+
+Subtitle extraction validates source identity before and after each complete
+pass, then uses bounded cached positional reads inside that pass. Public random
+reads retain their per-call identity checks; cancellation and byte limits still
+apply to internal reads.
+
+`manifest --streaming-index` prepares Matroska HLS video seek points and audio
+decoder metadata without a global audio packet index. Audio tracks explicitly
+carry `timeWindowAddressed: true` and empty chunks; they are suitable for source
+time-window extraction, not packet-indexed clients. The default manifest command
+keeps its complete packet index. Missing initial audio samples fall back to the
+complete manifest path. MP4 sample-table indexing is unchanged. This optional
+representation does not invalidate completed library preparation.

@@ -18,6 +18,7 @@ pub(super) fn cues(
     source: &MediaSource,
     tracks: &[&MatroskaTrack],
 ) -> Result<HashMap<u64, Vec<Cue>>> {
+    source.validate_current()?;
     let compression = super::bitmap::compression::parse(source)?;
     let mut offset = 0;
     let mut visits = 0;
@@ -133,8 +134,10 @@ pub(super) fn cues(
                         if *size > super::SCRIPT_LIMIT || total > super::AGGREGATE_LIMIT {
                             bail!("subtitle resource size limit exceeded");
                         }
-                        let bytes =
-                            source.read_at(block.payload + (track_len + 3) as u64, payload_len)?;
+                        let bytes = source.read_window_unvalidated(
+                            block.payload + (track_len + 3) as u64,
+                            payload_len,
+                        )?;
                         let bytes = if let Some(encoding) = compression.get(&number) {
                             match encoding.decode(&bytes, 1, super::SCRIPT_LIMIT) {
                                 Ok(decoded) => decoded,
@@ -239,7 +242,7 @@ fn read_addition(
                 if len > 64 * 1024 {
                     bail!("WebVTT cue additions limit exceeded");
                 }
-                return Ok(Some(source.read_at(data.payload, len)?));
+                return Ok(Some(source.read_window_unvalidated(data.payload, len)?));
             }
         }
         offset = more.end;
@@ -258,7 +261,7 @@ fn uint(source: &MediaSource, element: Element) -> Result<u64> {
     if len == 0 || len > 8 {
         bail!("invalid subtitle metadata integer");
     }
-    let bytes = source.read_at(element.payload, len)?;
+    let bytes = source.read_metadata_prefix(element.payload, len)?;
     Ok(bytes
         .into_iter()
         .fold(0_u64, |value, byte| value << 8 | u64::from(byte)))

@@ -690,8 +690,10 @@ fn scan_matroska(
                         if payload_len > MAX_ENCODED_BYTES {
                             bail!("Bitmap subtitle packet exceeds size limit");
                         }
-                        let bytes =
-                            source.read_at(block.payload + (track_len + 3) as u64, payload_len)?;
+                        let bytes = source.read_window_unvalidated(
+                            block.payload + (track_len + 3) as u64,
+                            payload_len,
+                        )?;
                         consume(number, time, duration, &bytes)?;
                     }
                 }

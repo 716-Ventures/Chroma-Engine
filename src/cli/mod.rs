@@ -92,6 +92,9 @@ enum Command {
     /// Emit a Chroma-native playback manifest for a source.
     Manifest {
         file: PathBuf,
+        /// Prepare HLS metadata without a global Matroska audio packet index.
+        #[arg(long)]
+        streaming_index: bool,
         #[arg(long, default_value_t = 4_000)]
         target_ms: u64,
         #[arg(long, default_value_t = true)]
@@ -554,6 +557,7 @@ pub fn run() -> Result<()> {
         }
         Command::Manifest {
             file,
+            streaming_index,
             target_ms,
             include_audio,
         } => {
@@ -570,7 +574,11 @@ pub fn run() -> Result<()> {
                 )
                 .ok()
             } else if looks_like_ebml(bytes.as_ref()) {
-                build_file_matroska_manifest(
+                (if streaming_index {
+                    crate::playback_manifest::build_file_matroska_streaming_manifest
+                } else {
+                    build_file_matroska_manifest
+                })(
                     bytes,
                     &file,
                     MatroskaManifestOptions {
@@ -583,6 +591,12 @@ pub fn run() -> Result<()> {
                 None
             }
             .ok_or_else(|| anyhow::anyhow!("could not build native playback manifest"))?;
+            if std::env::var_os("CHROMA_PROBE_DIAGNOSTICS").is_some() {
+                let (bytes, operations, clusters) = source.io_stats();
+                eprintln!(
+                    "manifest_source_read bytes={bytes} operations={operations} clusters={clusters}"
+                );
+            }
             println!("{}", serde_json::to_string_pretty(&manifest)?);
         }
         Command::ExtractChunk {
