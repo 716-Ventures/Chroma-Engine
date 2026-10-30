@@ -118,6 +118,7 @@ fn first_samples(stbl: &[u8]) -> Option<(u64, Vec<usize>)> {
         u64::from(read_u32(stco.get(8..12)?)?)
     };
     let stsc = find_atom(stbl, b"stsc")?;
+    (read_u32(stsc.get(4..8)?)? > 0).then_some(())?;
     (read_u32(stsc.get(8..12)?)? == 1 && read_u32(stsc.get(16..20)?)? == 1).then_some(())?;
     let count = read_u32(stsc.get(12..16)?)?.min(2);
     let stsz = find_atom(stbl, b"stsz")?;
@@ -341,6 +342,122 @@ pub(crate) fn prepare_overlay(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn sample_table(wide: bool, fixed: u32, sizes: &[u32]) -> Vec<u8> {
+        let mut offset = vec![0; 4];
+        offset.extend_from_slice(&1u32.to_be_bytes());
+        if wide {
+            offset.extend_from_slice(&0x1_0000_0001u64.to_be_bytes());
+        } else {
+            offset.extend_from_slice(&128u32.to_be_bytes());
+        }
+        let stsc = [0u32, 1, 1, 4, 1]
+            .into_iter()
+            .flat_map(u32::to_be_bytes)
+            .collect::<Vec<_>>();
+        let mut stsz = [0u32, fixed, sizes.len() as u32]
+            .into_iter()
+            .flat_map(u32::to_be_bytes)
+            .collect::<Vec<_>>();
+        if fixed == 0 {
+            for size in sizes {
+                stsz.extend_from_slice(&size.to_be_bytes());
+            }
+        }
+        [
+            box_bytes(if wide { *b"co64" } else { *b"stco" }, &offset),
+            box_bytes(*b"stsc", &stsc),
+            box_bytes(*b"stsz", &stsz),
+        ]
+        .concat()
+    }
+
+    #[test]
+    fn sample_recovery_bounds_reads_to_two_samples_and_supports_large_offsets() {
+        assert_eq!(
+            first_samples(&sample_table(false, 0, &[10, 20, 30, 40])),
+            Some((128, vec![10, 20]))
+        );
+        assert_eq!(
+            first_samples(&sample_table(true, 42, &[0, 0, 0])),
+            Some((0x1_0000_0001, vec![42, 42]))
+        );
+        assert_eq!(
+            first_samples(&sample_table(false, 0, &[12])),
+            Some((128, vec![12]))
+        );
+    }
+
+    #[test]
+    fn sample_recovery_refuses_truncation_missing_entries_and_wrong_descriptions() {
+        let valid = sample_table(false, 0, &[10, 20]);
+        for end in 0..valid.len() {
+            assert!(
+                first_samples(&valid[..end]).is_none(),
+                "accepted truncated table at {end}"
+            );
+        }
+        let offset_len = box_bytes(*b"stco", &[0; 12]).len();
+        for (field, value) in [(4, 0u32), (8, 2), (16, 2)] {
+            let mut invalid = valid.clone();
+            let at = offset_len + 8 + field;
+            invalid[at..at + 4].copy_from_slice(&value.to_be_bytes());
+            assert!(
+                first_samples(&invalid).is_none(),
+                "accepted invalid stsc field {field}"
+            );
+        }
+        let mut no_chunks = valid;
+        no_chunks[12..16].copy_from_slice(&0u32.to_be_bytes());
+        assert!(first_samples(&no_chunks).is_none());
+    }
+
+    #[test]
+    fn packet_validation_enforces_nal_count_size_and_hevc_header_limits() {
+        let nal = [0, 0, 0, 2, 2, 1];
+        assert_eq!(profile5_packet(&nal.repeat(1024), 4), Some(false));
+        assert_eq!(profile5_packet(&nal.repeat(1025), 4), None);
+        for header in [[0x82, 1], [2, 0]] {
+            assert_eq!(
+                profile5_packet(&[0, 0, 0, 2, header[0], header[1]], 4),
+                None
+            );
+        }
+        let mut oversized = vec![0; 16 * 1024 + 1];
+        oversized[0] = 124;
+        oversized[1] = 1;
+        let packet = [
+            (oversized.len() as u32).to_be_bytes().as_slice(),
+            &oversized,
+        ]
+        .concat();
+        assert_eq!(profile5_packet(&packet, 4), None);
+        assert_eq!(profile5_packet(&[255, 255, 255, 255, 2, 1], 4), None);
+    }
+
+    #[test]
+    fn overlay_failures_do_not_publish_a_header_or_modify_the_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("fixture.mp4");
+        let output = dir.path().join("header.mp4");
+        for bytes in [
+            vec![],
+            b"invalid fixture".to_vec(),
+            box_bytes(*b"ftyp", b"isom\0\0\0\0isom"),
+            [
+                box_bytes(*b"ftyp", b"isom\0\0\0\0isom"),
+                vec![0, 0, 0, 1, b'm', b'o', b'o', b'v', 0],
+            ]
+            .concat(),
+        ] {
+            std::fs::write(&source, &bytes).unwrap();
+            assert!(prepare_overlay(&source, &output).is_err());
+            assert!(!output.exists());
+            assert_eq!(std::fs::read(&source).unwrap(), bytes);
+        }
+        assert!(prepare_overlay(&dir.path().join("missing.mp4"), &output).is_err());
+        assert!(!output.exists());
+    }
+
     fn packet(profile5: bool) -> Vec<u8> {
         let config = dolby_vision::rpu::generate::GenerateConfig::default();
         let rpu = if profile5 {
