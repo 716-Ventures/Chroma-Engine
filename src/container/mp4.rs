@@ -1,4 +1,5 @@
 mod atom;
+pub(crate) mod dolby_recovery;
 #[cfg(test)]
 use crate::packet::{
     ExtractedChunk, PacketExtractError, extract_packet_payload, packet_samples_for_range,
@@ -2770,6 +2771,95 @@ mod tests {
                 Some("PQ")
             );
         }
+    }
+
+    #[test]
+    fn repairs_only_validated_profile5_metadata_and_preserves_packet_addresses() {
+        use dolby_vision::rpu::{dovi_rpu::DoviRpu, generate::GenerateConfig};
+        let nal = DoviRpu::profile5_config(&GenerateConfig::default())
+            .unwrap()
+            .write_hevc_unspec62_nalu()
+            .unwrap();
+        let packet = [(nal.len() as u32).to_be_bytes().as_slice(), &nal].concat();
+        let mut hvcc = vec![0; 23];
+        hvcc[0] = 1;
+        hvcc[1] = 0x22;
+        hvcc[16] = 1;
+        hvcc[17] = 2;
+        hvcc[18] = 2;
+        hvcc[21] = 3;
+        let payload = video_sample_entry_payload(
+            Some((3840, 1608)),
+            &[
+                atom(b"hvcC", &hvcc),
+                atom(b"btrt", &[0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0]),
+            ]
+            .concat(),
+        );
+        let tables = [
+            stsd_with_entry_payload(b"hvc1", &payload),
+            stts(&[40, 40]),
+            stsz(&[packet.len() as u32; 2]),
+            stsc(&[(1, 2)]),
+            stco(&[1000]),
+        ]
+        .concat();
+        let trak = atom(
+            b"trak",
+            &atom(
+                b"mdia",
+                &[
+                    mdhd(1000, 80),
+                    hdlr(b"vide"),
+                    atom(b"minf", &atom(b"stbl", &tables)),
+                ]
+                .concat(),
+            ),
+        );
+        let metadata = [ftyp(), atom(b"moov", &trak)].concat();
+        let index = parse_packet_track(&metadata, Some("v0")).unwrap();
+        let repaired = dolby_recovery::recover(
+            &metadata,
+            |_, size| {
+                assert_eq!(size, packet.len());
+                Ok(packet.clone())
+            },
+            &crate::WorkControl::default(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(parse_packet_track(&repaired, Some("v0")).unwrap(), index);
+        assert_eq!(
+            parse_basic_metadata(&repaired).tracks[0].dynamic_range,
+            Mp4DynamicRange::DolbyVision
+        );
+        let config = parse_codec_config(&repaired, Some("v0")).unwrap();
+        assert_eq!(config.codec_string.as_deref(), Some("dvh1.05.06"));
+        assert_eq!(
+            config.source_video_sample_entry.unwrap().video_range(),
+            Some("PQ")
+        );
+        assert!(
+            dolby_recovery::recover(
+                &repaired,
+                |_, _| panic!("already-authored descriptions must not read packets"),
+                &crate::WorkControl::default()
+            )
+            .unwrap()
+            .is_none()
+        );
+        let mut corrupt = packet.clone();
+        let end = corrupt.len() - 3;
+        corrupt[end] ^= 1;
+        assert!(
+            dolby_recovery::recover(
+                &metadata,
+                |_, _| Ok(corrupt.clone()),
+                &crate::WorkControl::default()
+            )
+            .unwrap()
+            .is_none()
+        );
     }
 
     #[test]

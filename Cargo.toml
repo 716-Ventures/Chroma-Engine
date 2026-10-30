@@ -42,6 +42,7 @@ thiserror = "1.0"
 time = { version = "0.3", features = ["formatting", "parsing", "serde"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 truehd = "0.7.1"
+dolby_vision = { version = "=3.4.0", default-features = false }
 
 [features]
 default = []

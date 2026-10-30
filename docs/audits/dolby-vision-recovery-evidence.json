@@ -1,0 +1,19 @@
+{
+  "compressedPayloadIdentical": true,
+  "oldPayloadBytes": 767112,
+  "newPayloadBytes": 767112,
+  "payloadSHA256": "686850c8077811cdc9fc7a6227e930b6e3072dfae15b710a61a539e4a49eb286",
+  "nativeAVFoundationCodec": "dvh1",
+  "codecString": "dvh1.05.06",
+  "videoRange": "PQ",
+  "sourceDynamicRange": "dolbyVision",
+  "schemaVersion": 1,
+  "fixture": "dv-fixture-01",
+  "engineTopLevelTestsPassed": 418,
+  "engineRawTestsIncludingChild": 419,
+  "ignored": 8,
+  "strictClippy": true,
+  "nativeServerCopyInitVerified": true,
+  "physicalTVAccessed": false,
+  "physicalDisplayColoursVerified": false
+}

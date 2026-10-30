@@ -64,7 +64,23 @@ pub(crate) fn read_metadata_view(
     let mut compact = false;
     let bytes = match crate::container::sniff_container(&head) {
         crate::container::ContainerKind::Mp4 | crate::container::ContainerKind::Mov => {
-            let (bytes, reduced) = mp4_metadata(&file, len, policy, control, selected)?;
+            let (mut bytes, reduced) = mp4_metadata(&file, len, policy, control, selected)?;
+            crate::container::validate_metadata_budget(&bytes, policy.parse_limits())?;
+            if let Some(repaired) = crate::container::mp4::dolby_recovery::recover(
+                &bytes,
+                |offset, size| {
+                    if offset.checked_add(size as u64).is_none_or(|end| end > len) {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "video packet outside source",
+                        ));
+                    }
+                    read(&file, offset, size)
+                },
+                control,
+            )? {
+                bytes = repaired;
+            }
             compact = reduced;
             bytes
         }
