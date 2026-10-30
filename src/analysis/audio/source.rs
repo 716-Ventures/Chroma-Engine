@@ -325,12 +325,12 @@ pub(super) fn capture(source: &MediaSource, spec: &Spec) -> Result<Vec<Window>> 
         let mut processed_packets = 0usize;
         let mut builder = Builder::new(start, end);
         let mut decoder = Decoder::new(spec)?;
-        // Bound packet coalescing and validate source identity around each batch;
-        // read_packets returns only selected bytes and bounds any mux-header lookahead.
+        // Bound sequential I/O and validate identity around each batch. Only
+        // selected audio bytes reach the decoder, even across interleaved video.
         for batch in packets.chunks(256) {
             source.check_work()?;
             let read_started = Instant::now();
-            let bytes = source.read_packets(batch)?;
+            let bytes = source.read_analysis_packets(batch)?;
             read_time += read_started.elapsed();
             total_bytes = total_bytes
                 .checked_add(bytes.len())

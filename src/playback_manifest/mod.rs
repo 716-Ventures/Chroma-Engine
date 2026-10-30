@@ -252,11 +252,8 @@ fn build_file_matroska_manifest_mode(
                 .unwrap_or(1000);
             let sample = source
                 .matroska_index()?
-                .packets(source, &audio_ids, 0, first_end);
-            if !sample.is_ok_and(|tracks| {
-                tracks.len() == audio_ids.len()
-                    && tracks.iter().all(|track| !track.packets.is_empty())
-            }) {
+                .tracks_present(source, &audio_ids, 0, first_end);
+            if !sample.unwrap_or(false) {
                 return build_file_matroska_manifest_mode(source, source_path, options, false);
             }
         }

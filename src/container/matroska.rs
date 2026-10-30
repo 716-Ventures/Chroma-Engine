@@ -1,6 +1,19 @@
 mod ebml;
 mod file;
-pub(crate) use file::MatroskaFileIndex;
+pub(crate) use file::{MatroskaFileIndex, indexed_metadata_elements, indexed_subtitle_blocks};
+
+// Cues are sample indexes, not a small container hierarchy. Multi-language
+// subtitles routinely produce more than 100,000 nested cue elements. Bound
+// their work by the configured index memory budget, preserving depth/byte caps.
+pub(crate) fn validate_cues_budget(
+    bytes: &[u8],
+    policy: &crate::ResourcePolicy,
+) -> anyhow::Result<()> {
+    policy.check("Matroska Cues metadata", bytes.len(), policy.metadata_bytes)?;
+    let mut limits = policy.parse_limits();
+    limits.max_boxes = policy.index_bytes / 32;
+    validate_metadata_budget(bytes, limits)
+}
 
 pub(crate) fn validate_metadata_budget(
     bytes: &[u8],

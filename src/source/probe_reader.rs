@@ -204,7 +204,7 @@ fn mp4_metadata(
     bail!("MP4 element budget exceeded")
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct Element {
     pub(crate) unknown_size: bool,
     pub(crate) id: u32,

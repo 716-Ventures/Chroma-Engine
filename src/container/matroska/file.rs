@@ -1,6 +1,7 @@
 //! Positional Matroska indexing: retain cluster offsets, read block headers,
 //! and leave compressed payload in the source until a packet is requested.
 use anyhow::{Result, bail};
+mod seek;
 
 use super::*;
 use crate::source::{MediaSource, probe_reader::Element as FileElement};
@@ -19,6 +20,8 @@ pub(crate) struct MatroskaFileIndex {
     clusters: Vec<Cluster>,
     cues: Option<Vec<u8>>,
     scale: u64,
+    segment: Option<FileElement>,
+    anchors: Vec<(u64, u64)>,
 }
 
 impl MatroskaFileIndex {
@@ -33,6 +36,8 @@ impl MatroskaFileIndex {
             clusters: Vec::new(),
             cues: None,
             scale,
+            segment: None,
+            anchors: Vec::new(),
         };
         let mut offset = 0;
         let mut visits = 0;
@@ -44,6 +49,13 @@ impl MatroskaFileIndex {
             }
             offset = element.end;
         };
+        index.segment = Some(segment);
+        if let Some(indexed) = seek::load(source, segment, scale) {
+            index.cues = Some(indexed.bytes);
+            index.anchors = indexed.anchors;
+            source.validate_current()?;
+            return Ok(index);
+        }
         offset = segment.payload;
         while offset < segment.end {
             visit(&mut visits)?;
@@ -92,7 +104,7 @@ impl MatroskaFileIndex {
             } else if element.id == 0x1c53_bb6b {
                 let cues = source
                     .read_window_unvalidated(offset, usize::try_from(element.end - offset)?)?;
-                validate_metadata_budget(&cues, source.policy().parse_limits())?;
+                validate_cues_budget(&cues, source.policy())?;
                 index.cues = Some(cues);
             }
             offset = element.end;
@@ -295,6 +307,34 @@ impl MatroskaFileIndex {
         Ok(output)
     }
 
+    /// Presence sampling stops as soon as all requested tracks have appeared.
+    /// It does not build a packet index for the following 32 seconds of video.
+    pub(crate) fn tracks_present(
+        &self,
+        source: &MediaSource,
+        tracks: &[&str],
+        start: u64,
+        end: u64,
+    ) -> Result<bool> {
+        source.validate_current()?;
+        let selected = tracks
+            .iter()
+            .map(|id| select_chunk_track(&self.metadata.tracks, Some(id)))
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| anyhow::anyhow!("Missing sample track"))?;
+        let mut found = vec![false; selected.len()];
+        self.for_each_block_until(source, start, end, |block, time| {
+            if time >= start
+                && time < end
+                && let Some(i) = selected.iter().position(|s| s.number == block.track_number)
+            {
+                found[i] = !block.frames.is_empty();
+            }
+            Ok(found.iter().all(|v| *v))
+        })?;
+        source.validate_current()?;
+        Ok(found.iter().all(|v| *v))
+    }
     fn for_each_block(
         &self,
         source: &MediaSource,
@@ -302,35 +342,75 @@ impl MatroskaFileIndex {
         end: u64,
         mut consume: impl FnMut(&ClusterBlock, u64) -> Result<()>,
     ) -> Result<()> {
-        let span = matroska_timecode_to_ms(32_768, self.scale).saturating_add(1);
-        let first = self
-            .clusters
-            .partition_point(|cluster| cluster.time_ms < start.saturating_sub(span));
+        self.for_each_block_until(source, start, end, |block, time| {
+            consume(block, time)?;
+            Ok(false)
+        })
+    }
+    fn for_each_block_until(
+        &self,
+        source: &MediaSource,
+        start: u64,
+        end: u64,
+        mut consume: impl FnMut(&ClusterBlock, u64) -> Result<bool>,
+    ) -> Result<()> {
+        let span = matroska_timecode_to_ms(32768, self.scale).saturating_add(1);
         let mut visits = 0;
-        for cluster in &self.clusters[first..] {
-            if cluster.time_ms.saturating_sub(span) >= end {
-                break;
+        if !self.anchors.is_empty() {
+            let segment = self
+                .segment
+                .ok_or_else(|| anyhow::anyhow!("Missing Segment"))?;
+            // CueTime belongs to a Block and can differ from Cluster time by a
+            // signed 16-bit offset. Two spans ensure no early cluster is lost.
+            let anchor = self.anchors.iter().rfind(|(time, _)| {
+                start > span.saturating_mul(2)
+                    && *time < start.saturating_sub(span.saturating_mul(2))
+            });
+            let mut offset = segment.payload;
+            if let Some((time, position)) = anchor {
+                let element = source.element_at(*position, segment.end)?;
+                if element.id == 0x1f43_b675
+                    && let Ok(cluster) = read_cluster(source, element, self.scale, &mut visits)
+                    && cluster.time_ms.abs_diff(*time) <= span
+                {
+                    offset = *position;
+                }
             }
-            source.visit_cluster();
-            let mut offset = cluster.payload;
-            while offset < cluster.end {
+            let mut previous = None;
+            while offset < segment.end {
                 visit(&mut visits)?;
-                let element = source.element_at(offset, cluster.end)?;
-                let block = match element.id {
-                    0xa3 => Some(read_block(source, &element, None)?),
-                    0xa0 => read_group(source, &element, &mut visits)?,
-                    _ => None,
-                };
-                if let Some(block) = block {
-                    let timestamp = matroska_timecode_to_ms(
-                        cluster
-                            .timecode
-                            .saturating_add(i64::from(block.relative_timecode)),
-                        self.scale,
-                    );
-                    consume(&block, timestamp)?;
+                let element = source.element_at(offset, segment.end)?;
+                if element.unknown_size {
+                    bail!("unknown-size Matroska children require a finalized source");
+                }
+                if element.id == 0x1f43_b675 {
+                    let cluster = read_cluster(source, element, self.scale, &mut visits)?;
+                    if previous.is_some_and(|last| last > cluster.time_ms) {
+                        bail!("nonmonotonic Matroska cluster timestamps");
+                    }
+                    previous = Some(cluster.time_ms);
+                    if cluster.time_ms.saturating_sub(span) >= end {
+                        break;
+                    }
+                    if cluster.time_ms >= start.saturating_sub(span)
+                        && scan_cluster(source, &cluster, self.scale, &mut visits, &mut consume)?
+                    {
+                        return Ok(());
+                    }
                 }
                 offset = element.end;
+            }
+        } else {
+            let first = self
+                .clusters
+                .partition_point(|c| c.time_ms < start.saturating_sub(span));
+            for cluster in &self.clusters[first..] {
+                if cluster.time_ms.saturating_sub(span) >= end {
+                    break;
+                }
+                if scan_cluster(source, cluster, self.scale, &mut visits, &mut consume)? {
+                    return Ok(());
+                }
             }
         }
         Ok(())
@@ -413,6 +493,101 @@ fn visit(visits: &mut usize) -> Result<()> {
         bail!("Matroska scan work budget exceeded");
     }
     Ok(())
+}
+
+pub(crate) fn indexed_metadata_elements(
+    source: &MediaSource,
+    segment: FileElement,
+    id: u32,
+) -> Result<Option<Vec<FileElement>>> {
+    match seek::indexed_elements(source, segment, id) {
+        Ok(v) => Ok(v),
+        Err(_) => {
+            source.check_work()?;
+            source.validate_current()?;
+            Ok(None)
+        }
+    }
+}
+
+pub(crate) fn indexed_subtitle_blocks(
+    source: &MediaSource,
+    segment: FileElement,
+    scale: u64,
+    tracks: &[u64],
+) -> Result<Option<Vec<(u64, FileElement)>>> {
+    match seek::subtitle_blocks(source, segment, scale, tracks) {
+        Ok(value) => Ok(value),
+        Err(_) => {
+            source.check_work()?;
+            source.validate_current()?;
+            Ok(None)
+        }
+    }
+}
+
+fn read_cluster(
+    source: &MediaSource,
+    element: FileElement,
+    scale: u64,
+    visits: &mut usize,
+) -> Result<Cluster> {
+    let mut offset = element.payload;
+    while offset < element.end {
+        visit(visits)?;
+        let field = source.element_at(offset, element.end)?;
+        if field.id == 0xe7 {
+            if field.end - field.payload > 8 {
+                bail!("Invalid cluster timestamp");
+            }
+            let bytes =
+                source.read_metadata_prefix(field.payload, (field.end - field.payload) as usize)?;
+            let timecode = read_uint(&bytes)
+                .and_then(|v| i64::try_from(v).ok())
+                .ok_or_else(|| anyhow::anyhow!("Invalid cluster timestamp"))?;
+            // Conversion uses the caller's scale below.
+            return Ok(Cluster {
+                timecode,
+                time_ms: matroska_timecode_to_ms(timecode, scale),
+                payload: element.payload,
+                end: element.end,
+            });
+        }
+        offset = field.end;
+    }
+    bail!("Missing cluster timestamp")
+}
+fn scan_cluster(
+    source: &MediaSource,
+    cluster: &Cluster,
+    scale: u64,
+    visits: &mut usize,
+    consume: &mut impl FnMut(&ClusterBlock, u64) -> Result<bool>,
+) -> Result<bool> {
+    source.visit_cluster();
+    let mut offset = cluster.payload;
+    while offset < cluster.end {
+        visit(visits)?;
+        let element = source.element_at(offset, cluster.end)?;
+        let block = match element.id {
+            0xa3 => Some(read_block(source, &element, None)?),
+            0xa0 => read_group(source, &element, visits)?,
+            _ => None,
+        };
+        if let Some(block) = block {
+            let timestamp = matroska_timecode_to_ms(
+                cluster
+                    .timecode
+                    .saturating_add(i64::from(block.relative_timecode)),
+                scale,
+            );
+            if consume(&block, timestamp)? {
+                return Ok(true);
+            }
+        }
+        offset = element.end;
+    }
+    Ok(false)
 }
 
 fn read_group(
@@ -603,6 +778,155 @@ mod tests {
         let path = directory.path().join("multi-audio.mkv");
         std::fs::write(&path, bytes).unwrap();
         (directory, path)
+    }
+
+    #[test]
+    fn subtitle_heavy_cues_use_bounded_sample_index_budget() {
+        let point = element(
+            0xbb,
+            &[
+                element(0xb3, &[0]),
+                element(
+                    0xb7,
+                    &[
+                        element(0xf7, &[1]),
+                        element(0xf1, &[0]),
+                        element(0xf0, &[0]),
+                    ]
+                    .concat(),
+                ),
+            ]
+            .concat(),
+        );
+        let bytes = element(0x1c53bb6b, &point.repeat(25_000));
+        let policy = crate::ResourcePolicy::default();
+        assert!(validate_metadata_budget(&bytes, policy.parse_limits()).is_err());
+        validate_cues_budget(&bytes, &policy).unwrap();
+        let tight = crate::ResourcePolicy {
+            index_bytes: 64 * 1024,
+            ..policy
+        };
+        assert!(validate_cues_budget(&bytes, &tight).is_err());
+    }
+
+    fn indexed_fixture() -> (tempfile::TempDir, std::path::PathBuf, Vec<u8>) {
+        let info = element(
+            0x1549a966,
+            &[
+                element(0x2ad7b1, &1000000_u64.to_be_bytes()),
+                element(0x4489, &400000_f64.to_be_bytes()),
+            ]
+            .concat(),
+        );
+        let tracks = element(
+            0x1654ae6b,
+            &[track(1, 1, Some(41708333)), track(2, 2, Some(20000000))].concat(),
+        );
+        let head = |position: u64| {
+            element(
+                0x114d9b74,
+                &element(
+                    0x4dbb,
+                    &[
+                        element(0x53ab, &0x1c53bb6b_u32.to_be_bytes()),
+                        element(0x53ac, &position.to_be_bytes()),
+                    ]
+                    .concat(),
+                ),
+            )
+        };
+        let mut clusters = Vec::new();
+        let mut cue_bytes = Vec::new();
+        let prefix = head(0).len() + info.len() + tracks.len();
+        for i in 0..100_u64 {
+            let position = prefix + clusters.len();
+            if i % 2 == 0 {
+                cue_bytes.extend(element(
+                    0xbb,
+                    &[
+                        element(0xb3, &(i * 4000).to_be_bytes()),
+                        element(
+                            0xb7,
+                            &[
+                                element(0xf7, &[1]),
+                                element(0xf1, &(position as u64).to_be_bytes()),
+                            ]
+                            .concat(),
+                        ),
+                    ]
+                    .concat(),
+                ));
+            }
+            let mut payload = [
+                element(0xe7, &(i * 4000).to_be_bytes()),
+                block(1, 0, 0x80, &[]),
+                block(2, 0, 0x80, &[]),
+                element(0xec, &[0; 32768]),
+            ]
+            .concat();
+            if i >= 8 {
+                payload.extend(block(2, -30000, 0x80, &[]));
+            }
+            clusters.extend(element(0x1f43b675, &payload));
+        }
+        let cue_offset = prefix + clusters.len();
+        let cues = element(0x1c53bb6b, &cue_bytes);
+        let bytes = [
+            element(0x1a45dfa3, &[]),
+            element(
+                0x18538067,
+                &[head(cue_offset as u64), info, tracks, clusters, cues].concat(),
+            ),
+        ]
+        .concat();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("indexed.mkv");
+        std::fs::write(&path, &bytes).unwrap();
+        (dir, path, bytes)
+    }
+    #[test]
+    fn seek_head_windows_preserve_uncued_clusters_negative_offsets_and_exact_packets() {
+        let (_dir, path, bytes) = indexed_fixture();
+        let source = MediaSource::open_packet_copy(&path).unwrap();
+        let index = source.matroska_index().unwrap();
+        assert_eq!(index.anchors.len(), 50);
+        assert!(index.clusters.is_empty());
+        for (start, end) in [
+            (0, 1),
+            (2000, 2001),
+            (130000, 130020),
+            (270000, 270020),
+            (396000, 400000),
+        ] {
+            let actual = index.packets(&source, &["a0"], start, end);
+            let expected =
+                super::super::parse_packet_tracks_in_time_window(&bytes, &["a0"], start, end);
+            match (actual, expected) {
+                (Ok(actual), Some(expected)) => assert_eq!(actual, expected, "{start}..{end}"),
+                (Err(_), None) => {}
+                other => panic!("window disagreement at {start}..{end}: {other:?}"),
+            }
+        }
+    }
+    #[test]
+    fn first_audio_presence_stops_without_indexing_following_clusters() {
+        let (_dir, path, _) = indexed_fixture();
+        let source = MediaSource::open_packet_copy(&path).unwrap();
+        assert!(
+            source
+                .matroska_index()
+                .unwrap()
+                .tracks_present(&source, &["a0"], 0, 1000)
+                .unwrap()
+        );
+        assert_eq!(source.io_stats().2, 1);
+        let other = MediaSource::open_packet_copy(&path).unwrap();
+        other
+            .matroska_index()
+            .unwrap()
+            .packets(&other, &["a0"], 0, 1000)
+            .unwrap();
+        assert!(other.io_stats().2 > source.io_stats().2);
     }
 
     #[test]

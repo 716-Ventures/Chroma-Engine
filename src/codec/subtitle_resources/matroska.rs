@@ -48,6 +48,7 @@ pub(super) fn cues(
                 }
                 field_offset = field.end;
             }
+            break;
         }
         offset = element.end;
     }
@@ -55,157 +56,163 @@ pub(super) fn cues(
     let mut sizes: HashMap<u64, usize> = HashMap::new();
     let mut total = 0_usize;
     let mut invalid_tracks = std::collections::HashSet::new();
-    offset = segment.payload;
-    while offset < segment.end {
-        visit(source, &mut visits)?;
-        let element = source.element_at(offset, segment.end)?;
-        if element.id == 0x1f43_b675 {
-            let mut child_offset = element.payload;
-            let mut cluster_time = None;
-            while child_offset < element.end {
-                visit(source, &mut visits)?;
-                let child = source.element_at(child_offset, element.end)?;
-                if child.id == 0xe7 {
-                    cluster_time = Some(uint(source, child)?);
-                    break;
+    let mut process_child = |cluster_time: u64, child: Element, visits: &mut usize| -> Result<()> {
+        let mut block = None;
+        let mut duration = None;
+        let mut addition = None;
+        if child.id == 0xa3 {
+            block = Some(child);
+        }
+        if child.id == 0xa0 {
+            let mut field_offset = child.payload;
+            while field_offset < child.end {
+                visit(source, visits)?;
+                let field = source.element_at(field_offset, child.end)?;
+                match field.id {
+                    0xa1 => block = Some(field),
+                    0x9b => duration = Some(uint(source, field)?),
+                    0x75a1 => addition = Some(field),
+                    _ => {}
                 }
-                child_offset = child.end;
-            }
-            let cluster_time = cluster_time.context("missing subtitle cluster time")?;
-            child_offset = element.payload;
-            while child_offset < element.end {
-                visit(source, &mut visits)?;
-                let child = source.element_at(child_offset, element.end)?;
-                let mut block = None;
-                let mut duration = None;
-                let mut addition = None;
-                if child.id == 0xa3 {
-                    block = Some(child);
-                }
-                if child.id == 0xa0 {
-                    let mut field_offset = child.payload;
-                    while field_offset < child.end {
-                        visit(source, &mut visits)?;
-                        let field = source.element_at(field_offset, child.end)?;
-                        match field.id {
-                            0xa1 => block = Some(field),
-                            0x9b => duration = Some(uint(source, field)?),
-                            0x75a1 => addition = Some(field),
-                            _ => {}
-                        }
-                        field_offset = field.end;
-                    }
-                }
-                if let Some(block) = block {
-                    let len = usize::try_from(block.end - block.payload)?;
-                    let prefix = source.read_metadata_prefix(block.payload, len.min(12))?;
-                    let (number, track_len) =
-                        vint(&prefix).context("invalid subtitle block track")?;
-                    if let Some(track) = tracks.iter().find(|track| track.number == number) {
-                        if len < track_len + 3 || prefix.len() < track_len + 3 {
-                            bail!("truncated subtitle block");
-                        }
-                        if prefix[track_len + 2] & 0x06 != 0 {
-                            invalid_tracks.insert(number);
-                            child_offset = child.end;
-                            continue;
-                        }
-                        let relative =
-                            i16::from_be_bytes([prefix[track_len], prefix[track_len + 1]]);
-                        let ticks = i128::from(cluster_time) + i128::from(relative);
-                        let start_ms =
-                            u64::try_from(ticks.max(0))?.saturating_mul(scale) / 1_000_000;
-                        let duration_ms = duration
-                            .map(|ticks| ticks.saturating_mul(scale) / 1_000_000)
-                            .or(track.default_duration_ns.map(|ns| ns / 1_000_000));
-                        let Some(duration_ms) = duration_ms.filter(|duration| *duration > 0) else {
-                            invalid_tracks.insert(number);
-                            child_offset = child.end;
-                            continue;
-                        };
-                        let payload_len = len - track_len - 3;
-                        let size = sizes.entry(number).or_default();
-                        *size = size
-                            .checked_add(payload_len + 128)
-                            .context("subtitle size overflow")?;
-                        total = total
-                            .checked_add(payload_len + 128)
-                            .context("subtitle aggregate overflow")?;
-                        if *size > super::SCRIPT_LIMIT || total > super::AGGREGATE_LIMIT {
-                            bail!("subtitle resource size limit exceeded");
-                        }
-                        let bytes = source.read_window_unvalidated(
-                            block.payload + (track_len + 3) as u64,
-                            payload_len,
-                        )?;
-                        let bytes = if let Some(encoding) = compression.get(&number) {
-                            match encoding.decode(&bytes, 1, super::SCRIPT_LIMIT) {
-                                Ok(decoded) => decoded,
-                                Err(_) => {
-                                    invalid_tracks.insert(number);
-                                    child_offset = child.end;
-                                    continue;
-                                }
-                            }
-                        } else {
-                            bytes
-                        };
-                        let extra = bytes.len().saturating_sub(payload_len);
-                        *size = size
-                            .checked_add(extra)
-                            .context("expanded subtitle size overflow")?;
-                        total = total
-                            .checked_add(extra)
-                            .context("expanded subtitle aggregate overflow")?;
-                        if *size > super::SCRIPT_LIMIT || total > super::AGGREGATE_LIMIT {
-                            bail!("expanded subtitle resource size limit exceeded");
-                        }
-                        let Ok(text) = String::from_utf8(bytes) else {
-                            invalid_tracks.insert(number);
-                            child_offset = child.end;
-                            continue;
-                        };
-                        let addition = addition
-                            .map(|element| read_addition(source, element, &mut visits))
-                            .transpose()?
-                            .flatten();
-                        let addition = if let Some(bytes) = addition {
-                            let Ok(text) = String::from_utf8(bytes) else {
-                                invalid_tracks.insert(number);
-                                child_offset = child.end;
-                                continue;
-                            };
-                            Some(text)
-                        } else {
-                            None
-                        };
-                        if let Some(ref addition) = addition {
-                            *size = size
-                                .checked_add(addition.len())
-                                .context("subtitle addition size overflow")?;
-                            total = total
-                                .checked_add(addition.len())
-                                .context("subtitle addition aggregate overflow")?;
-                            if *size > super::SCRIPT_LIMIT || total > super::AGGREGATE_LIMIT {
-                                bail!("subtitle additions size limit exceeded");
-                            }
-                        }
-                        let cues = output.entry(number).or_default();
-                        if cues.len() >= 100_000 {
-                            bail!("subtitle cue count limit exceeded");
-                        }
-                        cues.push(Cue {
-                            start_ms,
-                            duration_ms,
-                            text,
-                            addition,
-                        });
-                    }
-                }
-                child_offset = child.end;
+                field_offset = field.end;
             }
         }
-        offset = element.end;
+        if let Some(block) = block {
+            let len = usize::try_from(block.end - block.payload)?;
+            let prefix = source.read_metadata_prefix(block.payload, len.min(12))?;
+            let (number, track_len) = vint(&prefix).context("invalid subtitle block track")?;
+            if let Some(track) = tracks.iter().find(|track| track.number == number) {
+                if len < track_len + 3 || prefix.len() < track_len + 3 {
+                    bail!("truncated subtitle block");
+                }
+                if prefix[track_len + 2] & 0x06 != 0 {
+                    invalid_tracks.insert(number);
+                    return Ok(());
+                }
+                let relative = i16::from_be_bytes([prefix[track_len], prefix[track_len + 1]]);
+                let ticks = i128::from(cluster_time) + i128::from(relative);
+                let start_ms = u64::try_from(ticks.max(0))?.saturating_mul(scale) / 1_000_000;
+                let duration_ms = duration
+                    .map(|ticks| ticks.saturating_mul(scale) / 1_000_000)
+                    .or(track.default_duration_ns.map(|ns| ns / 1_000_000));
+                let Some(duration_ms) = duration_ms.filter(|duration| *duration > 0) else {
+                    invalid_tracks.insert(number);
+                    return Ok(());
+                };
+                let payload_len = len - track_len - 3;
+                let size = sizes.entry(number).or_default();
+                *size = size
+                    .checked_add(payload_len + 128)
+                    .context("subtitle size overflow")?;
+                total = total
+                    .checked_add(payload_len + 128)
+                    .context("subtitle aggregate overflow")?;
+                if *size > super::SCRIPT_LIMIT || total > super::AGGREGATE_LIMIT {
+                    bail!("subtitle resource size limit exceeded");
+                }
+                let bytes = source
+                    .read_window_unvalidated(block.payload + (track_len + 3) as u64, payload_len)?;
+                let bytes = if let Some(encoding) = compression.get(&number) {
+                    match encoding.decode(&bytes, 1, super::SCRIPT_LIMIT) {
+                        Ok(decoded) => decoded,
+                        Err(_) => {
+                            invalid_tracks.insert(number);
+                            return Ok(());
+                        }
+                    }
+                } else {
+                    bytes
+                };
+                let extra = bytes.len().saturating_sub(payload_len);
+                *size = size
+                    .checked_add(extra)
+                    .context("expanded subtitle size overflow")?;
+                total = total
+                    .checked_add(extra)
+                    .context("expanded subtitle aggregate overflow")?;
+                if *size > super::SCRIPT_LIMIT || total > super::AGGREGATE_LIMIT {
+                    bail!("expanded subtitle resource size limit exceeded");
+                }
+                let Ok(text) = String::from_utf8(bytes) else {
+                    invalid_tracks.insert(number);
+                    return Ok(());
+                };
+                let addition = addition
+                    .map(|element| read_addition(source, element, visits))
+                    .transpose()?
+                    .flatten();
+                let addition = if let Some(bytes) = addition {
+                    let Ok(text) = String::from_utf8(bytes) else {
+                        invalid_tracks.insert(number);
+                        return Ok(());
+                    };
+                    Some(text)
+                } else {
+                    None
+                };
+                if let Some(ref addition) = addition {
+                    *size = size
+                        .checked_add(addition.len())
+                        .context("subtitle addition size overflow")?;
+                    total = total
+                        .checked_add(addition.len())
+                        .context("subtitle addition aggregate overflow")?;
+                    if *size > super::SCRIPT_LIMIT || total > super::AGGREGATE_LIMIT {
+                        bail!("subtitle additions size limit exceeded");
+                    }
+                }
+                let cues = output.entry(number).or_default();
+                if cues.len() >= 100_000 {
+                    bail!("subtitle cue count limit exceeded");
+                }
+                cues.push(Cue {
+                    start_ms,
+                    duration_ms,
+                    text,
+                    addition,
+                });
+            }
+        }
+        Ok(())
+    };
+    let numbers = tracks.iter().map(|t| t.number).collect::<Vec<_>>();
+    if let Some(blocks) =
+        crate::container::matroska::indexed_subtitle_blocks(source, segment, scale, &numbers)?
+    {
+        if std::env::var_os("CHROMA_PROBE_DIAGNOSTICS").is_some() {
+            eprintln!("subtitle_cue_read indexed=true blocks={}", blocks.len());
+        }
+        for (clock, child) in blocks {
+            process_child(clock, child, &mut visits)?;
+        }
+    } else {
+        offset = segment.payload;
+        while offset < segment.end {
+            visit(source, &mut visits)?;
+            let element = source.element_at(offset, segment.end)?;
+            if element.id == 0x1f43_b675 {
+                let mut child_offset = element.payload;
+                let mut cluster_time = None;
+                while child_offset < element.end {
+                    visit(source, &mut visits)?;
+                    let child = source.element_at(child_offset, element.end)?;
+                    if child.id == 0xe7 {
+                        cluster_time = Some(uint(source, child)?);
+                        break;
+                    }
+                    child_offset = child.end;
+                }
+                let cluster_time = cluster_time.context("missing subtitle cluster time")?;
+                child_offset = element.payload;
+                while child_offset < element.end {
+                    visit(source, &mut visits)?;
+                    let child = source.element_at(child_offset, element.end)?;
+                    process_child(cluster_time, child, &mut visits)?;
+                    child_offset = child.end;
+                }
+            }
+            offset = element.end;
+        }
     }
     source.validate_current()?;
     output.retain(|number, _| !invalid_tracks.contains(number));

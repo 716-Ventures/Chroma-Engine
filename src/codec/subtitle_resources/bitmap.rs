@@ -615,92 +615,106 @@ fn scan_matroska(
                 }
                 child_offset = child.end;
             }
+            break;
         }
         offset = element.end;
     }
     if scale == 0 {
         bail!("Invalid Matroska bitmap subtitle clock");
     }
-    offset = segment.payload;
-    while offset < segment.end {
-        visit(source, &mut visits)?;
-        let cluster = source.element_at(offset, segment.end)?;
-        if cluster.id == 0x1f43_b675 {
-            let mut child_offset = cluster.payload;
-            let mut clock = None;
-            while child_offset < cluster.end {
-                visit(source, &mut visits)?;
-                let child = source.element_at(child_offset, cluster.end)?;
-                if child.id == 0xe7 {
-                    clock = Some(uint(source, child)?);
-                    break;
+    let mut process_child = |clock: u64, child: Element, visits: &mut usize| -> Result<()> {
+        let (mut block, mut duration) = (None, None);
+        if child.id == 0xa3 {
+            block = Some(child);
+        }
+        if child.id == 0xa0 {
+            let mut field_offset = child.payload;
+            while field_offset < child.end {
+                visit(source, visits)?;
+                let field = source.element_at(field_offset, child.end)?;
+                if field.id == 0xa1 {
+                    block = Some(field);
                 }
-                child_offset = child.end;
-            }
-            let clock = clock.context("Missing bitmap subtitle cluster time")?;
-            child_offset = cluster.payload;
-            while child_offset < cluster.end {
-                visit(source, &mut visits)?;
-                let child = source.element_at(child_offset, cluster.end)?;
-                let (mut block, mut duration) = (None, None);
-                if child.id == 0xa3 {
-                    block = Some(child);
+                if field.id == 0x9b {
+                    duration = Some(uint(source, field)?);
                 }
-                if child.id == 0xa0 {
-                    let mut field_offset = child.payload;
-                    while field_offset < child.end {
-                        visit(source, &mut visits)?;
-                        let field = source.element_at(field_offset, child.end)?;
-                        if field.id == 0xa1 {
-                            block = Some(field);
-                        }
-                        if field.id == 0x9b {
-                            duration = Some(uint(source, field)?);
-                        }
-                        field_offset = field.end;
-                    }
-                }
-                if let Some(block) = block {
-                    let len = usize::try_from(block.end - block.payload)?;
-                    let prefix = source.read_metadata_prefix(block.payload, len.min(12))?;
-                    let (number, track_len) =
-                        vint(&prefix).context("Invalid bitmap subtitle block track")?;
-                    if selected.contains(&number) {
-                        if len < track_len + 3 || prefix.len() < track_len + 3 {
-                            bail!("Truncated bitmap subtitle block");
-                        }
-                        if prefix[track_len + 2] & 0x06 != 0 {
-                            bail!("Laced bitmap subtitle blocks are unsupported");
-                        }
-                        let relative =
-                            i16::from_be_bytes([prefix[track_len], prefix[track_len + 1]]);
-                        let ticks = (i128::from(clock) + i128::from(relative)).max(0) as u128;
-                        let time = u64::try_from(
-                            ticks
-                                .checked_mul(u128::from(scale))
-                                .context("Bitmap subtitle clock overflow")?
-                                / 1_000_000,
-                        )?;
-                        let duration = duration
-                            .map(|ticks| {
-                                u64::try_from(u128::from(ticks) * u128::from(scale) / 1_000_000)
-                            })
-                            .transpose()?;
-                        let payload_len = len - track_len - 3;
-                        if payload_len > MAX_ENCODED_BYTES {
-                            bail!("Bitmap subtitle packet exceeds size limit");
-                        }
-                        let bytes = source.read_window_unvalidated(
-                            block.payload + (track_len + 3) as u64,
-                            payload_len,
-                        )?;
-                        consume(number, time, duration, &bytes)?;
-                    }
-                }
-                child_offset = child.end;
+                field_offset = field.end;
             }
         }
-        offset = cluster.end;
+        if let Some(block) = block {
+            let len = usize::try_from(block.end - block.payload)?;
+            let prefix = source.read_metadata_prefix(block.payload, len.min(12))?;
+            let (number, track_len) =
+                vint(&prefix).context("Invalid bitmap subtitle block track")?;
+            if selected.contains(&number) {
+                if len < track_len + 3 || prefix.len() < track_len + 3 {
+                    bail!("Truncated bitmap subtitle block");
+                }
+                if prefix[track_len + 2] & 0x06 != 0 {
+                    bail!("Laced bitmap subtitle blocks are unsupported");
+                }
+                let relative = i16::from_be_bytes([prefix[track_len], prefix[track_len + 1]]);
+                let ticks = (i128::from(clock) + i128::from(relative)).max(0) as u128;
+                let time = u64::try_from(
+                    ticks
+                        .checked_mul(u128::from(scale))
+                        .context("Bitmap subtitle clock overflow")?
+                        / 1_000_000,
+                )?;
+                let duration = duration
+                    .map(|ticks| u64::try_from(u128::from(ticks) * u128::from(scale) / 1_000_000))
+                    .transpose()?;
+                let payload_len = len - track_len - 3;
+                if payload_len > MAX_ENCODED_BYTES {
+                    bail!("Bitmap subtitle packet exceeds size limit");
+                }
+                let bytes = source
+                    .read_window_unvalidated(block.payload + (track_len + 3) as u64, payload_len)?;
+                consume(number, time, duration, &bytes)?;
+            }
+        }
+        Ok(())
+    };
+    if let Some(blocks) =
+        crate::container::matroska::indexed_subtitle_blocks(source, segment, scale, selected)?
+    {
+        if std::env::var_os("CHROMA_PROBE_DIAGNOSTICS").is_some() {
+            eprintln!(
+                "subtitle_cue_read indexed=true bitmap=true blocks={}",
+                blocks.len()
+            );
+        }
+        for (clock, child) in blocks {
+            process_child(clock, child, &mut visits)?;
+        }
+    } else {
+        offset = segment.payload;
+        while offset < segment.end {
+            visit(source, &mut visits)?;
+            let cluster = source.element_at(offset, segment.end)?;
+            if cluster.id == 0x1f43_b675 {
+                let mut child_offset = cluster.payload;
+                let mut clock = None;
+                while child_offset < cluster.end {
+                    visit(source, &mut visits)?;
+                    let child = source.element_at(child_offset, cluster.end)?;
+                    if child.id == 0xe7 {
+                        clock = Some(uint(source, child)?);
+                        break;
+                    }
+                    child_offset = child.end;
+                }
+                let clock = clock.context("Missing bitmap subtitle cluster time")?;
+                child_offset = cluster.payload;
+                while child_offset < cluster.end {
+                    visit(source, &mut visits)?;
+                    let child = source.element_at(child_offset, cluster.end)?;
+                    process_child(clock, child, &mut visits)?;
+                    child_offset = child.end;
+                }
+            }
+            offset = cluster.end;
+        }
     }
     Ok(())
 }

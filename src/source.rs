@@ -514,6 +514,24 @@ impl MediaSource {
     /// Reads selected packet spans with identity validation around the complete
     /// operation. Positional reads never depend on a shared file cursor.
     pub(crate) fn read_packets(&self, packets: &[crate::packet::PacketRef]) -> io::Result<Vec<u8>> {
+        self.read_packets_mode(packets, false)
+    }
+
+    /// Background audio analysis traverses long interleaved windows. A bounded
+    /// sequential span avoids a network round trip for each tiny audio chunk.
+    /// Playback keeps the stricter low-amplification packet-copy policy.
+    pub(crate) fn read_analysis_packets(
+        &self,
+        packets: &[crate::packet::PacketRef],
+    ) -> io::Result<Vec<u8>> {
+        self.read_packets_mode(packets, true)
+    }
+
+    fn read_packets_mode(
+        &self,
+        packets: &[crate::packet::PacketRef],
+        analysis: bool,
+    ) -> io::Result<Vec<u8>> {
         if let [packet] = packets {
             return self.read_at(packet.source_offset, packet.size as usize);
         }
@@ -558,13 +576,18 @@ impl MediaSource {
                 };
                 let next_span = next.source_offset + u64::from(next.size) - offset;
                 let next_payload = payload + next.size as usize;
-                // Adjacent payloads still read directly into the output. Tiny
-                // mux headers may be crossed only within strict I/O and memory
-                // bounds; interleaved video and out-of-order packets stay separate.
+                // Adjacent payloads read directly into the output. Analysis may
+                // cross interleaved video within bounded I/O and memory limits;
+                // out-of-order packets always start a separate positional read.
                 let contiguous = gap == 0 && span == payload as u64;
-                let bounded_gap = gap <= PACKET_GAP_BYTES
-                    && next_span <= PACKET_COALESCE_BYTES as u64
-                    && next_span <= (next_payload as u64).saturating_mul(2)
+                let (gap_limit, span_limit, amplification) = if analysis {
+                    (256 * 1024, 1024 * 1024, 128)
+                } else {
+                    (PACKET_GAP_BYTES, PACKET_COALESCE_BYTES as u64, 2)
+                };
+                let bounded_gap = gap <= gap_limit
+                    && next_span <= span_limit
+                    && next_span <= (next_payload as u64).saturating_mul(amplification)
                     && next_span
                         <= self.policy().compressed_window_bytes.saturating_sub(size) as u64;
                 if !contiguous && !bounded_gap {
@@ -934,6 +957,50 @@ mod tests {
             200
         );
         assert_eq!(bounded.io_stats().1 - before.1, 2);
+    }
+
+    #[test]
+    fn analysis_packet_reads_coalesce_interleaving_without_changing_selected_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("interleaved.bin");
+        let bytes = (0..4_000_000).map(|i| (i % 251) as u8).collect::<Vec<_>>();
+        fs::write(&path, &bytes).unwrap();
+        let source = MediaSource::open_packet_copy(&path).unwrap();
+        let packets = (0..128)
+            .map(|i| packet(i * 20_000, 256))
+            .collect::<Vec<_>>();
+        let expected = source.read_packets(&packets).unwrap();
+        let before = source.io_stats();
+        assert_eq!(source.read_analysis_packets(&packets).unwrap(), expected);
+        let after = source.io_stats();
+        assert_eq!(after.1 - before.1, 3);
+        assert!(after.0 - before.0 <= expected.len() as u64 * 128);
+        // Physical ordering, maximum gap, and source identity stay enforced.
+        let packets = [packet(500_000, 256), packet(0, 256), packet(1_000_000, 256)];
+        let before = source.io_stats();
+        assert_eq!(
+            source.read_analysis_packets(&packets).unwrap(),
+            source.read_packets(&packets).unwrap()
+        );
+        assert_eq!(source.io_stats().1 - before.1, 6);
+        let runtime = crate::EngineRuntime::new(crate::ResourcePolicy {
+            compressed_window_bytes: 512,
+            ..crate::ResourcePolicy::default()
+        })
+        .unwrap();
+        let bounded =
+            MediaSource::open_with_context(&path, runtime, crate::WorkControl::default()).unwrap();
+        let before = bounded.io_stats();
+        assert_eq!(
+            bounded
+                .read_analysis_packets(&[packet(0, 256), packet(1000, 256)])
+                .unwrap()
+                .len(),
+            512
+        );
+        assert_eq!(bounded.io_stats().1 - before.1, 2);
+        fs::write(&path, b"changed").unwrap();
+        assert!(source.read_analysis_packets(&packets).is_err());
     }
 
     #[test]

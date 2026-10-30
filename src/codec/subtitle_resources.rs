@@ -527,13 +527,23 @@ fn extract_fonts(
             return Ok(());
         }
     };
+    let indexed =
+        crate::container::matroska::indexed_metadata_elements(source, segment, 0x1941a469)?;
+    let mut indexed = indexed.map(|items| items.into_iter());
     offset = segment.payload;
     while offset < segment.end {
         visits += 1;
         if visits > source.policy().parse_limits().max_boxes {
             bail!("subtitle element budget exceeded");
         }
-        let element = source.element_at(offset, segment.end)?;
+        let element = if let Some(elements) = indexed.as_mut() {
+            let Some(element) = elements.next() else {
+                break;
+            };
+            element
+        } else {
+            source.element_at(offset, segment.end)?
+        };
         if element.id == 0x1941_a469 {
             let mut attachment_offset = element.payload;
             while attachment_offset < element.end {
@@ -732,6 +742,170 @@ mod extraction_tests {
         bytes.extend(element(0x1853_8067, &segment));
         bytes
     }
+    fn indexed_fixture(missing_track: bool, invalid_position: bool) -> Vec<u8> {
+        use crate::source::probe_reader::{Element, element_from_header};
+        fn children(bytes: &[u8], start: u64, end: u64) -> Vec<(u64, Element)> {
+            let mut offset = start;
+            let mut out = Vec::new();
+            while offset < end {
+                let e = element_from_header(&bytes[offset as usize..], offset, end).unwrap();
+                out.push((offset, e));
+                offset = e.end;
+            }
+            out
+        }
+        let bytes = fixture_with_video_blocks(32, 2000);
+        let (_, segment) = children(&bytes, 0, bytes.len() as u64)
+            .into_iter()
+            .find(|(_, e)| e.id == 0x18538067)
+            .unwrap();
+        let items = children(&bytes, segment.payload, segment.end);
+        let (tracks_start, tracks) = items
+            .iter()
+            .find(|(_, e)| e.id == 0x1654ae6b)
+            .copied()
+            .unwrap();
+        let (cluster_start, cluster) = items
+            .iter()
+            .find(|(_, e)| e.id == 0x1f43b675)
+            .copied()
+            .unwrap();
+        let (font_start, font) = items
+            .iter()
+            .find(|(_, e)| e.id == 0x1941a469)
+            .copied()
+            .unwrap();
+        let info = element(0x1549a966, &[]);
+        let track_bytes = &bytes[tracks_start as usize..tracks.end as usize];
+        let cluster_bytes = &bytes[cluster_start as usize..cluster.end as usize];
+        let font_bytes = &bytes[font_start as usize..font.end as usize];
+        let head = |positions: [u64; 4]| {
+            element(
+                0x114d9b74,
+                &[0x1549a966_u32, 0x1654ae6b, 0x1941a469, 0x1c53bb6b]
+                    .into_iter()
+                    .zip(positions)
+                    .flat_map(|(id, pos)| {
+                        element(
+                            0x4dbb,
+                            &[element(0x53ab, &id.to_be_bytes()), uint(0x53ac, pos)].concat(),
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let info_pos = head([0; 4]).len();
+        let tracks_pos = info_pos + info.len();
+        let cluster_pos = tracks_pos + track_bytes.len();
+        let font_pos = cluster_pos + cluster_bytes.len();
+        let cues_pos = font_pos + font_bytes.len();
+        let mut cues = Vec::new();
+        for (offset, child) in children(&bytes, cluster.payload, cluster.end)
+            .into_iter()
+            .filter(|(_, e)| e.id == 0xa0)
+        {
+            let fields = children(&bytes, child.payload, child.end);
+            let (_, block) = fields.iter().find(|(_, e)| e.id == 0xa1).copied().unwrap();
+            let number = bytes[block.payload as usize] & 0x7f;
+            if missing_track && number == 3 {
+                continue;
+            }
+            let time = i16::from_be_bytes(
+                bytes[block.payload as usize + 1..block.payload as usize + 3]
+                    .try_into()
+                    .unwrap(),
+            ) as u64;
+            let (_, duration) = fields.iter().find(|(_, e)| e.id == 0x9b).copied().unwrap();
+            let duration = u64::from_be_bytes(
+                bytes[duration.payload as usize..duration.end as usize]
+                    .try_into()
+                    .unwrap(),
+            );
+            let relative = if invalid_position && number == 2 {
+                u64::MAX
+            } else {
+                offset - cluster.payload
+            };
+            cues.push((
+                time,
+                element(
+                    0xbb,
+                    &[
+                        uint(0xb3, time),
+                        element(
+                            0xb7,
+                            &[
+                                uint(0xf7, u64::from(number)),
+                                uint(0xf1, cluster_pos as u64),
+                                uint(0xf0, relative),
+                                uint(0xb2, duration),
+                            ]
+                            .concat(),
+                        ),
+                    ]
+                    .concat(),
+                ),
+            ));
+        }
+        cues.sort_by_key(|(t, _)| *t);
+        let cues = element(
+            0x1c53bb6b,
+            &cues.into_iter().flat_map(|(_, b)| b).collect::<Vec<_>>(),
+        );
+        [
+            element(0x1a45dfa3, &element(0x4282, b"matroska")),
+            element(
+                0x18538067,
+                &[
+                    head([
+                        info_pos as u64,
+                        tracks_pos as u64,
+                        font_pos as u64,
+                        cues_pos as u64,
+                    ]),
+                    info,
+                    track_bytes.to_vec(),
+                    cluster_bytes.to_vec(),
+                    font_bytes.to_vec(),
+                    cues,
+                ]
+                .concat(),
+            ),
+        ]
+        .concat()
+    }
+    #[test]
+    fn subtitle_seek_index_preserves_all_styles_additions_fonts_and_falls_back_on_bad_references() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("original.mkv");
+        std::fs::write(&original, fixture_with_video_blocks(32, 2000)).unwrap();
+        let expected = dir.path().join("expected");
+        let old = write_subtitle_resources(&original, &expected).unwrap();
+        for (name, missing, invalid) in [
+            ("indexed", false, false),
+            ("missing-track", true, false),
+            ("invalid-position", false, true),
+        ] {
+            let input = dir.path().join(format!("{name}.mkv"));
+            std::fs::write(&input, indexed_fixture(missing, invalid)).unwrap();
+            let output = dir.path().join(name);
+            let current = write_subtitle_resources(&input, &output).unwrap();
+            assert_eq!(
+                serde_json::to_value(&current).unwrap(),
+                serde_json::to_value(&old).unwrap(),
+                "{name}"
+            );
+            for entry in std::fs::read_dir(&expected).unwrap() {
+                let entry = entry.unwrap();
+                assert_eq!(
+                    std::fs::read(entry.path()).unwrap(),
+                    std::fs::read(output.join(entry.file_name())).unwrap(),
+                    "{name}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn positional_resources_preserve_authored_duration_styles_webvtt_metadata_and_font_paths() {
         let dir = tempfile::tempdir().unwrap();
