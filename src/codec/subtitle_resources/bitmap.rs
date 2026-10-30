@@ -759,10 +759,6 @@ fn append_external(
             bail!("Bitmap sidecar directory entry limit exceeded");
         }
         let entry = entry?;
-        let kind = entry.file_type()?;
-        if !kind.is_file() || kind.is_symlink() {
-            continue;
-        }
         let path = entry.path();
         let extension = path
             .extension()
@@ -778,6 +774,10 @@ fn append_external(
             .unwrap_or("")
             .to_lowercase();
         if name != stem && !name.starts_with(&prefix) {
+            continue;
+        }
+        let kind = entry.file_type()?;
+        if !kind.is_file() || kind.is_symlink() {
             continue;
         }
         if path.canonicalize()?.parent() != Some(directory.as_path()) {

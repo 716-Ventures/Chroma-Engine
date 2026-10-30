@@ -3,6 +3,11 @@ use super::{AGGREGATE_LIMIT, SCRIPT_LIMIT, SubtitleResources, SubtitleScriptReso
 use anyhow::{Context, Result, bail};
 use std::{collections::HashSet, fs::OpenOptions, io::Read, path::Path};
 
+const TEXT_EXTENSIONS: &[&str] = &[
+    "ass", "ssa", "srt", "vtt", "webvtt", "ttml", "dfxp", "xml", "smi", "sami", "sub", "txt",
+    "sbv", "scc",
+];
+
 pub(super) fn append(
     input: &Path,
     output: &Path,
@@ -26,12 +31,36 @@ pub(super) fn append(
         if index >= 10_000 {
             bail!("sidecar directory entry limit exceeded");
         }
+        if let Some(source) = source {
+            source.check_work()?;
+        }
         let entry = entry?;
-        let kind = entry.file_type()?;
-        if !kind.is_file() || kind.is_symlink() {
+        let path = entry.path();
+        // Filter names before asking the filesystem for file type. Network
+        // directories may need a remote metadata request for every such check.
+        let extension = path
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("");
+        if !extension.eq_ignore_ascii_case("idx")
+            && !TEXT_EXTENSIONS
+                .iter()
+                .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+        {
             continue;
         }
-        siblings.push(entry.path());
+        let name = path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        if name != stem && !name.starts_with(&prefix) {
+            continue;
+        }
+        let kind = entry.file_type()?;
+        if kind.is_file() && !kind.is_symlink() {
+            siblings.push(path);
+        }
     }
     // VobSub pairs are case-insensitive, just like subtitle extension discovery.
     // Only regular, non-symlink siblings from the bounded scan may suppress the
@@ -54,12 +83,7 @@ pub(super) fn append(
         else {
             continue;
         };
-        if ![
-            "ass", "ssa", "srt", "vtt", "webvtt", "ttml", "dfxp", "xml", "smi", "sami", "sub",
-            "txt", "sbv", "scc",
-        ]
-        .contains(&extension.as_str())
-        {
+        if !TEXT_EXTENSIONS.contains(&extension.as_str()) {
             continue;
         }
         if extension == "sub" {
@@ -115,6 +139,9 @@ pub(super) fn append(
         .unwrap_or((None, None));
     let mut next_id = first_id;
     for (path, extension, suffix) in candidates {
+        if let Some(source) = source {
+            source.check_work()?;
+        }
         let mut options = OpenOptions::new();
         options.read(true);
         #[cfg(unix)]
@@ -337,6 +364,32 @@ fn reject(resources: &mut SubtitleResources, next_id: &mut usize, reason: &str) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cancelled_sidecar_scan_does_not_publish_resources() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("Fixture.mkv");
+        std::fs::write(&input, b"fixture").unwrap();
+        std::fs::write(
+            dir.path().join("Fixture.en.srt"),
+            "1\n00:00:01,000 --> 00:00:02,000\nText\n",
+        )
+        .unwrap();
+        let output = dir.path().join("output");
+        std::fs::create_dir(&output).unwrap();
+        let control = crate::WorkControl::default();
+        let source = crate::source::MediaSource::open_with_context(
+            &input,
+            crate::EngineRuntime::new(crate::ResourcePolicy::default()).unwrap(),
+            control.clone(),
+        )
+        .unwrap();
+        control.cancel();
+        let mut resources = SubtitleResources::default();
+        assert!(append(&input, &output, &mut resources, &mut 0, 0, Some(&source)).is_err());
+        assert!(resources.tracks.is_empty());
+        assert_eq!(std::fs::read_dir(output).unwrap().count(), 0);
+    }
+
     #[test]
     fn sidecars_are_basename_scoped_and_keep_ass_bytes_and_native_text_timing() {
         let dir = tempfile::tempdir().unwrap();

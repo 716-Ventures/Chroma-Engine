@@ -3,7 +3,7 @@ use std::hint::black_box;
 use chroma_engine::{
     AudioSelection, Engine, PacketRef, PlaybackConstraints, PlaybackSessionOptions, PlaybackTarget,
     TimeDelta, TimePoint, TimeScale, parse_subrip, plan_fixed_chunks, plan_playback,
-    probe_media_source, render_webvtt, segment_webvtt,
+    probe_media_source, render_webvtt, segment_webvtt, write_subtitle_resources,
 };
 use criterion::{Criterion, criterion_group, criterion_main};
 use tempfile::NamedTempFile;
@@ -94,6 +94,34 @@ fn bench_subtitles(c: &mut Criterion) {
     });
     c.bench_function("subtitles/segment_webvtt_2000", |b| {
         b.iter(|| segment_webvtt(black_box(&cues), black_box(4_000), black_box("s0")));
+    });
+}
+
+fn bench_sidecar_inventory(c: &mut Criterion) {
+    let directory = tempfile::tempdir().expect("sidecar fixture");
+    let input = directory.path().join("Fixture.mp4");
+    std::fs::write(&input, minimal_mp4()).expect("media");
+    for i in 0..1000 {
+        std::fs::write(
+            directory.path().join(format!("Other-{i}.srt")),
+            b"unrelated",
+        )
+        .expect("sibling");
+    }
+    std::fs::write(
+        directory.path().join("Fixture.en.srt"),
+        b"1\n00:00:01,000 --> 00:00:02,000\nFixture caption\n",
+    )
+    .expect("subtitle");
+    let output = directory.path().join("resources");
+    std::fs::create_dir(&output).expect("output");
+    c.bench_function("subtitle_resources/1000_unrelated_siblings", |b| {
+        b.iter(|| {
+            let resources =
+                write_subtitle_resources(black_box(&input), black_box(&output)).expect("resources");
+            assert_eq!(resources.tracks.len(), 1);
+            black_box(resources)
+        });
     });
 }
 
@@ -408,6 +436,7 @@ criterion_group!(
     bench_probe_and_plan,
     bench_packet_planning,
     bench_stateful_segments,
-    bench_subtitles
+    bench_subtitles,
+    bench_sidecar_inventory
 );
 criterion_main!(benches);

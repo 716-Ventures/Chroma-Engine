@@ -73,6 +73,32 @@ jobs:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --locked --no-deps --all-features
 
+  coverage:
+    name: Rust line coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
+        with:
+          toolchain: "1.97.1"
+          components: llvm-tools-preview
+      - name: Native AV1 decoder
+        uses: ./.github/actions/setup-dav1d
+      - name: Linux VA-API build headers
+        run: sudo apt-get update && sudo apt-get install -y clang libva-dev
+      - run: cargo install cargo-llvm-cov --locked --version 0.9.1
+      - name: Measure Engine coverage
+        run: |
+          mkdir -p coverage
+          cargo llvm-cov --locked --all-features --lib --tests --lcov --output-path coverage/engine.lcov
+      - name: Publish Engine coverage
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: engine-coverage
+          path: coverage/engine.lcov
+          if-no-files-found: warn
+
   security:
     name: Security and dependency hygiene
     runs-on: ubuntu-latest
