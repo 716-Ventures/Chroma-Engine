@@ -417,6 +417,8 @@ enum Command {
         #[arg(long, default_value_t = 4_000)]
         segment_ms: u64,
     },
+    /// Prepare a validated Dolby Vision metadata overlay for progressive MP4 streaming.
+    Mp4DolbyOverlay { input: PathBuf, output: PathBuf },
     /// Remux a source into faststart MP4.
     RemuxMp4 { input: PathBuf, output: PathBuf },
 }
@@ -1078,6 +1080,12 @@ pub fn run() -> Result<()> {
             audio_track,
             segment_ms,
         } => hls::run_hls_segments(input, output_dir, start, count, audio_track, segment_ms)?,
+        Command::Mp4DolbyOverlay { input, output } => {
+            println!(
+                "{}",
+                crate::container::mp4::dolby_recovery::prepare_overlay(&input, &output)?
+            );
+        }
         Command::RemuxMp4 { input, output } => {
             crate::remux::remux_mp4(&input, &output)?;
             println!("{}", serde_json::json!({ "ok": true }));

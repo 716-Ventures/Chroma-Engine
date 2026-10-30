@@ -2818,6 +2818,26 @@ mod tests {
         );
         let metadata = [ftyp(), atom(b"moov", &trak)].concat();
         let index = parse_packet_track(&metadata, Some("v0")).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("original.mp4");
+        let header = dir.path().join("header.mp4");
+        let mut file_bytes = metadata.clone();
+        file_bytes.extend(atom(b"free", &vec![0; 992 - metadata.len() - 8]));
+        file_bytes.extend(atom(b"mdat", &[packet.clone(), packet.clone()].concat()));
+        std::fs::write(&source, &file_bytes).unwrap();
+        let plan = dolby_recovery::prepare_overlay(&source, &header).unwrap();
+        assert_eq!(plan["repaired"], true);
+        assert_eq!(plan["sourceLength"].as_u64(), Some(file_bytes.len() as u64));
+        assert_eq!(
+            parse_codec_config(&std::fs::read(&header).unwrap(), Some("v0"))
+                .unwrap()
+                .codec_string
+                .as_deref(),
+            Some("dvh1.05.06")
+        );
+        assert!(dolby_recovery::prepare_overlay(&source, &source).is_err());
+        assert_eq!(std::fs::read(&source).unwrap(), file_bytes);
+
         let repaired = dolby_recovery::recover(
             &metadata,
             |_, size| {

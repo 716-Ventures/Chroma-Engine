@@ -253,6 +253,91 @@ fn replace_path(bytes: &[u8], path: &[[u8; 4]], payload: &[u8]) -> Vec<u8> {
     replace_nth(bytes, path[0], 0, &replace_path(child, &path[1..], payload))
 }
 
+/// Publish only a repaired moov for a read-only virtual progressive MP4.
+/// Absolute packet offsets stay unchanged: the HTTP view hides the old moov
+/// as free space and appends this replacement, without moving any media byte.
+pub(crate) fn prepare_overlay(
+    input: &std::path::Path,
+    output: &std::path::Path,
+) -> anyhow::Result<serde_json::Value> {
+    use std::{
+        fs::File,
+        io::{Read, Seek, SeekFrom},
+    };
+    let runtime = crate::EngineRuntime::global()?;
+    let max_header = runtime.policy().metadata_bytes.min(64 * 1024 * 1024) as u64;
+    let mut file = File::open(input)?;
+    let before = file.metadata()?;
+    let length = before.len();
+    let modified = before
+        .modified()?
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_nanos()
+        .to_string();
+    let (_, metadata) = crate::source::probe_reader::read_metadata(input)?;
+    let Some(repaired) = find_atom(&metadata, b"moov") else {
+        anyhow::bail!("missing MP4 movie metadata")
+    };
+    let mut cursor = 0u64;
+    let mut original = None;
+    for _ in 0..100_000 {
+        if cursor == length {
+            break;
+        }
+        anyhow::ensure!(length.saturating_sub(cursor) >= 8, "truncated MP4 atom");
+        file.seek(SeekFrom::Start(cursor))?;
+        let mut head = [0u8; 8];
+        file.read_exact(&mut head)?;
+        let short = u32::from_be_bytes(head[..4].try_into()?);
+        anyhow::ensure!(short != 0, "unbounded MP4 atom cannot be overlaid");
+        let (size, header) = if short == 1 {
+            let mut extended = [0u8; 8];
+            file.read_exact(&mut extended)?;
+            (u64::from_be_bytes(extended), 16u64)
+        } else {
+            (u64::from(short), 8)
+        };
+        anyhow::ensure!(
+            size >= header && size <= length - cursor,
+            "invalid MP4 atom bounds"
+        );
+        if &head[4..8] == b"moov" {
+            anyhow::ensure!(original.is_none(), "multiple movie metadata boxes");
+            anyhow::ensure!(size <= max_header, "movie metadata exceeds overlay budget");
+            let mut bytes = vec![0; (size - header) as usize];
+            file.read_exact(&mut bytes)?;
+            original = Some((cursor, bytes));
+        }
+        cursor += size;
+    }
+    anyhow::ensure!(cursor == length, "MP4 atom limit exceeded");
+    let (offset, original) =
+        original.ok_or_else(|| anyhow::anyhow!("missing original movie metadata"))?;
+    if original == repaired {
+        return Ok(serde_json::json!({"repaired":false}));
+    }
+    // A compact view must not replace the original track tables.
+    anyhow::ensure!(
+        repaired.len() == original.len() + 32,
+        "unexpected repaired metadata size"
+    );
+    let current = std::fs::metadata(input)?;
+    anyhow::ensure!(
+        current.len() == before.len() && current.modified()? == before.modified()?,
+        "source replaced while preparing overlay"
+    );
+    let after = file.metadata()?;
+    anyhow::ensure!(
+        before.len() == after.len() && before.modified()? == after.modified()?,
+        "source changed while preparing overlay"
+    );
+    let header = box_bytes(*b"moov", repaired);
+    crate::output::publish_bytes(output, &header)?;
+    Ok(
+        serde_json::json!({"repaired":true,"sourceLength":length,"sourceModifiedNs":modified,"patchOffset":offset+4,"headerBytes":header.len()}),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
