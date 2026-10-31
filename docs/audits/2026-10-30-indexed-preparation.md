@@ -117,3 +117,17 @@ duration fields and compressed payload consumption reuse one owned span. Larger
 blocks retain the bounded positional fallback. Publisher memory accounting now
 accumulates completed cue/path allocations rather than summing the complete cue
 history after every packet; active display and vector capacities remain charged.
+
+## Compressed bitmap subtitle recovery
+
+Chunked zlib expansion used `FlushDecompress::Finish` with only an 8 KiB output
+slice. The backend requires sufficient output space for the whole remainder in
+that mode, so valid large compressed PGS packets failed. Streaming expansion now
+uses `None`, preserving the expanded-size, progress, checksum and trailing-input
+checks. A 200,000-byte synthetic payload fails under the previous mode and passes
+under the corrected mode; truncation and expansion-limit checks still fail.
+
+Resources report diagnostic `extractionRevision: 1`. This is not a preparation
+compatibility-version change: successful older resources remain valid. Server
+recovery targets only old partial outputs carrying this exact decompression
+failure; new genuine source failures retain their cached diagnostic outcome.

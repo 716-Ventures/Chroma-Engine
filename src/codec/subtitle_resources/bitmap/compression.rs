@@ -80,7 +80,10 @@ fn inflate(input: &[u8], limit: usize) -> Result<Vec<u8>> {
         let status = decoder.decompress(
             &input[usize::try_from(before_in)?..],
             &mut scratch,
-            FlushDecompress::Finish,
+            // Each iteration has a bounded output chunk, not space for the
+            // entire expanded stream. Finish incorrectly requires the latter
+            // with some backends and rejects ordinary large PGS packets.
+            FlushDecompress::None,
         )?;
         let written = usize::try_from(decoder.total_out() - before_out)?;
         let next = output
@@ -332,6 +335,19 @@ mod tests {
         ));
         bytes
     }
+    #[test]
+    fn chunked_inflate_preserves_large_payload_and_rejects_truncation() {
+        use std::io::Write;
+        let bytes = (0..200_000).map(|i| (i % 251) as u8).collect::<Vec<_>>();
+        let mut encoder =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&bytes).unwrap();
+        let compressed = encoder.finish().unwrap();
+        assert_eq!(inflate(&compressed, bytes.len()).unwrap(), bytes);
+        assert!(inflate(&compressed, bytes.len() - 1).is_err());
+        assert!(inflate(&compressed[..compressed.len() - 1], bytes.len()).is_err());
+    }
+
     #[test]
     fn zlib_and_header_stripping_restore_frames_in_reverse_order_and_honor_scope() {
         let mut settings = entry(0, 1, 3, b"header");

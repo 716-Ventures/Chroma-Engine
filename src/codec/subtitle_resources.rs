@@ -66,6 +66,9 @@ pub struct SubtitleFontResource {
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SubtitleResources {
+    /// Diagnostic extraction revision; successful older resources remain valid.
+    #[serde(default)]
+    pub extraction_revision: u32,
     /// Subtitle tracks whose authored features cannot be represented by this transport.
     #[serde(default)]
     pub unavailable_tracks: Vec<UnavailableSubtitleResource>,
@@ -110,7 +113,10 @@ fn write_resources(
     external_only: bool,
 ) -> Result<SubtitleResources> {
     let source = MediaSource::open_packet_copy(input)?;
-    let mut resources = SubtitleResources::default();
+    let mut resources = SubtitleResources {
+        extraction_revision: 1,
+        ..Default::default()
+    };
     if external_only {
         std::fs::create_dir_all(output)?;
         let first_id = if looks_like_ebml(source.as_ref()) {
