@@ -114,7 +114,7 @@ fn write_resources(
 ) -> Result<SubtitleResources> {
     let source = MediaSource::open_packet_copy(input)?;
     let mut resources = SubtitleResources {
-        extraction_revision: 1,
+        extraction_revision: 2,
         ..Default::default()
     };
     if external_only {
@@ -1026,6 +1026,51 @@ mod extraction_tests {
                 .map(|track| track.id.as_str())
                 .collect::<Vec<_>>(),
             ["s0"]
+        );
+    }
+
+    #[test]
+    fn uncued_video_groups_are_skipped_before_reading_trailing_fields() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("uncued.mkv");
+        let mut video = uint(0xd7, 2);
+        video.extend(uint(0x83, 1));
+        video.extend(element(0x86, b"V_MPEG4/ISO/AVC"));
+        let tracks = element(
+            0x1654ae6b,
+            &[track(1, "S_TEXT/ASS", b""), element(0xae, &video)].concat(),
+        );
+        let mut payload = vec![0x82, 0, 0, 0];
+        payload.extend(vec![0x65; 200_000]);
+        let group = element(0xa0, &[element(0xa1, &payload), uint(0x9b, 1000)].concat());
+        let mut cluster = uint(0xe7, 0);
+        cluster.extend(group.repeat(64));
+        cluster.extend(block(1, 1000, 1000, "0,0,Default,,0,0,0,,Visible", None));
+        std::fs::write(
+            &input,
+            [
+                element(0x1a45dfa3, &element(0x4282, b"matroska")),
+                element(
+                    0x18538067,
+                    &[tracks, element(0x1f43b675, &cluster)].concat(),
+                ),
+            ]
+            .concat(),
+        )
+        .unwrap();
+        let source = MediaSource::open_packet_copy(&input).unwrap();
+        let metadata = parse_basic_metadata(source.as_ref());
+        let selected = metadata
+            .tracks
+            .iter()
+            .filter(|track| track.kind == MatroskaTrackKind::Subtitle)
+            .collect::<Vec<_>>();
+        let before = source.io_stats();
+        let cues = matroska::cues(&source, &selected).unwrap();
+        assert_eq!(cues[&1].len(), 1);
+        assert!(
+            source.io_stats().1 - before.1 < 90,
+            "unselected groups must not cause payload-to-tail-to-payload rereads"
         );
     }
 

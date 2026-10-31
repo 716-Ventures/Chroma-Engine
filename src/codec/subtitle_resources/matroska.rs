@@ -76,7 +76,15 @@ pub(super) fn cues(
                 visit(source, visits)?;
                 let field = source.element_at(field_offset, child.end)?;
                 match field.id {
-                    0xa1 => block = Some(field),
+                    0xa1 => {
+                        let len = usize::try_from(field.end - field.payload)?;
+                        let prefix = source.read_metadata_prefix(field.payload, len.min(12))?;
+                        let (number, _) = vint(&prefix).context("invalid subtitle block track")?;
+                        if !tracks.iter().any(|track| track.number == number) {
+                            return Ok(());
+                        }
+                        block = Some(field);
+                    }
                     0x9b => duration = Some(uint(source, field)?),
                     0x75a1 => addition = Some(field),
                     _ => {}

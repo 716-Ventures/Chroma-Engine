@@ -36,7 +36,8 @@ Legacy clients retain native text rendition behavior.
 
 Bitmap decoders bound each canvas to 16 million pixels / 64 MiB RGBA, one PNG
 to 8 MiB, timed indexes to 100,000 cues / 8 MiB, and the combined extraction
-archive to 256 MiB / 50,000 files across all tracks. Failed tracks release their
+archive to 512 MiB / 50,000 files across all tracks; each track remains limited
+to 256 MiB. Failed tracks release their
 archive reservations and generated files. Source identity/cancellation checks
 remain active during packet scans and image publishing. Matroska compression
 supports bounded zlib and header stripping in reverse encoding order; encrypted

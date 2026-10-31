@@ -131,3 +131,21 @@ Resources report diagnostic `extractionRevision: 1`. This is not a preparation
 compatibility-version change: successful older resources remain valid. Server
 recovery targets only old partial outputs carrying this exact decompression
 failure; new genuine source failures retain their cached diagnostic outcome.
+
+## Large uncued sources and multilingual archives
+
+Full subtitle scans now identify a BlockGroup's track as soon as its Block is
+encountered. Unselected video/audio groups are skipped before following timing
+fields after a large payload and seeking back to its prefix. Selected subtitle
+fields, durations and source validation are unchanged. A 64-group uncued fixture
+checks preserved subtitle output and bounds the positional read count.
+
+Combined multilingual bitmap disk output is bounded to 512 MiB, separately from
+the unchanged 256 MiB per-track output cap, 50,000-file archive cap, individual
+image/index limits and decoder memory limits. Diagnostic extraction revision 2
+identifies the fixed archive policy. Successful older resources stay compatible;
+only older results explicitly rejected by the former aggregate cap need repair.
+
+Validation includes full Engine regressions and strict all-target Clippy. A real
+multilingual resource set now retains all 19 tracks, and a large uncued source
+retains all three tracks. Source-specific operational evidence remains private.

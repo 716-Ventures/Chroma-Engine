@@ -27,6 +27,8 @@ pub(super) const MAX_PIXELS: usize = 16 * 1024 * 1024;
 pub(super) const MAX_RGBA_BYTES: usize = 64 * 1024 * 1024;
 pub(super) const MAX_ENCODED_BYTES: usize = 8 * 1024 * 1024;
 const MAX_OUTPUT_BYTES: usize = 256 * 1024 * 1024;
+// Disk output for all languages is distinct from per-track/decoder memory.
+const MAX_ARCHIVE_BYTES: usize = 512 * 1024 * 1024;
 const MAX_CUES: usize = 100_000;
 const MAX_INDEX_BYTES: usize = 8 * 1024 * 1024;
 const MAX_ARCHIVE_FILES: usize = 50_000;
@@ -405,7 +407,7 @@ pub(super) fn append(
     source.check_work()?;
     source.validate_current()?;
     std::fs::create_dir_all(output)?;
-    let archive = Rc::new(ArchiveBudget::new(MAX_OUTPUT_BYTES));
+    let archive = Rc::new(ArchiveBudget::new(MAX_ARCHIVE_BYTES));
     let embedded_count = if looks_like_ebml(source.as_ref()) {
         let metadata = parse_basic_metadata(source.as_ref());
         let compressions = compression::parse(source)?;
@@ -683,6 +685,15 @@ fn scan_matroska(
                 visit(source, visits)?;
                 let field = source.element_at(field_offset, child.end)?;
                 if field.id == 0xa1 {
+                    // A video/audio BlockGroup can have timing fields after a
+                    // large payload. Identify its track before following those
+                    // fields and then seeking back to the block prefix.
+                    let len = usize::try_from(field.end - field.payload)?;
+                    let prefix = source.read_metadata_prefix(field.payload, len.min(12))?;
+                    let (number, _) = vint(&prefix).context("Invalid bitmap block track")?;
+                    if !selected.contains(&number) {
+                        return Ok(());
+                    }
                     block = Some(field);
                 }
                 if field.id == 0x9b {
