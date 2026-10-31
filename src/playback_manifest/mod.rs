@@ -249,7 +249,11 @@ fn build_file_matroska_manifest_mode(
                 .first()
                 .and_then(|plan| plan.chunks.first())
                 .map(|chunk| chunk.start.as_millis().saturating_add(1000))
-                .unwrap_or(1000);
+                .unwrap_or(1000)
+                // A valid mux may delay its first audio packets. Presence is
+                // an early-exit probe, not a requirement for audio at time zero.
+                .max(30_000)
+                .min(metadata.duration_ms.unwrap_or(30_000));
             let sample = source
                 .matroska_index()?
                 .tracks_present(source, &audio_ids, 0, first_end);

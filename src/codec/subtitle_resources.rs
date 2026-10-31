@@ -15,9 +15,13 @@ mod sidecars;
 mod text_formats;
 mod text_overlay;
 
-const SCRIPT_LIMIT: usize = 8 * 1024 * 1024;
-const FONT_LIMIT: usize = 8 * 1024 * 1024;
-const AGGREGATE_LIMIT: usize = 32 * 1024 * 1024;
+// Authored ASS typesetting can exceed 8 MiB even for a single episode.
+const SCRIPT_LIMIT: usize = 32 * 1024 * 1024;
+const FONT_LIMIT: usize = 16 * 1024 * 1024;
+// A library import prepares every language, unlike a player loading one track.
+// Keep individual scripts/fonts bounded while allowing a multilingual resource
+// set to exceed the player's per-selection memory budget.
+const AGGREGATE_LIMIT: usize = 128 * 1024 * 1024;
 
 /// A subtitle script or native text rendition written beside a resource manifest.
 #[derive(Debug, Serialize, Deserialize)]
@@ -511,6 +515,19 @@ fn extract_fonts(
     resources: &mut SubtitleResources,
     total: &mut usize,
 ) -> Result<()> {
+    // Only authored ASS/SSA scripts consume embedded font attachments.
+    // An absent Attachments seek entry is not proof that none exists, so
+    // searching for one otherwise walks every Cluster in a large movie.
+    if !parse_basic_metadata(source.as_ref())
+        .tracks
+        .iter()
+        .any(|track| {
+            track.kind == MatroskaTrackKind::Subtitle
+                && ["ass", "ssa"].contains(&track.codec.as_str())
+        })
+    {
+        return Ok(());
+    }
     let mut offset = 0;
     let mut visits = 0;
     let segment = loop {
@@ -590,7 +607,7 @@ fn extract_fonts(
                         .iter()
                         .any(|suffix| lower.ends_with(suffix))
                     {
-                        if resources.fonts.len() >= 16 {
+                        if resources.fonts.len() >= 128 {
                             bail!("subtitle font count limit exceeded");
                         }
                         if let Some(data) = data {
@@ -598,7 +615,9 @@ fn extract_fonts(
                             *total = total
                                 .checked_add(len)
                                 .context("font resource size overflow")?;
-                            if len > FONT_LIMIT || *total > AGGREGATE_LIMIT {
+                            if len > FONT_LIMIT
+                                || *total > AGGREGATE_LIMIT.min(source.policy().index_bytes)
+                            {
                                 bail!("subtitle font resource limit exceeded");
                             }
                             let bytes = source.read_at(data.payload, len)?;
@@ -694,6 +713,14 @@ mod extraction_tests {
         fixture_with_video_blocks(font_size, 0)
     }
     fn fixture_with_video_blocks(font_size: usize, video_blocks: usize) -> Vec<u8> {
+        extended_fixture(font_size, video_blocks, 1, 0)
+    }
+    fn extended_fixture(
+        font_size: usize,
+        video_blocks: usize,
+        font_count: usize,
+        extra_cues: usize,
+    ) -> Vec<u8> {
         let header = b"[Script Info]\nScriptType: v4.00+\nPlayResX: 1920\n[V4+ Styles]\nFormat: Name,Fontname,Fontsize\nStyle: Default,Authored Font,48\n";
         let mut tracks = track(1, "S_TEXT/ASS", header);
         tracks.extend(track(2, "S_TEXT/UTF8", b""));
@@ -733,11 +760,27 @@ mod extraction_tests {
             "WebVTT <00:00:01.000>word",
             Some("position:90% align:right\ncue-id\nNOTE authored comment"),
         ));
+        for i in 0..extra_cues {
+            cluster.extend(block(
+                1,
+                3000,
+                1000,
+                &format!(
+                    "{},0,Default,,0,0,0,,{}",
+                    i + 3,
+                    "Dense authored event ".repeat(8)
+                ),
+                None,
+            ));
+        }
         segment.extend(element(0x1f43_b675, &cluster));
         let mut font = element(0x466e, b"../../Authored.ttf");
         font.extend(element(0x4660, b"font/ttf"));
         font.extend(element(0x465c, &vec![0; font_size]));
-        segment.extend(element(0x1941_a469, &element(0x61a7, &font)));
+        segment.extend(element(
+            0x1941_a469,
+            &element(0x61a7, &font).repeat(font_count),
+        ));
         let mut bytes = element(0x1a45_dfa3, &element(0x4282, b"matroska"));
         bytes.extend(element(0x1853_8067, &segment));
         bytes
@@ -977,6 +1020,105 @@ mod extraction_tests {
                 .map(|track| track.id.as_str())
                 .collect::<Vec<_>>(),
             ["s0"]
+        );
+    }
+
+    #[test]
+    fn plain_text_and_bitmap_tracks_do_not_search_the_movie_for_unused_fonts() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("no-authored-fonts.mkv");
+        let mut segment = element(
+            0x1654ae6b,
+            &[track(1, "S_TEXT/UTF8", b""), track(2, "S_HDMV/PGS", b"")].concat(),
+        );
+        segment.extend(element(0x1f43b675, &[]).repeat(2000));
+        std::fs::write(
+            &input,
+            [
+                element(0x1a45dfa3, &element(0x4282, b"matroska")),
+                element(0x18538067, &segment),
+            ]
+            .concat(),
+        )
+        .unwrap();
+        let source = MediaSource::open_packet_copy(&input).unwrap();
+        let before = source.io_stats();
+        let mut resources = SubtitleResources::default();
+        extract_fonts(&source, directory.path(), &mut resources, &mut 0).unwrap();
+        assert!(resources.fonts.is_empty());
+        assert_eq!(
+            source.io_stats(),
+            before,
+            "unused font discovery must issue no Cluster reads"
+        );
+    }
+
+    #[test]
+    fn zero_duration_event_does_not_discard_the_entire_subtitle_track() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("zero-event.mkv");
+        let mut bytes = fixture(32);
+        // Replace only the first authored 500-ms duration with an explicit zero.
+        let duration = element(0x9b, &500_u64.to_be_bytes());
+        let offset = bytes
+            .windows(duration.len())
+            .position(|v| v == duration)
+            .unwrap();
+        let start = offset + duration.len() - 8;
+        bytes[start..start + 8].fill(0);
+        std::fs::write(&input, bytes).unwrap();
+        let resources = write_subtitle_resources(&input, &dir.path().join("output")).unwrap();
+        assert!(resources.tracks.iter().any(|track| track.id == "s0"));
+        let script = std::fs::read_to_string(dir.path().join("output/s0.ass")).unwrap();
+        assert_eq!(script.matches("Dialogue:").count(), 1);
+    }
+
+    #[test]
+    fn cjk_font_larger_than_eight_mib_is_preserved() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("cjk.mkv");
+        let font_bytes = 9 * 1024 * 1024;
+        std::fs::write(&input, fixture(font_bytes)).unwrap();
+        let resources = write_subtitle_resources(&input, &dir.path().join("output")).unwrap();
+        assert_eq!(resources.fonts.len(), 1);
+        assert_eq!(
+            std::fs::metadata(dir.path().join("output/font-0.bin"))
+                .unwrap()
+                .len(),
+            font_bytes as u64
+        );
+    }
+
+    #[test]
+    fn dense_scripts_and_large_font_catalogues_keep_every_resource() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("dense.mkv");
+        std::fs::write(&input, extended_fixture(32, 0, 33, 70_000)).unwrap();
+        let resources = write_subtitle_resources(&input, &dir.path().join("output")).unwrap();
+        assert_eq!(resources.fonts.len(), 33);
+        let script = std::fs::read_to_string(dir.path().join("output/s0.ass")).unwrap();
+        assert_eq!(script.matches("Dialogue:").count(), 70_002);
+        assert!(script.len() > 8 * 1024 * 1024);
+        assert!(script.len() <= SCRIPT_LIMIT);
+        let policy = crate::ResourcePolicy {
+            index_bytes: 64 * 1024,
+            ..Default::default()
+        };
+        let source = crate::source::MediaSource::open_with_context(
+            &input,
+            crate::EngineRuntime::new(policy).unwrap(),
+            crate::WorkControl::default(),
+        )
+        .unwrap();
+        let metadata = parse_basic_metadata(source.as_ref());
+        let tracks = metadata
+            .tracks
+            .iter()
+            .filter(|t| t.kind == MatroskaTrackKind::Subtitle)
+            .collect::<Vec<_>>();
+        assert!(
+            matroska::cues(&source, &tracks).is_err(),
+            "a small explicit memory budget must still be enforced"
         );
     }
 

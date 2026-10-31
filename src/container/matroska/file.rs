@@ -51,6 +51,12 @@ impl MatroskaFileIndex {
         };
         index.segment = Some(segment);
         if let Some(indexed) = seek::load(source, segment, scale) {
+            if std::env::var_os("CHROMA_PROBE_DIAGNOSTICS").is_some() {
+                eprintln!(
+                    "matroska_cue_index indexed=true anchors={}",
+                    indexed.anchors.len()
+                );
+            }
             index.cues = Some(indexed.bytes);
             index.anchors = indexed.anchors;
             source.validate_current()?;
@@ -333,6 +339,9 @@ impl MatroskaFileIndex {
             Ok(found.iter().all(|v| *v))
         })?;
         source.validate_current()?;
+        if std::env::var_os("CHROMA_PROBE_DIAGNOSTICS").is_some() {
+            eprintln!("matroska_audio_presence start={start} end={end} found={found:?}");
+        }
         Ok(found.iter().all(|v| *v))
     }
     fn for_each_block(
@@ -510,20 +519,17 @@ pub(crate) fn indexed_metadata_elements(
     }
 }
 
-pub(crate) fn indexed_subtitle_blocks(
+/// Consume validated blocks while their headers are still in the read window.
+/// A false result requires the caller to discard partial output before falling
+/// back to a complete scan. Consumer errors propagate rather than causing retries.
+pub(crate) fn visit_indexed_subtitle_blocks(
     source: &MediaSource,
     segment: FileElement,
     scale: u64,
     tracks: &[u64],
-) -> Result<Option<Vec<(u64, FileElement)>>> {
-    match seek::subtitle_blocks(source, segment, scale, tracks) {
-        Ok(value) => Ok(value),
-        Err(_) => {
-            source.check_work()?;
-            source.validate_current()?;
-            Ok(None)
-        }
-    }
+    consume: impl FnMut(u64, FileElement) -> Result<()>,
+) -> Result<bool> {
+    seek::visit_subtitle_blocks(source, segment, scale, tracks, consume)
 }
 
 fn read_cluster(
@@ -689,6 +695,13 @@ mod tests {
     }
 
     fn fixture(cue_audio: bool) -> (tempfile::TempDir, std::path::PathBuf) {
+        delayed_audio_fixture(cue_audio, 0)
+    }
+
+    fn delayed_audio_fixture(
+        cue_audio: bool,
+        delay: i16,
+    ) -> (tempfile::TempDir, std::path::PathBuf) {
         let tracks = element(
             0x1654_ae6b,
             &[
@@ -714,11 +727,11 @@ mod tests {
                 0_u64,
                 vec![
                     block(1, 0, 0x80, &[]),
-                    block(2, 0, 0x80, &[]),
-                    block(3, 0, 0, &[]),
-                    block(2, 20, 0x82, &[2, 3, 4]), // Xiph lacing.
-                    block(3, 0, 0x80, &[]),
-                    block(3, -2, 0x80, &[]),
+                    block(2, delay, 0x80, &[]),
+                    block(3, delay, 0, &[]),
+                    block(2, delay + 20, 0x82, &[2, 3, 4]), // Xiph lacing.
+                    block(3, delay, 0x80, &[]),
+                    block(3, delay - 2, 0x80, &[]),
                 ],
             ),
             (
@@ -778,6 +791,78 @@ mod tests {
         let path = directory.path().join("multi-audio.mkv");
         std::fs::write(&path, bytes).unwrap();
         (directory, path)
+    }
+
+    #[test]
+    fn three_linked_seek_heads_keep_the_indexed_path() {
+        let seek = |id: u32, pos: u64| {
+            element(
+                0x4dbb,
+                &[
+                    element(0x53ab, &id.to_be_bytes()),
+                    element(0x53ac, &pos.to_be_bytes()),
+                ]
+                .concat(),
+            )
+        };
+        let head = |entries: &[(u32, u64)]| {
+            element(
+                0x114d9b74,
+                &entries
+                    .iter()
+                    .flat_map(|(id, pos)| seek(*id, *pos))
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let info = element(0x1549a966, &element(0x4489, &10_000_f64.to_be_bytes()));
+        let tracks = element(0x1654ae6b, &track(1, 1, Some(40_000_000)));
+        let first_len = head(&[(0x114d9b74, 0)]).len() as u64;
+        let clusters = element(0x1f43b675, &element(0xe7, &[0])).repeat(1000);
+        let cluster_pos = first_len + info.len() as u64 + tracks.len() as u64;
+        let cues = element(
+            0x1c53bb6b,
+            &element(
+                0xbb,
+                &[
+                    element(0xb3, &[0]),
+                    element(
+                        0xb7,
+                        &[
+                            element(0xf7, &[1]),
+                            element(0xf1, &cluster_pos.to_be_bytes()),
+                        ]
+                        .concat(),
+                    ),
+                ]
+                .concat(),
+            ),
+        );
+        let cues_pos = cluster_pos + clusters.len() as u64;
+        let second_pos = cues_pos + cues.len() as u64;
+        let second_len = head(&[(0x114d9b74, 0), (0x1549a966, first_len)]).len() as u64;
+        let third_pos = second_pos + second_len;
+        let bytes = element(
+            0x18538067,
+            &[
+                head(&[(0x114d9b74, second_pos)]),
+                info.clone(),
+                tracks,
+                clusters,
+                cues,
+                head(&[(0x114d9b74, third_pos), (0x1549a966, first_len)]),
+                head(&[
+                    (0x1654ae6b, first_len + info.len() as u64),
+                    (0x1c53bb6b, cues_pos),
+                ]),
+            ]
+            .concat(),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("linked.mkv");
+        std::fs::write(&path, [element(0x1a45dfa3, &[]), bytes].concat()).unwrap();
+        let source = MediaSource::open_packet_copy(&path).unwrap();
+        assert_eq!(source.matroska_index().unwrap().anchors.len(), 1);
+        assert_eq!(source.io_stats().2, 0);
     }
 
     #[test]
@@ -927,6 +1012,25 @@ mod tests {
             .packets(&other, &["a0"], 0, 1000)
             .unwrap();
         assert!(other.io_stats().2 > source.io_stats().2);
+    }
+
+    #[test]
+    fn delayed_audio_does_not_trigger_a_global_packet_index() {
+        let (_dir, path) = delayed_audio_fixture(false, 2000);
+        let source = MediaSource::open_packet_copy(&path).unwrap();
+        let manifest = crate::playback_manifest::build_file_matroska_streaming_manifest(
+            &source,
+            &path,
+            Default::default(),
+        )
+        .unwrap();
+        assert!(
+            manifest
+                .tracks
+                .iter()
+                .filter(|t| t.kind == "audio")
+                .all(|t| t.time_window_addressed && t.chunks.is_empty())
+        );
     }
 
     #[test]

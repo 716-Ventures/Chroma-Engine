@@ -84,7 +84,7 @@ fn positions(source: &MediaSource, segment: FileElement) -> Result<Option<BTreeM
     let mut heads = vec![segment.payload];
     let mut seen = HashSet::new();
     let mut positions = BTreeMap::new();
-    for index in 0..2 {
+    for index in 0..16 {
         let Some(offset) = heads.get(index).copied() else {
             break;
         };
@@ -121,10 +121,16 @@ fn positions(source: &MediaSource, segment: FileElement) -> Result<Option<BTreeM
                 .filter(|v| *v < segment.end)
                 .ok_or_else(|| anyhow::anyhow!("Seek position outside Segment"))?;
             if id == 0x114d9b74 {
-                if heads.len() >= 2 || heads.contains(&absolute) {
+                if heads.len() >= 16 || heads.contains(&absolute) {
                     return Ok(None);
                 }
                 heads.push(absolute);
+                continue;
+            }
+            // Cluster references may repeat; only metadata positions are
+            // needed here. Linked SeekHeads are followed separately above.
+            if id == 0x1f43b675 {
+                continue;
             }
             if positions
                 .insert(id, absolute)
@@ -165,36 +171,37 @@ pub(super) fn indexed_elements(
 /// with durations recommended. Use only a track-complete, directly addressed
 /// index for every requested independent subtitle track; missing/invalid references fall
 /// back to the full scanner. Referenced/stateful blocks require that full pass.
-pub(super) fn subtitle_blocks(
+pub(super) fn visit_subtitle_blocks(
     source: &MediaSource,
     segment: FileElement,
     scale: u64,
     tracks: &[u64],
-) -> Result<Option<Vec<(u64, FileElement)>>> {
+    mut consume: impl FnMut(u64, FileElement) -> Result<()>,
+) -> Result<bool> {
     let Some(index) = load(source, segment, scale) else {
-        return Ok(None);
+        return Ok(false);
     };
     let Some(payload) = find_first_child(&index.bytes, 0x1c53_bb6b) else {
-        return Ok(None);
+        return Ok(false);
     };
     let mut counts = vec![0usize; tracks.len()];
     let mut addresses = BTreeMap::new();
     for cue in ElementIter::new(payload).filter(|e| e.id == 0xbb) {
         let Some(time) = find_first_child(cue.payload, 0xb3).and_then(read_uint) else {
-            return Ok(None);
+            return Ok(false);
         };
         for entry in ElementIter::new(cue.payload).filter(|e| e.id == 0xb7) {
             let Some(number) = find_first_child(entry.payload, 0xf7).and_then(read_uint) else {
-                return Ok(None);
+                return Ok(false);
             };
             let Some(track) = tracks.iter().position(|n| *n == number) else {
                 continue;
             };
             let Some(position) = find_first_child(entry.payload, 0xf1).and_then(read_uint) else {
-                return Ok(None);
+                return Ok(false);
             };
             let Some(relative) = find_first_child(entry.payload, 0xf0).and_then(read_uint) else {
-                return Ok(None);
+                return Ok(false);
             };
             // Older muxers omit CueDuration; the actual BlockDuration is
             // retained by the existing subtitle parser, not invented here.
@@ -202,14 +209,14 @@ pub(super) fn subtitle_blocks(
                 .and_then(read_uint)
                 .is_some_and(|v| v != 0)
             {
-                return Ok(None);
+                return Ok(false);
             }
             let Some(position) = segment
                 .payload
                 .checked_add(position)
                 .filter(|p| *p < segment.end)
             else {
-                return Ok(None);
+                return Ok(false);
             };
             source.policy().check(
                 "Matroska subtitle cue index",
@@ -220,18 +227,17 @@ pub(super) fn subtitle_blocks(
                 .insert((position, relative), (number, time))
                 .is_some()
             {
-                return Ok(None);
+                return Ok(false);
             }
             counts[track] += 1;
             if addresses.len() > 100000 {
-                return Ok(None);
+                return Ok(false);
             }
         }
     }
     if counts.contains(&0) {
-        return Ok(None);
+        return Ok(false);
     }
-    let mut output = Vec::with_capacity(addresses.len());
     let mut current = None;
     let mut visits = 0;
     for ((position, relative), (number, time)) in addresses {
@@ -241,7 +247,7 @@ pub(super) fn subtitle_blocks(
         {
             let element = source.element_at(position, segment.end)?;
             if element.id != 0x1f43_b675 || element.unknown_size {
-                return Ok(None);
+                return Ok(false);
             }
             current = Some((position, read_cluster(source, element, scale, &mut visits)?));
         }
@@ -251,25 +257,29 @@ pub(super) fn subtitle_blocks(
             .checked_add(relative)
             .filter(|p| *p < cluster.end)
         else {
-            return Ok(None);
+            return Ok(false);
         };
         let element = source.element_at(offset, cluster.end)?;
+        source.prefetch_metadata_span(offset, usize::try_from(element.end - offset)?)?;
         let block = match element.id {
             0xa3 => Some(read_block(source, &element, None)?),
             0xa0 => read_group(source, &element, &mut visits)?,
             _ => None,
         };
-        let Some(block) = block else { return Ok(None) };
+        let Some(block) = block else { return Ok(false) };
         let actual = i128::from(cluster.timecode) + i128::from(block.relative_timecode);
+        if std::env::var_os("CHROMA_PROBE_DIAGNOSTICS").is_some() && !block.keyframe {
+            eprintln!("subtitle_cue_read fallback=stateful_block track={number}");
+        }
         if block.track_number != number
             || block.frames.len() != 1
             || !block.keyframe
             || actual != i128::from(time)
         {
-            return Ok(None);
+            return Ok(false);
         }
-        output.push((u64::try_from(cluster.timecode)?, element));
+        consume(u64::try_from(cluster.timecode)?, element)?;
     }
     source.validate_current()?;
-    Ok(Some(output))
+    Ok(true)
 }

@@ -56,7 +56,14 @@ pub(super) fn cues(
     let mut sizes: HashMap<u64, usize> = HashMap::new();
     let mut total = 0_usize;
     let mut invalid_tracks = std::collections::HashSet::new();
-    let mut process_child = |cluster_time: u64, child: Element, visits: &mut usize| -> Result<()> {
+    let mut process_child = |input: Option<(u64, Element)>, visits: &mut usize| -> Result<()> {
+        let Some((cluster_time, child)) = input else {
+            output.clear();
+            sizes.clear();
+            total = 0;
+            invalid_tracks.clear();
+            return Ok(());
+        };
         let mut block = None;
         let mut duration = None;
         let mut addition = None;
@@ -86,7 +93,13 @@ pub(super) fn cues(
                     bail!("truncated subtitle block");
                 }
                 if prefix[track_len + 2] & 0x06 != 0 {
-                    invalid_tracks.insert(number);
+                    if invalid_tracks.insert(number)
+                        && std::env::var_os("CHROMA_PROBE_DIAGNOSTICS").is_some()
+                    {
+                        eprintln!(
+                            "subtitle_track_rejected track={number} reason=unsupported_or_invalid_cue"
+                        );
+                    }
                     return Ok(());
                 }
                 let relative = i16::from_be_bytes([prefix[track_len], prefix[track_len + 1]]);
@@ -95,20 +108,35 @@ pub(super) fn cues(
                 let duration_ms = duration
                     .map(|ticks| ticks.saturating_mul(scale) / 1_000_000)
                     .or(track.default_duration_ns.map(|ns| ns / 1_000_000));
+                if duration_ms == Some(0) {
+                    // Explicit zero-duration ASS events have no display time;
+                    // they must not invalidate all visible cues in the track.
+                    return Ok(());
+                }
                 let Some(duration_ms) = duration_ms.filter(|duration| *duration > 0) else {
-                    invalid_tracks.insert(number);
+                    if invalid_tracks.insert(number)
+                        && std::env::var_os("CHROMA_PROBE_DIAGNOSTICS").is_some()
+                    {
+                        eprintln!(
+                            "subtitle_track_rejected track={number} reason=unsupported_or_invalid_cue"
+                        );
+                    }
                     return Ok(());
                 };
                 let payload_len = len - track_len - 3;
                 let size = sizes.entry(number).or_default();
                 *size = size
-                    .checked_add(payload_len + 128)
+                    .checked_add(payload_len)
                     .context("subtitle size overflow")?;
                 total = total
                     .checked_add(payload_len + 128)
                     .context("subtitle aggregate overflow")?;
-                if *size > super::SCRIPT_LIMIT || total > super::AGGREGATE_LIMIT {
-                    bail!("subtitle resource size limit exceeded");
+                if *size > super::SCRIPT_LIMIT
+                    || total > super::AGGREGATE_LIMIT.min(source.policy().index_bytes)
+                {
+                    bail!(
+                        "subtitle resource size limit exceeded: track={number}, script_bytes={size}, aggregate_bytes={total}"
+                    );
                 }
                 let bytes = source
                     .read_window_unvalidated(block.payload + (track_len + 3) as u64, payload_len)?;
@@ -130,11 +158,19 @@ pub(super) fn cues(
                 total = total
                     .checked_add(extra)
                     .context("expanded subtitle aggregate overflow")?;
-                if *size > super::SCRIPT_LIMIT || total > super::AGGREGATE_LIMIT {
+                if *size > super::SCRIPT_LIMIT
+                    || total > super::AGGREGATE_LIMIT.min(source.policy().index_bytes)
+                {
                     bail!("expanded subtitle resource size limit exceeded");
                 }
                 let Ok(text) = String::from_utf8(bytes) else {
-                    invalid_tracks.insert(number);
+                    if invalid_tracks.insert(number)
+                        && std::env::var_os("CHROMA_PROBE_DIAGNOSTICS").is_some()
+                    {
+                        eprintln!(
+                            "subtitle_track_rejected track={number} reason=unsupported_or_invalid_cue"
+                        );
+                    }
                     return Ok(());
                 };
                 let addition = addition
@@ -157,7 +193,9 @@ pub(super) fn cues(
                     total = total
                         .checked_add(addition.len())
                         .context("subtitle addition aggregate overflow")?;
-                    if *size > super::SCRIPT_LIMIT || total > super::AGGREGATE_LIMIT {
+                    if *size > super::SCRIPT_LIMIT
+                        || total > super::AGGREGATE_LIMIT.min(source.policy().index_bytes)
+                    {
                         bail!("subtitle additions size limit exceeded");
                     }
                 }
@@ -176,16 +214,18 @@ pub(super) fn cues(
         Ok(())
     };
     let numbers = tracks.iter().map(|t| t.number).collect::<Vec<_>>();
-    if let Some(blocks) =
-        crate::container::matroska::indexed_subtitle_blocks(source, segment, scale, &numbers)?
-    {
-        if std::env::var_os("CHROMA_PROBE_DIAGNOSTICS").is_some() {
-            eprintln!("subtitle_cue_read indexed=true blocks={}", blocks.len());
-        }
-        for (clock, child) in blocks {
-            process_child(clock, child, &mut visits)?;
-        }
-    } else {
+    let indexed = crate::container::matroska::visit_indexed_subtitle_blocks(
+        source,
+        segment,
+        scale,
+        &numbers,
+        |clock, child| process_child(Some((clock, child)), &mut visits),
+    )?;
+    if std::env::var_os("CHROMA_PROBE_DIAGNOSTICS").is_some() {
+        eprintln!("subtitle_cue_read indexed={indexed} single_pass=true");
+    }
+    if !indexed {
+        process_child(None, &mut visits)?;
         offset = segment.payload;
         while offset < segment.end {
             visit(source, &mut visits)?;
@@ -207,7 +247,7 @@ pub(super) fn cues(
                 while child_offset < element.end {
                     visit(source, &mut visits)?;
                     let child = source.element_at(child_offset, element.end)?;
-                    process_child(cluster_time, child, &mut visits)?;
+                    process_child(Some((cluster_time, child)), &mut visits)?;
                     child_offset = child.end;
                 }
             }

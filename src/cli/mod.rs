@@ -25,7 +25,7 @@ use crate::transcode::{
     plan_hls_transcode, probe_dts_audio_bridge, write_native_fmp4_transcode_init,
     write_native_fmp4_transcode_segment, write_native_fmp4_transcode_start,
 };
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 
@@ -572,7 +572,6 @@ pub fn run() -> Result<()> {
                         include_audio,
                     },
                 )
-                .ok()
             } else if looks_like_ebml(bytes.as_ref()) {
                 (if streaming_index {
                     crate::playback_manifest::build_file_matroska_streaming_manifest
@@ -586,11 +585,10 @@ pub fn run() -> Result<()> {
                         include_audio,
                     },
                 )
-                .ok()
             } else {
-                None
+                bail!("unsupported source container for native playback manifest")
             }
-            .ok_or_else(|| anyhow::anyhow!("could not build native playback manifest"))?;
+            .context("could not build native playback manifest")?;
             if std::env::var_os("CHROMA_PROBE_DIAGNOSTICS").is_some() {
                 let (bytes, operations, clusters) = source.io_stats();
                 eprintln!(

@@ -71,3 +71,49 @@ The previously failing 3.9 GB source then produced its streaming manifest in
 0.370 seconds: four source reads, 745,063 logical bytes and one Cluster visit.
 This run used uncontrolled caches. Crucially, it succeeded without the rejected
 index/full-scan retry path; the earlier live attempt failed after minutes.
+
+## Recovery of failed preparation jobs
+
+The recovery audit found two avoidable full indexes: a valid mux with three
+linked SeekHeads exceeded the previous two-head search, and delayed initial
+audio missed the one-second presence sample. Both readers now follow at most
+16 distinct bounded SeekHeads, preserving cycle/offset rejection. Audio presence
+uses a maximum 30-second initial window but still stops as soon as every requested
+audio track appears. No complete preparation row is invalidated by these fixes.
+
+Indexed subtitle validation and extraction now run together in physical source
+order. Previously the engine validated every addressed block, retained its
+location, and then reread all the same blocks to extract their contents. The
+visitor consumes each block while its header window remains resident. An invalid
+late reference resets text accumulation and bitmap decoder/publisher state before
+full-scan fallback; partial PNGs and archive reservations are released. Resource
+limit errors from the consumer propagate, rather than initiating another scan.
+
+Library text scripts are bounded to 32 MiB each; CJK font attachments to 16 MiB
+each, with at most 128 fonts. The combined script/font import budget is 128 MiB,
+and retained cue allocations also respect the configured index budget. Cue
+bookkeeping is charged against aggregate memory, not against the text payload's
+individual script limit. Bitmap limits are unchanged. Server delivery and client
+validation must use corresponding asset limits; a physical client installation is
+separate from deploying the engine/server.
+
+Failures from missing encoded source bytes cannot be repaired by retrying a job.
+Fragmented MP4 input indexing remains unsupported. Metadata probing retains
+its initialization metadata and stops at the first `moof`, avoiding a walk of
+every fragment that would never populate traditional sample tables. This
+restriction does not apply to generated HLS output fragments.
+Detailed CLI causes are retained for diagnosis; server responses remain sanitized.
+
+Font discovery is skipped when the source has no ASS/SSA subtitle tracks. SRT,
+WebVTT and bitmap subtitle tracks do not consume embedded fonts. Previously a
+valid SeekHead without an Attachments entry caused a full-file search for unused
+fonts after successful text extraction. A no-font 2,000-Cluster regression asserts
+that this step performs no source reads. Explicit zero-duration subtitle events
+are omitted without discarding the track's other visible events.
+
+Large bitmap blocks are prefetched into the existing bounded metadata window
+(up to its configured ceiling, at most 1 MiB), so BlockGroup validation, trailing
+duration fields and compressed payload consumption reuse one owned span. Larger
+blocks retain the bounded positional fallback. Publisher memory accounting now
+accumulates completed cue/path allocations rather than summing the complete cue
+history after every packet; active display and vector capacities remain charged.

@@ -341,7 +341,7 @@ impl MediaSource {
         self.matroska_index
             .get_or_init(|| {
                 crate::container::matroska::MatroskaFileIndex::open(self)
-                    .map_err(|error| error.to_string())
+                    .map_err(|error| format!("{error:#}"))
             })
             .as_ref()
             .map_err(|error| anyhow::anyhow!(error.clone()))
@@ -353,6 +353,7 @@ impl MediaSource {
         }
         let header = self.cached_metadata_prefix(offset, (end - offset).min(12) as usize)?;
         probe_reader::element_from_header(&header, offset, end)
+            .with_context(|| format!("Matroska element at byte {offset}, parent end {end}"))
     }
 
     /// Only EBML integer fields and lacing/block prefixes use metadata lookahead.
@@ -388,6 +389,58 @@ impl MediaSource {
         drop(window);
         self.check_work().map_err(io::Error::other)?;
         Ok(prefix)
+    }
+
+    /// Keep an indexed subtitle block's headers and payload in one bounded
+    /// window, so validation and decoding do not reread it across the network.
+    pub(crate) fn prefetch_metadata_span(&self, offset: u64, len: usize) -> io::Result<()> {
+        self.check_work().map_err(io::Error::other)?;
+        if offset
+            .checked_add(len as u64)
+            .is_none_or(|end| end > self.len)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "metadata span outside source",
+            ));
+        }
+        let capacity = self
+            .policy()
+            .metadata_bytes
+            .saturating_sub(self.bytes.len())
+            .min(self.policy().compressed_window_bytes)
+            .min(metadata_lookahead_limit());
+        if len == 0 || len > capacity {
+            return Ok(());
+        }
+        let mut window = self
+            .metadata_window
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if offset
+            .checked_sub(window.offset)
+            .and_then(|at| usize::try_from(at).ok())
+            .and_then(|at| at.checked_add(len))
+            .is_some_and(|end| end <= window.bytes.len())
+        {
+            return Ok(());
+        }
+        if window.bytes.capacity() > capacity {
+            window.bytes = Vec::new();
+        }
+        window.bytes.clear();
+        window
+            .bytes
+            .try_reserve_exact(len)
+            .map_err(io::Error::other)?;
+        window.bytes.resize(len, 0);
+        if let Err(error) = self.read_exact_counted(&mut window.bytes, offset) {
+            window.bytes.clear();
+            return Err(error);
+        }
+        window.offset = offset;
+        self.check_work().map_err(io::Error::other)?;
+        Ok(())
     }
 
     pub(crate) fn read_window_unvalidated(&self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
@@ -885,6 +938,30 @@ mod tests {
             duration: crate::packet::TimeDelta::millis(1),
             keyframe: true,
         }
+    }
+
+    #[test]
+    fn indexed_block_prefetch_serves_headers_and_payload_without_rereads() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("block.bin");
+        let bytes = (0..100_000).map(|i| (i % 251) as u8).collect::<Vec<_>>();
+        fs::write(&path, &bytes).unwrap();
+        let source = MediaSource::open_packet_copy(&path).unwrap();
+        source.read_metadata_prefix(0, 12).unwrap();
+        source.prefetch_metadata_span(0, 32_000).unwrap();
+        let before = source.io_stats();
+        assert_eq!(
+            source.read_metadata_prefix(31_000, 12).unwrap(),
+            bytes[31_000..31_012]
+        );
+        assert_eq!(
+            source.read_window_unvalidated(12, 30_000).unwrap(),
+            bytes[12..30_012]
+        );
+        source.prefetch_metadata_span(100, 20_000).unwrap();
+        assert_eq!(source.io_stats(), before);
+        assert!(source.prefetch_metadata_span(90_000, 20_000).is_err());
+        source.validate_current().unwrap();
     }
 
     #[test]

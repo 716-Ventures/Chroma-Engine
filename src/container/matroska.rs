@@ -1,6 +1,8 @@
 mod ebml;
 mod file;
-pub(crate) use file::{MatroskaFileIndex, indexed_metadata_elements, indexed_subtitle_blocks};
+pub(crate) use file::{
+    MatroskaFileIndex, indexed_metadata_elements, visit_indexed_subtitle_blocks,
+};
 
 // Cues are sample indexes, not a small container hierarchy. Multi-language
 // subtitles routinely produce more than 100,000 nested cue elements. Bound

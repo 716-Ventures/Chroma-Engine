@@ -179,6 +179,12 @@ fn mp4_metadata(
         if size < header_len || size > len - offset {
             bail!("invalid MP4 box size");
         }
+        if &header[4..8] == b"moof" {
+            // Fragment samples are not represented by the traditional sample
+            // tables retained by this reader. Preserve the initialization
+            // metadata for probing, without a pointless walk of every fragment.
+            return Ok((output, compact));
+        }
         if &header[4..8] == b"moov"
             && size
                 > (policy
@@ -351,7 +357,7 @@ fn indexed_mkv_metadata_inner(
     let mut heads = vec![first];
     let mut references = Vec::new();
     let mut head_offsets = std::collections::HashSet::from([segment.payload]);
-    for head_index in 0..2 {
+    for head_index in 0..16 {
         let Some(head) = heads.get(head_index).copied() else {
             break;
         };
@@ -403,7 +409,7 @@ fn indexed_mkv_metadata_inner(
                     return Ok(None);
                 }
                 if id == 0x114d_9b74 {
-                    if !head_offsets.insert(absolute) || heads.len() >= 2 {
+                    if !head_offsets.insert(absolute) || heads.len() >= 16 {
                         return Ok(None);
                     }
                     let nested = element(file, absolute, segment.end)?;
@@ -552,6 +558,24 @@ mod tests {
         let fallback_reads = METADATA_READS.with(|counter| counter.get());
         assert_eq!(indexed, fallback);
         assert!(fallback_reads > 1000, "fallback reads: {fallback_reads}");
+    }
+
+    #[test]
+    fn fragmented_input_probe_stops_before_scanning_all_fragments() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut bytes = vec![
+            0, 0, 0, 16, b'f', b't', b'y', b'p', b'i', b's', b'o', b'm', 0, 0, 0, 0,
+        ];
+        bytes.extend_from_slice(&[0, 0, 0, 8, b'm', b'o', b'o', b'v']);
+        for _ in 0..1000 {
+            bytes.extend_from_slice(&[0, 0, 0, 8, b'm', b'o', b'o', b'f']);
+            bytes.extend_from_slice(&[0, 0, 0, 8, b'm', b'd', b'a', b't']);
+        }
+        std::fs::write(file.path(), bytes).unwrap();
+        METADATA_READS.with(|counter| counter.set(0));
+        let (_, metadata) = read_metadata(file.path()).unwrap();
+        assert_eq!(metadata.len(), 24);
+        assert!(METADATA_READS.with(|counter| counter.get()) < 10);
     }
 
     #[test]

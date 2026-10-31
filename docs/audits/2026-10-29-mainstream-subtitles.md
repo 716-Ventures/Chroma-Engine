@@ -45,7 +45,10 @@ or unsupported encoding chains fail the individual track.
 XML parsing disables DTDs and external entities, limits nodes/depth/style chains,
 and never evaluates content. Sidecar discovery is bounded, uses same-basename
 regular files, rejects symlinks, and publishes generated resource filenames.
-Text output, markup depth, cue counts and aggregate font/script bytes are bounded.
+Text output is limited to 32 MiB per script, font attachments to 16 MiB each
+and 128 attachments, and aggregate imported font/script resources to 128 MiB.
+Retained cue data also respects the configured index memory budget. Markup depth
+and per-track cue counts remain bounded.
 UTF-8 and BOM-marked UTF-16 are validated strictly; declared XML/SAMI charsets
 are honored. Legacy text can use Windows-1252, while WebVTT remains UTF-8 and
 SCC remains ASCII. Invalid individual sidecars do not discard valid tracks.

@@ -126,6 +126,8 @@ struct Publisher<'a> {
     archive: Rc<ArchiveBudget>,
     reserved: usize,
     reserved_files: usize,
+    cue_heap_bytes: usize,
+    path_heap_bytes: usize,
 }
 impl<'a> Publisher<'a> {
     fn new(output: &'a Path, id: String) -> Self {
@@ -148,6 +150,8 @@ impl<'a> Publisher<'a> {
             archive: Rc::new(ArchiveBudget::new(MAX_OUTPUT_BYTES)),
             reserved: 0,
             reserved_files: 0,
+            cue_heap_bytes: 0,
+            path_heap_bytes: 0,
         }
     }
     fn with_source(
@@ -171,14 +175,10 @@ impl<'a> Publisher<'a> {
                     .sum::<usize>()
         };
         self.document.cues.capacity() * std::mem::size_of::<BitmapCue>()
-            + self.document.cues.iter().map(cue_bytes).sum::<usize>()
+            + self.cue_heap_bytes
             + self.active.as_ref().map_or(0, cue_bytes)
             + self.created.capacity() * std::mem::size_of::<PathBuf>()
-            + self
-                .created
-                .iter()
-                .map(|path| path.as_os_str().len())
-                .sum::<usize>()
+            + self.path_heap_bytes
     }
     fn push(&mut self, display: DisplaySet) -> Result<()> {
         checked_rgba_len(display.canvas_width, display.canvas_height)?;
@@ -251,6 +251,7 @@ impl<'a> Publisher<'a> {
             let existed = path.exists();
             publish_bytes(&path, &bytes)?;
             if !existed {
+                self.path_heap_bytes = self.path_heap_bytes.saturating_add(path.as_os_str().len());
                 self.created.push(path);
             }
             images.push(BitmapImage {
@@ -276,6 +277,14 @@ impl<'a> Publisher<'a> {
                 bail!("Bitmap cue count limit exceeded");
             }
             cue.end_ms = end;
+            self.cue_heap_bytes = self.cue_heap_bytes.saturating_add(
+                cue.images.capacity() * std::mem::size_of::<BitmapImage>()
+                    + cue
+                        .images
+                        .iter()
+                        .map(|image| image.file_name.capacity())
+                        .sum::<usize>(),
+            );
             self.document.cues.push(cue);
         }
         Ok(())
@@ -303,6 +312,7 @@ impl<'a> Publisher<'a> {
         let existed = path.exists();
         publish_bytes(&path, &bytes)?;
         if !existed {
+            self.path_heap_bytes = self.path_heap_bytes.saturating_add(path.as_os_str().len());
             self.created.push(path);
         }
         self.complete = true;
@@ -454,7 +464,44 @@ pub(super) fn append(
                 .collect::<Vec<_>>();
             scan_matroska(
                 source,
-                |number, time, duration, bytes| {
+                |input| {
+                    let Some((number, time, duration, bytes)) = input else {
+                        // An invalid late cue must not retain partial PNGs,
+                        // decoder state, cue indexes or archive reservations.
+                        for state in &mut states {
+                            state.publisher = None;
+                            let decoder = (|| -> Result<Decoder> {
+                                let mut restored = state.track.clone();
+                                restored.codec_private = state
+                                    .track
+                                    .codec_private
+                                    .as_deref()
+                                    .map(|private| {
+                                        state.compression.decode(private, 2, MAX_ENCODED_BYTES)
+                                    })
+                                    .transpose()?;
+                                Decoder::new(&restored)
+                            })();
+                            match decoder {
+                                Ok(decoder) => {
+                                    state.decoder = Some(decoder);
+                                    state.error = None;
+                                }
+                                Err(error) => {
+                                    state.decoder = None;
+                                    state.error = Some(error.to_string());
+                                }
+                            }
+                            state.input_bytes = 0;
+                            state.publisher = Some(Publisher::with_source(
+                                output,
+                                state.id.clone(),
+                                source,
+                                Rc::clone(&archive),
+                            ));
+                        }
+                        return Ok(());
+                    };
                     if let Some(index) = states
                         .iter()
                         .position(|state| state.track.number == number && state.error.is_none())
@@ -581,7 +628,7 @@ pub(super) fn append(
 
 fn scan_matroska(
     source: &MediaSource,
-    mut consume: impl FnMut(u64, u64, Option<u64>, &[u8]) -> Result<()>,
+    mut consume: impl FnMut(Option<(u64, u64, Option<u64>, &[u8])>) -> Result<()>,
     selected: &[u64],
 ) -> Result<()> {
     let mut visits = 0usize;
@@ -622,7 +669,10 @@ fn scan_matroska(
     if scale == 0 {
         bail!("Invalid Matroska bitmap subtitle clock");
     }
-    let mut process_child = |clock: u64, child: Element, visits: &mut usize| -> Result<()> {
+    let mut process_child = |input: Option<(u64, Element)>, visits: &mut usize| -> Result<()> {
+        let Some((clock, child)) = input else {
+            return consume(None);
+        };
         let (mut block, mut duration) = (None, None);
         if child.id == 0xa3 {
             block = Some(child);
@@ -670,24 +720,23 @@ fn scan_matroska(
                 }
                 let bytes = source
                     .read_window_unvalidated(block.payload + (track_len + 3) as u64, payload_len)?;
-                consume(number, time, duration, &bytes)?;
+                consume(Some((number, time, duration, &bytes)))?;
             }
         }
         Ok(())
     };
-    if let Some(blocks) =
-        crate::container::matroska::indexed_subtitle_blocks(source, segment, scale, selected)?
-    {
-        if std::env::var_os("CHROMA_PROBE_DIAGNOSTICS").is_some() {
-            eprintln!(
-                "subtitle_cue_read indexed=true bitmap=true blocks={}",
-                blocks.len()
-            );
-        }
-        for (clock, child) in blocks {
-            process_child(clock, child, &mut visits)?;
-        }
-    } else {
+    let indexed = crate::container::matroska::visit_indexed_subtitle_blocks(
+        source,
+        segment,
+        scale,
+        selected,
+        |clock, child| process_child(Some((clock, child)), &mut visits),
+    )?;
+    if std::env::var_os("CHROMA_PROBE_DIAGNOSTICS").is_some() {
+        eprintln!("subtitle_cue_read indexed={indexed} bitmap=true single_pass=true");
+    }
+    if !indexed {
+        process_child(None, &mut visits)?;
         offset = segment.payload;
         while offset < segment.end {
             visit(source, &mut visits)?;
@@ -709,7 +758,7 @@ fn scan_matroska(
                 while child_offset < cluster.end {
                     visit(source, &mut visits)?;
                     let child = source.element_at(child_offset, cluster.end)?;
-                    process_child(clock, child, &mut visits)?;
+                    process_child(Some((clock, child)), &mut visits)?;
                     child_offset = child.end;
                 }
             }
@@ -1247,6 +1296,113 @@ mod tests {
         data.extend(packet);
         element(0xa3, &data)
     }
+    #[test]
+    fn late_invalid_bitmap_cue_discards_partial_decoder_and_published_images() {
+        fn fixture(invalid: bool) -> Vec<u8> {
+            let track = element(
+                0xae,
+                &[
+                    element(0xd7, &[1]),
+                    element(0x83, &[17]),
+                    element(0x86, b"S_HDMV/PGS"),
+                ]
+                .concat(),
+            );
+            let tracks = element(0x1654ae6b, &track);
+            let info = element(0x1549a966, &[]);
+            let head = |position: u64| {
+                element(
+                    0x114d9b74,
+                    &element(
+                        0x4dbb,
+                        &[
+                            element(0x53ab, &0x1c53bb6bu32.to_be_bytes()),
+                            element(0x53ac, &position.to_be_bytes()),
+                        ]
+                        .concat(),
+                    ),
+                )
+            };
+            let cluster_pos = head(0).len() + info.len() + tracks.len();
+            let mut cluster = element(0xe7, &[0]);
+            let mut cues = Vec::new();
+            for (index, (time, visible)) in
+                [(1000i16, true), (2000, false), (3000, true), (4000, false)]
+                    .into_iter()
+                    .enumerate()
+            {
+                let relative = if invalid && index == 3 {
+                    u64::MAX
+                } else {
+                    cluster.len() as u64
+                };
+                let mut packet = block(1, time, &pgs_display(visible));
+                // SimpleBlock random-access flag, independent subtitle packet.
+                let e = crate::source::probe_reader::element_from_header(
+                    &packet,
+                    0,
+                    packet.len() as u64,
+                )
+                .unwrap();
+                packet[e.payload as usize + 3] = 0x80;
+                cluster.extend(packet);
+                cues.extend(element(
+                    0xbb,
+                    &[
+                        element(0xb3, &(time as u64).to_be_bytes()),
+                        element(
+                            0xb7,
+                            &[
+                                element(0xf7, &[1]),
+                                element(0xf1, &(cluster_pos as u64).to_be_bytes()),
+                                element(0xf0, &relative.to_be_bytes()),
+                            ]
+                            .concat(),
+                        ),
+                    ]
+                    .concat(),
+                ));
+            }
+            let cluster = element(0x1f43b675, &cluster);
+            let cues_pos = cluster_pos + cluster.len();
+            [
+                element(0x1a45dfa3, &element(0x4282, b"matroska")),
+                element(
+                    0x18538067,
+                    &[
+                        head(cues_pos as u64),
+                        info,
+                        tracks,
+                        cluster,
+                        element(0x1c53bb6b, &cues),
+                    ]
+                    .concat(),
+                ),
+            ]
+            .concat()
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let mut outputs = Vec::new();
+        for invalid in [false, true] {
+            let input = directory.path().join(format!("{invalid}.mkv"));
+            let output = directory.path().join(format!("{invalid}"));
+            std::fs::write(&input, fixture(invalid)).unwrap();
+            let resources = super::super::write_subtitle_resources(&input, &output).unwrap();
+            assert!(resources.unavailable_tracks.is_empty());
+            assert_eq!(resources.tracks.len(), 1);
+            let mut files = std::fs::read_dir(output)
+                .unwrap()
+                .map(|entry| {
+                    let entry = entry.unwrap();
+                    (entry.file_name(), std::fs::read(entry.path()).unwrap())
+                })
+                .collect::<Vec<_>>();
+            files.sort_by(|left, right| left.0.cmp(&right.0));
+            outputs.push(files);
+        }
+        assert_eq!(outputs[0], outputs[1]);
+    }
+
     #[test]
     fn embedded_pgs_needs_no_block_duration_and_keeps_distinct_track_ids() {
         for compressed in [false, true] {
