@@ -65,57 +65,74 @@ fn validate_trafs(
 
     let mut sample_count = 0_usize;
     let mut payload_bytes = 0_usize;
-    let mut previous_data_end = mdat_payload_start;
+    let mut ranges = Vec::new();
     for traf in &trafs {
         let tfdt = child_box_payload(traf, b"tfdt")
             .ok_or_else(|| anyhow::anyhow!("fMP4 media fragment traf is missing tfdt"))?;
         let base_decode_time = tfdt_base_decode_time(tfdt)
             .ok_or_else(|| anyhow::anyhow!("fMP4 media fragment has malformed tfdt"))?;
-        let trun = child_box_payload(traf, b"trun")
-            .ok_or_else(|| anyhow::anyhow!("fMP4 media fragment traf is missing trun"))?;
-        let inspected = inspect_trun(trun)
-            .ok_or_else(|| anyhow::anyhow!("fMP4 media fragment has malformed trun"))?;
-        if inspected.samples.is_empty() {
-            bail!("fMP4 media fragment trun must contain at least one sample");
+        let truns = child_box_payloads(traf, b"trun");
+        if truns.is_empty() {
+            bail!("fMP4 media fragment traf is missing trun");
         }
-        if inspected.samples[0].flags & 0x0100_0000 != 0 {
-            bail!("fMP4 media fragment track starts with a non-sync sample");
+        let mut decode_time = base_decode_time;
+        for (run_index, trun) in truns.iter().enumerate() {
+            let inspected = inspect_trun(trun)
+                .ok_or_else(|| anyhow::anyhow!("fMP4 media fragment has malformed trun"))?;
+            if inspected.samples.is_empty() {
+                bail!("fMP4 media fragment trun must contain at least one sample");
+            }
+            if run_index == 0 && inspected.samples[0].flags & 0x0100_0000 != 0 {
+                bail!("fMP4 media fragment track starts with a non-sync sample");
+            }
+            let data_offset = usize::try_from(inspected.data_offset).map_err(|_| {
+                anyhow::anyhow!("fMP4 media fragment has negative trun data offset")
+            })?;
+            let (track_payload_bytes, next_decode_time) = inspected.samples.iter().try_fold(
+                (0_usize, decode_time),
+                |(sum, decode_time), sample| {
+                    if sample.duration == 0 {
+                        bail!("fMP4 media fragment contains a zero-duration sample");
+                    }
+                    if sample.size == 0 {
+                        bail!("fMP4 media fragment contains a zero-size sample");
+                    }
+                    if sample.composition_time_offset < 0 {
+                        bail!("fMP4 media fragment contains a negative composition offset");
+                    }
+                    let next_decode_time = decode_time
+                        .checked_add(u64::from(sample.duration))
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("fMP4 media fragment decode time overflowed")
+                        })?;
+                    let next_sum = sum.checked_add(sample.size as usize).ok_or_else(|| {
+                        anyhow::anyhow!("fMP4 media fragment sample bytes overflowed")
+                    })?;
+                    Ok::<_, anyhow::Error>((next_sum, next_decode_time))
+                },
+            )?;
+            let data_end = data_offset
+                .checked_add(track_payload_bytes)
+                .ok_or_else(|| anyhow::anyhow!("fMP4 media fragment data offset overflowed"))?;
+            if data_offset < mdat_payload_start || data_end > mdat_payload_end {
+                bail!("fMP4 media fragment trun data offset points outside mdat payload");
+            }
+            ranges.push((data_offset, data_end));
+            decode_time = next_decode_time;
+            sample_count = sample_count.saturating_add(inspected.samples.len());
+            payload_bytes = payload_bytes.saturating_add(track_payload_bytes);
         }
-        let data_offset = usize::try_from(inspected.data_offset)
-            .map_err(|_| anyhow::anyhow!("fMP4 media fragment has negative trun data offset"))?;
-        let (track_payload_bytes, _) = inspected.samples.iter().try_fold(
-            (0_usize, base_decode_time),
-            |(sum, decode_time), sample| {
-                if sample.duration == 0 {
-                    bail!("fMP4 media fragment contains a zero-duration sample");
-                }
-                if sample.size == 0 {
-                    bail!("fMP4 media fragment contains a zero-size sample");
-                }
-                if sample.composition_time_offset < 0 {
-                    bail!("fMP4 media fragment contains a negative composition offset");
-                }
-                let next_decode_time = decode_time
-                    .checked_add(u64::from(sample.duration))
-                    .ok_or_else(|| anyhow::anyhow!("fMP4 media fragment decode time overflowed"))?;
-                let next_sum = sum.checked_add(sample.size as usize).ok_or_else(|| {
-                    anyhow::anyhow!("fMP4 media fragment sample bytes overflowed")
-                })?;
-                Ok::<_, anyhow::Error>((next_sum, next_decode_time))
-            },
-        )?;
-        let data_end = data_offset
-            .checked_add(track_payload_bytes)
-            .ok_or_else(|| anyhow::anyhow!("fMP4 media fragment data offset overflowed"))?;
-        if data_offset < mdat_payload_start || data_end > mdat_payload_end {
-            bail!("fMP4 media fragment trun data offset points outside mdat payload");
+    }
+    ranges.sort_unstable();
+    let mut previous_end = mdat_payload_start;
+    for (start, end) in ranges {
+        if start != previous_end {
+            bail!("fMP4 media fragment payload ranges overlap or contain gaps");
         }
-        if data_offset < previous_data_end {
-            bail!("fMP4 media fragment track payload ranges overlap or move backwards");
-        }
-        previous_data_end = data_end;
-        sample_count = sample_count.saturating_add(inspected.samples.len());
-        payload_bytes = payload_bytes.saturating_add(track_payload_bytes);
+        previous_end = end;
+    }
+    if previous_end != mdat_payload_end {
+        bail!("fMP4 media fragment has unreferenced payload bytes");
     }
 
     Ok(Fmp4MediaValidation {

@@ -31,7 +31,7 @@ use crate::{
     error::EngineErrorCode,
     fmp4::{
         Fmp4FragmentTrack, Fmp4SampleEntry, Fmp4Track, Fmp4TrackKind, decode_time_for_timescale,
-        init_segment, media_fragment, samples_from_packets_with_timescale,
+        init_segment, interleaved_media_fragment, samples_from_packets_with_timescale,
     },
     output::publish_bytes,
     packet::{ChunkPlan, PacketRef},
@@ -2392,7 +2392,7 @@ fn mux_fmp4_segment(
 
     let video_payload = raw_packet_payload(bytes, &video_packets)?;
     let audio_payload = raw_packet_payload(bytes, &audio_packets)?;
-    Ok(media_fragment(
+    Ok(interleaved_media_fragment(
         window.index as u32 + 1,
         &[
             Fmp4FragmentTrack {
@@ -2420,6 +2420,7 @@ fn mux_fmp4_segment(
                 payload: audio_payload,
             },
         ],
+        &[tracks.video.timescale, tracks.audio.timescale],
     )?)
 }
 

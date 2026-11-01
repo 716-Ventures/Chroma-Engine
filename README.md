@@ -260,3 +260,13 @@ licenses; see [third-party notices](THIRD_PARTY_NOTICES.md), the
 [generated dependency licenses](THIRD_PARTY_LICENSES.md), and the license files
 in `third_party/`. Software licensing does not establish codec patent clearance;
 see the [codec redistribution notes](THIRD_PARTY_NOTICES.md#codec-patents-and-redistribution).
+
+Fragmented MP4 HLS uses 250ms decode-time runs to interleave selected audio and
+video within each `mdat`, with explicit per-run `trun` offsets. This avoids
+requiring a TV to download or allocate an entire high-bitrate video GOP before
+receiving audio. The streamed native-transcode path writes borrowed payload
+ranges directly and keeps its output-byte guard. Fragment validation checks all
+runs, cumulative track decode times and globally non-overlapping, gap-free data
+ranges; only the first run of each track must begin at a sync sample. Encoded
+samples and their timestamps are preserved. Regression coverage includes payload
+preservation, later-run corruption and equality of buffered/streamed output.

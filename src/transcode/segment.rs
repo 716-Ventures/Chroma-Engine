@@ -1301,6 +1301,7 @@ fn transcode_prepared_segment(
     let media = crate::fmp4::OwnedMediaFragment::new(
         index.saturating_add(1),
         vec![video_segment.fragment, audio_segment.fragment],
+        &[tracks[0].timescale, tracks[1].timescale],
         source.policy().output_bytes,
     )?;
 
