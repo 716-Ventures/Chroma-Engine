@@ -285,3 +285,5 @@ mod tests {
         assert_eq!(frame.duration_ms(), 21);
     }
 }
+
+pub(crate) use video_encode::{build_avc_decoder_config, build_hevc_decoder_config};

@@ -39,6 +39,19 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Copy AVC/HEVC and AAC from one live MPEG-TS segment into native fMP4.
+    LiveTsFmp4 {
+        input: PathBuf,
+        output_dir: PathBuf,
+        #[arg(long)]
+        width: u16,
+        #[arg(long)]
+        height: u16,
+        #[arg(long)]
+        hevc: bool,
+        #[arg(long)]
+        clock_epoch: u64,
+    },
     /// Check cache filesystem support before starting media workers.
     CacheProbe { directory: PathBuf },
     /// Emit native Chroma media probe JSON.
@@ -474,6 +487,25 @@ pub fn run() -> Result<()> {
 
     let cli = Cli::parse();
     match cli.command {
+        Command::LiveTsFmp4 {
+            input,
+            output_dir,
+            width,
+            height,
+            hevc,
+            clock_epoch,
+        } => {
+            let metadata = std::fs::metadata(&input)?;
+            anyhow::ensure!(
+                metadata.len() <= 32 * 1024 * 1024,
+                "live TS input exceeds limit"
+            );
+            let bytes = std::fs::read(input)?;
+            let (init, fragment) = crate::live_ts::remux(&bytes, width, height, hevc, clock_epoch)?;
+            std::fs::create_dir_all(&output_dir)?;
+            crate::output::publish_bytes(&output_dir.join("init.mp4"), &init)?;
+            crate::output::publish_bytes(&output_dir.join("segment.m4s"), &fragment)?;
+        }
         Command::CacheProbe { directory } => {
             crate::validate_cache_directory(&directory)?;
             println!(

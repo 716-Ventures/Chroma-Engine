@@ -18,6 +18,7 @@ pub(crate) mod fmp4;
 #[cfg(feature = "fuzzing")]
 pub mod fuzzing;
 pub(crate) mod hls;
+pub(crate) mod live_ts;
 pub(crate) mod output;
 pub(crate) mod packet;
 pub(crate) mod pipeline;

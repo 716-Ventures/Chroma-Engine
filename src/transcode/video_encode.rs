@@ -1596,7 +1596,10 @@ unsafe fn hevc_decoder_config_from_objc2_format(
     build_hevc_decoder_config(&parameter_sets, nal_length)
 }
 
-fn build_avc_decoder_config(parameter_sets: &[Vec<u8>], nal_length_size: i32) -> Option<Vec<u8>> {
+pub(crate) fn build_avc_decoder_config(
+    parameter_sets: &[Vec<u8>],
+    nal_length_size: i32,
+) -> Option<Vec<u8>> {
     let mut sps = Vec::new();
     let mut pps = Vec::new();
     for set in parameter_sets {
@@ -1633,13 +1636,10 @@ fn build_avc_decoder_config(parameter_sets: &[Vec<u8>], nal_length_size: i32) ->
     Some(out)
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(target_os = "linux", feature = "linux-vaapi"),
-    all(target_os = "linux", feature = "linux-nvidia"),
-    target_os = "windows"
-))]
-fn build_hevc_decoder_config(parameter_sets: &[Vec<u8>], nal_length_size: i32) -> Option<Vec<u8>> {
+pub(crate) fn build_hevc_decoder_config(
+    parameter_sets: &[Vec<u8>],
+    nal_length_size: i32,
+) -> Option<Vec<u8>> {
     let mut arrays: Vec<(u8, Vec<&[u8]>)> = Vec::new();
     let mut sps = None;
     for set in parameter_sets {
