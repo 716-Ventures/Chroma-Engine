@@ -748,6 +748,7 @@ struct PreparedVideoTrack {
     frame_rate: Option<f64>,
     hdr: bool,
     source_sample_entry: Option<crate::container::mp4::Mp4SourceVideoSampleEntry>,
+    dolby_vision_config: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone)]
@@ -1118,8 +1119,10 @@ impl From<&MatroskaTrack> for PreparedVideoTrack {
             width: track.width.unwrap_or(1_920),
             height: track.height.unwrap_or(1_080),
             frame_rate,
-            hdr: matches!(track.transfer_characteristics, Some(16 | 18)),
+            hdr: track.dolby_vision_config.is_some()
+                || matches!(track.transfer_characteristics, Some(16 | 18)),
             source_sample_entry: None,
+            dolby_vision_config: track.dolby_vision_config.clone(),
         }
     }
 }
@@ -1138,6 +1141,7 @@ impl From<&Mp4Track> for PreparedVideoTrack {
                     | crate::container::mp4::Mp4DynamicRange::Hlg
             ),
             source_sample_entry: None,
+            dolby_vision_config: None,
         }
     }
 }
@@ -1579,11 +1583,12 @@ fn native_video_sample_entry(
             width: track.width.min(u32::from(u16::MAX)) as u16,
             height: track.height.min(u32::from(u16::MAX)) as u16,
         }),
-        "hevc" => Ok(Fmp4SampleEntry::Hevc {
+        "hevc" => crate::fmp4::matroska_hevc_entry(
             codec_config,
-            width: track.width.min(u32::from(u16::MAX)) as u16,
-            height: track.height.min(u32::from(u16::MAX)) as u16,
-        }),
+            track.width.min(u32::from(u16::MAX)) as u16,
+            track.height.min(u32::from(u16::MAX)) as u16,
+            track.dolby_vision_config.as_deref(),
+        ),
         other => bail!("selected video track codec {other} is not supported by fMP4 packet-copy"),
     }
 }
@@ -2755,6 +2760,7 @@ mod tests {
             object_audio_candidate: false,
             default_duration_ns: None,
             codec_private: None,
+            dolby_vision_config: None,
         }
     }
 }
@@ -2770,6 +2776,7 @@ fn failed_pipeline_is_recreated_before_retrying_next_segment() {
             frame_rate: Some(24.0),
             hdr: false,
             source_sample_entry: None,
+            dolby_vision_config: None,
         },
         audio_track: PreparedAudioTrack {
             codec: "aac".into(),

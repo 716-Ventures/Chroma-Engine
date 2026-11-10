@@ -561,6 +561,7 @@ mod tests {
                         object_audio_candidate: false,
                         default_duration_ns: None,
                         codec_private: None,
+                        dolby_vision_config: None,
                     },
                     matroska::MatroskaTrack {
                         index: 4,
@@ -581,6 +582,7 @@ mod tests {
                         object_audio_candidate: true,
                         default_duration_ns: None,
                         codec_private: None,
+                        dolby_vision_config: None,
                     },
                 ],
                 chapters: vec![matroska::MatroskaChapter {

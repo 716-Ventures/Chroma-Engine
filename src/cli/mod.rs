@@ -108,6 +108,9 @@ enum Command {
         /// Prepare HLS metadata without a global Matroska audio packet index.
         #[arg(long)]
         streaming_index: bool,
+        /// Read only Matroska track headers; omit packet plans (metadata upgrades).
+        #[arg(long, conflicts_with = "streaming_index")]
+        metadata_only: bool,
         #[arg(long, default_value_t = 4_000)]
         target_ms: u64,
         #[arg(long, default_value_t = true)]
@@ -590,12 +593,27 @@ pub fn run() -> Result<()> {
         Command::Manifest {
             file,
             streaming_index,
+            metadata_only,
             target_ms,
             include_audio,
         } => {
             let source = MappedMediaFile::open_packet_copy(&file)?;
             let bytes = &source;
-            let manifest = if looks_like_mp4(bytes.as_ref()) {
+            let mut manifest = if metadata_only {
+                anyhow::ensure!(
+                    looks_like_ebml(bytes.as_ref()),
+                    "metadata-only requires Matroska"
+                );
+                crate::playback_manifest::build_matroska_playback_manifest(
+                    bytes.as_ref(),
+                    &file,
+                    MatroskaManifestOptions {
+                        chunk_target_ms: target_ms,
+                        include_audio,
+                    },
+                )
+                .context("could not read Matroska track headers")
+            } else if looks_like_mp4(bytes.as_ref()) {
                 build_file_mp4_playback_manifest(
                     bytes,
                     &file,
@@ -621,6 +639,11 @@ pub fn run() -> Result<()> {
                 bail!("unsupported source container for native playback manifest")
             }
             .context("could not build native playback manifest")?;
+            if metadata_only {
+                for track in &mut manifest.tracks {
+                    track.chunks.clear();
+                }
+            }
             if std::env::var_os("CHROMA_PROBE_DIAGNOSTICS").is_some() {
                 let (bytes, operations, clusters) = source.io_stats();
                 eprintln!(

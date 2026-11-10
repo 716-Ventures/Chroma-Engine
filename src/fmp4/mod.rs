@@ -919,6 +919,46 @@ fn write_hevc_sample_entry(out: &mut Vec<u8>, width: u16, height: u16, codec_con
     });
 }
 
+/// Reuse the HEVC packet-copy sample entry while preserving Matroska's Dolby
+/// decoder record. No video samples are decoded or rewritten.
+pub(crate) fn matroska_hevc_entry(
+    codec_config: Vec<u8>,
+    width: u16,
+    height: u16,
+    dolby: Option<&[u8]>,
+) -> Result<Fmp4SampleEntry> {
+    let Some(dolby) = dolby else {
+        return Ok(Fmp4SampleEntry::Hevc {
+            codec_config,
+            width,
+            height,
+        });
+    };
+    if !crate::container::matroska::valid_dolby_config(dolby) {
+        bail!("invalid Matroska Dolby Vision decoder configuration");
+    }
+    let mut entry = Vec::new();
+    write_hevc_sample_entry(&mut entry, width, height, &codec_config);
+    let mut payload = entry.split_off(8);
+    write_box(
+        &mut payload,
+        if dolby[2] >> 1 > 7 {
+            *b"dvvC"
+        } else {
+            *b"dvcC"
+        },
+        |out| out.extend_from_slice(dolby),
+    );
+    Ok(Fmp4SampleEntry::SourceHevc {
+        source: Mp4SourceVideoSampleEntry {
+            codec_fourcc: *b"dvh1",
+            payload,
+        },
+        width,
+        height,
+    })
+}
+
 fn write_pasp(out: &mut Vec<u8>, h_spacing: u32, v_spacing: u32) {
     write_box(out, *b"pasp", |out| {
         be_u32(out, h_spacing.max(1));

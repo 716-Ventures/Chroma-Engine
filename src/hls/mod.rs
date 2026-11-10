@@ -1367,14 +1367,15 @@ fn hls_tracks_from_matroska(
             width: clamped_u16(video.width.unwrap_or(0)),
             height: clamped_u16(video.height.unwrap_or(0)),
         }),
-        "hevc" => Some(Fmp4SampleEntry::Hevc {
-            codec_config: video
+        "hevc" => Some(crate::fmp4::matroska_hevc_entry(
+            video
                 .codec_private
                 .clone()
                 .ok_or_else(|| anyhow!("missing Matroska hvcC private data"))?,
-            width: clamped_u16(video.width.unwrap_or(0)),
-            height: clamped_u16(video.height.unwrap_or(0)),
-        }),
+            clamped_u16(video.width.unwrap_or(0)),
+            clamped_u16(video.height.unwrap_or(0)),
+            video.dolby_vision_config.as_deref(),
+        )?),
         _ => None,
     };
     let audio_payload = match audio.codec.as_str() {
@@ -1530,14 +1531,15 @@ fn matroska_video_fmp4_sample_entry(
             width: clamped_u16(track.width.unwrap_or(0)),
             height: clamped_u16(track.height.unwrap_or(0)),
         })),
-        "hevc" => Ok(Some(Fmp4SampleEntry::Hevc {
-            codec_config: track
+        "hevc" => Ok(Some(crate::fmp4::matroska_hevc_entry(
+            track
                 .codec_private
                 .clone()
                 .ok_or_else(|| anyhow!("missing Matroska hvcC private data"))?,
-            width: clamped_u16(track.width.unwrap_or(0)),
-            height: clamped_u16(track.height.unwrap_or(0)),
-        })),
+            clamped_u16(track.width.unwrap_or(0)),
+            clamped_u16(track.height.unwrap_or(0)),
+            track.dolby_vision_config.as_deref(),
+        )?)),
         _ => Ok(None),
     }
 }
@@ -3171,6 +3173,7 @@ mod tests {
                 object_audio_candidate: false,
                 default_duration_ns: None,
                 codec_private: None,
+                dolby_vision_config: None,
             },
             matroska::MatroskaTrack {
                 index: 1,
@@ -3191,6 +3194,7 @@ mod tests {
                 object_audio_candidate: true,
                 default_duration_ns: None,
                 codec_private: None,
+                dolby_vision_config: None,
             },
         ];
 
@@ -3227,6 +3231,7 @@ mod tests {
                 object_audio_candidate: true,
                 default_duration_ns: None,
                 codec_private: None,
+                dolby_vision_config: None,
             },
             matroska::MatroskaTrack {
                 index: 1,
@@ -3247,6 +3252,7 @@ mod tests {
                 object_audio_candidate: false,
                 default_duration_ns: None,
                 codec_private: None,
+                dolby_vision_config: None,
             },
         ];
 

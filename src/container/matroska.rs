@@ -119,6 +119,8 @@ pub struct MatroskaTrack {
     pub object_audio_candidate: bool,
     pub default_duration_ns: Option<u64>,
     pub codec_private: Option<Vec<u8>>,
+    /// Dolby decoder configuration from BlockAdditionMapping, never inferred from bit depth.
+    pub dolby_vision_config: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -854,6 +856,7 @@ fn parse_track_entry(payload: &[u8], index: u32) -> Option<MatroskaTrack> {
     let mut sample_rate = None;
     let mut default_duration_ns = None;
     let mut codec_private = None;
+    let mut dolby_vision_config = None;
 
     for child in ElementIter::new(payload) {
         match child.id {
@@ -861,6 +864,22 @@ fn parse_track_entry(payload: &[u8], index: u32) -> Option<MatroskaTrack> {
             0x83 => kind = track_type(read_uint(child.payload).unwrap_or_default()),
             0x86 => codec_id = read_string(child.payload),
             0x63a2 => codec_private = Some(child.payload.to_vec()),
+            0x41e4 => {
+                let mut kind = None;
+                let mut data = None;
+                for field in ElementIter::new(child.payload) {
+                    match field.id {
+                        0x41e7 => kind = read_uint(field.payload),
+                        0x41ed => data = Some(field.payload),
+                        _ => {}
+                    }
+                }
+                if matches!(kind, Some(0x6476_6343 | 0x6476_7643))
+                    && let Some(data) = data.filter(|data| valid_dolby_config(data))
+                {
+                    dolby_vision_config = Some(data.to_vec());
+                }
+            }
             0x0022_b59c | 0x0022_b59d => language = read_string(child.payload),
             0x536e => name = read_string(child.payload),
             0x88 => default = read_uint(child.payload).unwrap_or(0) != 0,
@@ -885,6 +904,7 @@ fn parse_track_entry(payload: &[u8], index: u32) -> Option<MatroskaTrack> {
     let pixel_format = (kind == MatroskaTrackKind::Video)
         .then(|| video_pixel_format_from_codec_private(&codec, codec_private.as_deref()))
         .flatten();
+    let dolby_vision_config = (codec == "hevc").then_some(dolby_vision_config).flatten();
     let audio_features = matroska_audio_features(&codec);
     Some(MatroskaTrack {
         index,
@@ -905,7 +925,32 @@ fn parse_track_entry(payload: &[u8], index: u32) -> Option<MatroskaTrack> {
         object_audio_candidate: audio_features.object_audio_candidate,
         default_duration_ns,
         codec_private,
+        dolby_vision_config,
     })
+}
+
+/// DOVIDecoderConfigurationRecord: bounded version-one HEVC configuration with
+/// an RPU and base layer. Unsupported/malformed mappings must not become HDR tags.
+pub(crate) fn valid_dolby_config(data: &[u8]) -> bool {
+    data.len() == 24
+        && data[0] == 1
+        && data[1] == 0
+        && matches!(data[2] >> 1, 4 | 5 | 7 | 8)
+        && (((data[2] & 1) << 5) | (data[3] >> 3)) > 0
+        && data[3] & 5 == 5
+}
+
+impl MatroskaTrack {
+    pub(crate) fn video_range(&self) -> Option<&'static str> {
+        crate::container::mp4::video_range_from_transfer(self.transfer_characteristics).or_else(
+            || {
+                self.dolby_vision_config
+                    .as_ref()
+                    .filter(|data| data[2] >> 1 == 5)
+                    .map(|_| "PQ")
+            },
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1842,6 +1887,114 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn dolby_mapping_survives_probe_manifest_and_fmp4_init() {
+        for (profile, transfer, expected_range) in
+            [(5, None, Some("PQ")), (8, Some(16), Some("PQ"))]
+        {
+            let mut config = vec![0; 24];
+            config[0] = 1;
+            config[2] = profile << 1;
+            config[3] = (6 << 3) | 5;
+            let mapping = elem(
+                0x41e4,
+                &[
+                    elem(0x41ed, &config), // Field order is not significant.
+                    elem(0x41e7, if profile == 5 { b"dvcC" } else { b"dvvC" }),
+                ]
+                .concat(),
+            );
+            let mut hvcc = vec![0; 23];
+            hvcc[0] = 1;
+            hvcc[1] = 2;
+            hvcc[12] = 150;
+            hvcc[21] = 3;
+            let mut video = vec![elem(0xb0, &[32]), elem(0xba, &[32])];
+            if let Some(transfer) = transfer {
+                video.push(elem(0x55b0, &elem(0x55ba, &[transfer])));
+            }
+            let entry = track_entry(
+                1,
+                1,
+                "V_MPEGH/ISO/HEVC",
+                &[elem(0x63a2, &hvcc), elem(0xe0, &video.concat()), mapping],
+            );
+            let bytes = [
+                elem(0x1a45_dfa3, &[]),
+                elem(
+                    0x1853_8067,
+                    &[
+                        elem(0x1549_a966, &elem(0x4489, &1000_f64.to_be_bytes())),
+                        elem(0x1654_ae6b, &entry),
+                    ]
+                    .concat(),
+                ),
+            ]
+            .concat();
+            let manifest = crate::playback_manifest::build_matroska_playback_manifest(
+                &bytes,
+                std::path::Path::new("fixture.mkv"),
+                crate::MatroskaManifestOptions::default(),
+            )
+            .unwrap();
+            assert_eq!(
+                manifest.tracks[0].codec_string.as_deref(),
+                Some(format!("dvh1.{profile:02}.06").as_str())
+            );
+            assert_eq!(
+                manifest.tracks[0].dolby_vision_config.as_ref(),
+                Some(&config)
+            );
+            let meta = parse_basic_metadata(&bytes);
+            let track = &meta.tracks[0];
+            assert_eq!(track.dolby_vision_config.as_ref(), Some(&config));
+            assert_eq!(track.video_range(), expected_range);
+            let source =
+                crate::fmp4::matroska_hevc_entry(hvcc.clone(), 32, 32, Some(&config)).unwrap();
+            let crate::fmp4::Fmp4SampleEntry::SourceHevc { source, .. } = source else {
+                panic!("missing Dolby sample entry")
+            };
+            assert_eq!(&source.codec_fourcc, b"dvh1");
+            // Profile 8 needs explicit colr/VUI; never invent HDR from its profile.
+            assert_eq!(
+                source.video_range(),
+                if profile == 5 { Some("PQ") } else { None }
+            );
+            assert!(source.payload.windows(24).any(|bytes| bytes == config));
+            assert!(
+                source
+                    .payload
+                    .windows(hvcc.len())
+                    .any(|bytes| bytes == hvcc)
+            );
+            let probe_file = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(probe_file.path(), &bytes).unwrap();
+            let probe = crate::probe::probe_media_source(probe_file.path()).unwrap();
+            assert_eq!(
+                probe.tracks[0].video.as_ref().unwrap().dynamic_range,
+                crate::probe::DynamicRange::DolbyVision
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_or_non_hevc_dolby_mappings_do_not_label_video_as_dolby() {
+        for data in [vec![], vec![0; 24], vec![1, 0, 10, 53], vec![1; 1024]] {
+            assert!(!valid_dolby_config(&data));
+            assert!(crate::fmp4::matroska_hevc_entry(vec![], 32, 32, Some(&data)).is_err());
+        }
+        let mut config = vec![0; 24];
+        config[0] = 1;
+        config[2] = 10;
+        config[3] = 53;
+        let mapping = elem(
+            0x41e4,
+            &[elem(0x41e7, b"dvcC"), elem(0x41ed, &config)].concat(),
+        );
+        let entry = track_entry(1, 1, "V_MPEG4/ISO/AVC", &[mapping]);
+        assert!(parse_track_entry(&entry[3..], 0).is_none_or(|t| t.dolby_vision_config.is_none()));
     }
 
     #[test]

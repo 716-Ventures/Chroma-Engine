@@ -491,6 +491,7 @@ fn tracks_from_matroska(meta: &matroska::MatroskaBasicMetadata) -> Vec<MediaTrac
                     frame_rate: frame_rate_from_default_duration(track.default_duration_ns),
                     bitrate_bps: None,
                     dynamic_range: match track.transfer_characteristics {
+                        _ if track.dolby_vision_config.is_some() => DynamicRange::DolbyVision,
                         Some(16) => DynamicRange::Hdr10,
                         Some(18) => DynamicRange::Hlg,
                         _ => DynamicRange::Unknown,
@@ -827,6 +828,7 @@ mod tests {
                 object_audio_candidate: true,
                 default_duration_ns: None,
                 codec_private: None,
+                dolby_vision_config: None,
             }],
             chapters: Vec::new(),
             attachment_count: 0,

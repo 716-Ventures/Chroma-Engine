@@ -257,11 +257,12 @@ fn manifest_video_sample_entry(
             width,
             height,
         }),
-        "hevc" => Ok(Fmp4SampleEntry::Hevc {
-            codec_config: config,
+        "hevc" => crate::fmp4::matroska_hevc_entry(
+            config,
             width,
             height,
-        }),
+            track.dolby_vision_config.as_deref(),
+        ),
         other => Err(anyhow!(
             "manifest video codec {other} is not supported for fMP4 init"
         )),

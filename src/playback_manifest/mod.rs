@@ -43,6 +43,9 @@ pub struct ManifestTrack {
     pub codec: String,
     /// Browser or platform codec string when available.
     pub codec_string: Option<String>,
+    /// Source Dolby Vision decoder configuration for Matroska remuxing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dolby_vision_config: Option<Vec<u8>>,
     /// Explicit source transfer range using HLS values PQ, HLG, or SDR.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub video_range: Option<String>,
@@ -279,10 +282,9 @@ fn build_file_matroska_manifest_mode(
             kind: matroska_track_kind_name(track.kind).into(),
             codec: track.codec.clone(),
             codec_string: matroska_codec_string(track, private),
+            dolby_vision_config: track.dolby_vision_config.clone(),
             video_range: (track.kind == MatroskaTrackKind::Video)
-                .then(|| {
-                    crate::container::mp4::video_range_from_transfer(track.transfer_characteristics)
-                })
+                .then(|| track.video_range())
                 .flatten()
                 .map(str::to_string),
             width: track
@@ -433,6 +435,7 @@ fn manifest_track(bytes: &[u8], track_id: &str, target_ms: u64) -> Option<Manife
         id: config.track_id,
         kind: config.track_kind,
         codec_string,
+        dolby_vision_config: None,
         video_range: config
             .source_video_sample_entry
             .as_ref()
@@ -543,10 +546,9 @@ fn matroska_manifest_track(
         kind: matroska_track_kind_name(track.kind).to_string(),
         codec: track.codec.clone(),
         codec_string: matroska_codec_string(track, private),
+        dolby_vision_config: track.dolby_vision_config.clone(),
         video_range: (track.kind == MatroskaTrackKind::Video)
-            .then(|| {
-                crate::container::mp4::video_range_from_transfer(track.transfer_characteristics)
-            })
+            .then(|| track.video_range())
             .flatten()
             .map(str::to_string),
         width: track
@@ -623,6 +625,14 @@ fn matroska_codec_string(track: &MatroskaTrack, private: Option<&[u8]>) -> Optio
             "avc1.{:02X}{:02X}{:02X}",
             config[1], config[2], config[3]
         )),
+        ("hevc", Some(_)) if track.dolby_vision_config.is_some() => {
+            let config = track.dolby_vision_config.as_ref()?;
+            Some(format!(
+                "dvh1.{:02}.{:02}",
+                config[2] >> 1,
+                ((config[2] & 1) << 5) | (config[3] >> 3)
+            ))
+        }
         ("hevc", Some(config)) => hevc_codec_string(config),
         ("aac", Some(config)) => parse_audio_specific_config(config)
             .ok()
