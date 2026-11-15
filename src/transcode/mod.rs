@@ -252,6 +252,8 @@ fn rescale_units_rounded(units: u64, from: TimeScale, to: TimeScale) -> u64 {
     rounded.min(u128::from(u64::MAX)) as u64
 }
 
+pub(crate) use video_encode::{build_avc_decoder_config, build_hevc_decoder_config};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -285,5 +287,3 @@ mod tests {
         assert_eq!(frame.duration_ms(), 21);
     }
 }
-
-pub(crate) use video_encode::{build_avc_decoder_config, build_hevc_decoder_config};

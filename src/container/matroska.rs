@@ -1891,12 +1891,15 @@ mod tests {
 
     #[test]
     fn dolby_mapping_survives_probe_manifest_and_fmp4_init() {
-        for (profile, transfer, expected_range) in
-            [(5, None, Some("PQ")), (8, Some(16), Some("PQ"))]
-        {
+        for (profile, transfer, expected_range) in [
+            (5, None, Some("PQ")),
+            (8, Some(16), Some("PQ")),
+            (8, Some(18), Some("HLG")),
+        ] {
             let mut config = vec![0; 24];
             config[0] = 1;
             config[2] = profile << 1;
+            config[4] = if transfer == Some(18) { 4 << 4 } else { 1 << 4 };
             config[3] = (6 << 3) | 5;
             let mapping = elem(
                 0x41e4,
@@ -1956,7 +1959,10 @@ mod tests {
             let crate::fmp4::Fmp4SampleEntry::SourceHevc { source, .. } = source else {
                 panic!("missing Dolby sample entry")
             };
-            assert_eq!(&source.codec_fourcc, b"dvh1");
+            assert_eq!(
+                &source.codec_fourcc,
+                if profile == 8 { b"hvc1" } else { b"dvh1" }
+            );
             // Profile 8 needs explicit colr/VUI; never invent HDR from its profile.
             assert_eq!(
                 source.video_range(),

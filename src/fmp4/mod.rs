@@ -951,7 +951,14 @@ pub(crate) fn matroska_hevc_entry(
     );
     Ok(Fmp4SampleEntry::SourceHevc {
         source: Mp4SourceVideoSampleEntry {
-            codec_fourcc: *b"dvh1",
+            // Backward-compatible Profile 8 streams retain the HEVC base
+            // sample entry; the Dolby record supplements it. Profile 5 has
+            // no HDR10/HLG base layer and continues to use dvh1.
+            codec_fourcc: if dolby[2] >> 1 == 8 && matches!(dolby[4] >> 4, 1 | 4) {
+                *b"hvc1"
+            } else {
+                *b"dvh1"
+            },
             payload,
         },
         width,
