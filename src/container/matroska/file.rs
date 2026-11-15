@@ -18,6 +18,7 @@ struct Cluster {
 pub(crate) struct MatroskaFileIndex {
     metadata: MatroskaBasicMetadata,
     clusters: Vec<Cluster>,
+    clusters_ordered: bool,
     cues: Option<Vec<u8>>,
     scale: u64,
     segment: Option<FileElement>,
@@ -34,6 +35,7 @@ impl MatroskaFileIndex {
         let mut index = Self {
             metadata,
             clusters: Vec::new(),
+            clusters_ordered: true,
             cues: None,
             scale,
             segment: None,
@@ -95,7 +97,7 @@ impl MatroskaFileIndex {
                     .last()
                     .is_some_and(|cluster| cluster.time_ms > time_ms)
                 {
-                    bail!("nonmonotonic Matroska cluster timestamps");
+                    index.clusters_ordered = false;
                 }
                 index.clusters.try_reserve(1)?;
                 if index.clusters.len() >= source.policy().parse_limits().max_boxes {
@@ -385,8 +387,26 @@ impl MatroskaFileIndex {
                     offset = *position;
                 }
             }
-            let mut previous = None;
-            while offset < segment.end {
+            // Cluster timestamps are bases for signed block offsets, not a
+            // presentation-order index. Bound the read by validated cue byte
+            // positions so a backwards cluster base does not abort playback or
+            // make an early timestamp-based stop omit a following cluster.
+            let stop = self
+                .anchors
+                .iter()
+                .find(|(time, position)| {
+                    *position > offset && *time >= end.saturating_add(span.saturating_mul(2))
+                })
+                .and_then(|(time, position)| {
+                    let element = source.element_at(*position, segment.end).ok()?;
+                    if element.id != 0x1f43_b675 {
+                        return None;
+                    }
+                    let cluster = read_cluster(source, element, self.scale, &mut visits).ok()?;
+                    (cluster.time_ms.abs_diff(*time) <= span).then_some(*position)
+                })
+                .unwrap_or(segment.end);
+            while offset < stop {
                 visit(&mut visits)?;
                 let element = source.element_at(offset, segment.end)?;
                 if element.unknown_size {
@@ -394,14 +414,8 @@ impl MatroskaFileIndex {
                 }
                 if element.id == 0x1f43_b675 {
                     let cluster = read_cluster(source, element, self.scale, &mut visits)?;
-                    if previous.is_some_and(|last| last > cluster.time_ms) {
-                        bail!("nonmonotonic Matroska cluster timestamps");
-                    }
-                    previous = Some(cluster.time_ms);
-                    if cluster.time_ms.saturating_sub(span) >= end {
-                        break;
-                    }
                     if cluster.time_ms >= start.saturating_sub(span)
+                        && cluster.time_ms.saturating_sub(span) < end
                         && scan_cluster(source, &cluster, self.scale, &mut visits, &mut consume)?
                     {
                         return Ok(());
@@ -410,12 +424,21 @@ impl MatroskaFileIndex {
                 offset = element.end;
             }
         } else {
-            let first = self
-                .clusters
-                .partition_point(|c| c.time_ms < start.saturating_sub(span));
+            let first = if self.clusters_ordered {
+                self.clusters
+                    .partition_point(|c| c.time_ms < start.saturating_sub(span))
+            } else {
+                0
+            };
             for cluster in &self.clusters[first..] {
                 if cluster.time_ms.saturating_sub(span) >= end {
-                    break;
+                    if self.clusters_ordered {
+                        break;
+                    }
+                    continue;
+                }
+                if cluster.time_ms < start.saturating_sub(span) {
+                    continue;
                 }
                 if scan_cluster(source, cluster, self.scale, &mut visits, &mut consume)? {
                     return Ok(());
@@ -895,6 +918,13 @@ mod tests {
     }
 
     fn indexed_fixture() -> (tempfile::TempDir, std::path::PathBuf, Vec<u8>) {
+        cluster_fixture(true, false)
+    }
+
+    fn cluster_fixture(
+        indexed: bool,
+        reordered: bool,
+    ) -> (tempfile::TempDir, std::path::PathBuf, Vec<u8>) {
         let info = element(
             0x1549a966,
             &[
@@ -922,7 +952,7 @@ mod tests {
         };
         let mut clusters = Vec::new();
         let mut cue_bytes = Vec::new();
-        let prefix = head(0).len() + info.len() + tracks.len();
+        let prefix = if indexed { head(0).len() } else { 0 } + info.len() + tracks.len();
         for i in 0..100_u64 {
             let position = prefix + clusters.len();
             if i % 2 == 0 {
@@ -942,15 +972,21 @@ mod tests {
                     .concat(),
                 ));
             }
+            // A later cluster may use an earlier base while signed block
+            // offsets still describe the exact same presentation timeline.
+            let shift = if reordered && i == 23 { 4100_i16 } else { 0 };
             let mut payload = [
-                element(0xe7, &(i * 4000).to_be_bytes()),
-                block(1, 0, 0x80, &[]),
-                block(2, 0, 0x80, &[]),
+                element(
+                    0xe7,
+                    &(i * 4000 - u64::try_from(shift).unwrap()).to_be_bytes(),
+                ),
+                block(1, shift, 0x80, &[]),
+                block(2, shift, 0x80, &[]),
                 element(0xec, &[0; 32768]),
             ]
             .concat();
             if i >= 8 {
-                payload.extend(block(2, -30000, 0x80, &[]));
+                payload.extend(block(2, -30000 + shift, 0x80, &[]));
             }
             clusters.extend(element(0x1f43b675, &payload));
         }
@@ -960,7 +996,18 @@ mod tests {
             element(0x1a45dfa3, &[]),
             element(
                 0x18538067,
-                &[head(cue_offset as u64), info, tracks, clusters, cues].concat(),
+                &[
+                    if indexed {
+                        head(cue_offset as u64)
+                    } else {
+                        vec![]
+                    },
+                    info,
+                    tracks,
+                    clusters,
+                    cues,
+                ]
+                .concat(),
             ),
         ]
         .concat();
@@ -993,6 +1040,33 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn regressing_cluster_bases_preserve_packet_timing_and_bounded_cue_reads() {
+        for indexed in [true, false] {
+            let (_dir, path, bytes) = cluster_fixture(indexed, true);
+            let source = MediaSource::open_packet_copy(&path).unwrap();
+            let index = source.matroska_index().unwrap();
+            for (start, end) in [(44_878, 55_305), (87_900, 100_000), (130_000, 140_000)] {
+                let before = source.io_stats();
+                let actual = index.packets(&source, &["v0", "a0"], start, end).unwrap();
+                let expected = super::super::parse_packet_tracks_in_time_window(
+                    &bytes,
+                    &["v0", "a0"],
+                    start,
+                    end,
+                )
+                .unwrap();
+                assert_eq!(actual, expected);
+                if indexed {
+                    assert!(
+                        source.io_stats().2 - before.2 < 64,
+                        "cue read scanned the whole file"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn first_audio_presence_stops_without_indexing_following_clusters() {
         let (_dir, path, _) = indexed_fixture();
