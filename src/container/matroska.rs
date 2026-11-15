@@ -1478,7 +1478,14 @@ fn repair_matroska_packet_timing(
         let duration = frame_duration
             .or_else(|| infer_nominal_frame_duration(packets))
             .unwrap_or_else(|| TimeDelta::millis(1));
-        let first_dts = packets[0].pts;
+        // A CRA may precede leading B pictures in decode order while those
+        // pictures have earlier PTS. Start at the window's earliest PTS so
+        // adjacent GOPs do not restart the decode clock at different offsets.
+        let first_dts = packets
+            .iter()
+            .map(|packet| packet.pts)
+            .min_by_key(|pts| pts.as_millis())
+            .unwrap();
         for (index, packet) in packets.iter_mut().enumerate() {
             packet.dts = if first_dts.scale == duration.scale {
                 TimePoint {
@@ -2331,6 +2338,42 @@ mod tests {
         assert_eq!(pts, vec![0, 120, 40, 80]);
         assert_eq!(dts, vec![0, 40, 80, 120]);
         assert_eq!(durations, vec![40, 40, 40, 40]);
+    }
+
+    #[test]
+    fn consecutive_video_windows_keep_one_decode_clock_with_leading_b_frames() {
+        let duration = TimeDelta::millis(40);
+        let mut previous_end = None;
+        for times in [
+            [0_u64, 120, 40, 80],
+            [200, 160, 280, 240],
+            [360, 320, 440, 400],
+        ] {
+            let mut packets = times
+                .iter()
+                .enumerate()
+                .map(|(i, &pts)| PacketRef {
+                    source_offset: i as u64,
+                    size: 1,
+                    pts: TimePoint::millis(pts),
+                    dts: TimePoint::millis(pts),
+                    duration,
+                    keyframe: i == 0,
+                })
+                .collect::<Vec<_>>();
+            repair_matroska_packet_timing(&mut packets, MatroskaTrackKind::Video, Some(duration));
+            if let Some(end) = previous_end {
+                assert_eq!(packets[0].dts.as_millis(), end);
+            }
+            previous_end = Some(packets.last().unwrap().dts.as_millis() + 40);
+            assert_eq!(
+                packets
+                    .iter()
+                    .map(|p| p.pts.as_millis())
+                    .collect::<Vec<_>>(),
+                times
+            );
+        }
     }
 
     #[test]

@@ -109,6 +109,15 @@ impl MetadataWindow {
 /// Packet reads are separate from container metadata, so parsers never need a
 /// file-sized byte slice merely to copy a selected payload.
 pub(crate) trait PacketSource {
+    /// Assemble packet-copy output under the fragment budget, independently
+    /// of the size limit for each individual source read.
+    fn packet_copy_payload(
+        &self,
+        packets: &[crate::packet::PacketRef],
+        range: crate::packet::PacketRange,
+    ) -> Result<Vec<u8>> {
+        self.packet_payload(packets, range)
+    }
     fn packet_window(&self, offset: u64, len: usize) -> io::Result<Vec<u8>>;
     fn packet_payload(
         &self,
@@ -118,6 +127,16 @@ pub(crate) trait PacketSource {
 }
 
 impl PacketSource for MediaSource {
+    fn packet_copy_payload(
+        &self,
+        packets: &[crate::packet::PacketRef],
+        range: crate::packet::PacketRange,
+    ) -> Result<Vec<u8>> {
+        let packets = packets
+            .get(range.start as usize..range.end as usize)
+            .ok_or_else(|| anyhow::anyhow!("invalid packet range"))?;
+        Ok(self.read_packets_mode(packets, false, true)?)
+    }
     fn packet_window(&self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
         self.read_at(offset, len)
     }
@@ -567,7 +586,7 @@ impl MediaSource {
     /// Reads selected packet spans with identity validation around the complete
     /// operation. Positional reads never depend on a shared file cursor.
     pub(crate) fn read_packets(&self, packets: &[crate::packet::PacketRef]) -> io::Result<Vec<u8>> {
-        self.read_packets_mode(packets, false)
+        self.read_packets_mode(packets, false, false)
     }
 
     /// Background audio analysis traverses long interleaved windows. A bounded
@@ -577,15 +596,16 @@ impl MediaSource {
         &self,
         packets: &[crate::packet::PacketRef],
     ) -> io::Result<Vec<u8>> {
-        self.read_packets_mode(packets, true)
+        self.read_packets_mode(packets, true, false)
     }
 
     fn read_packets_mode(
         &self,
         packets: &[crate::packet::PacketRef],
         analysis: bool,
+        output_copy: bool,
     ) -> io::Result<Vec<u8>> {
-        if let [packet] = packets {
+        if !output_copy && let [packet] = packets {
             return self.read_at(packet.source_offset, packet.size as usize);
         }
         self.validate_current().map_err(io::Error::other)?;
@@ -606,14 +626,32 @@ impl MediaSource {
                 .checked_add(packet.size as usize)
                 .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "packet size overflow"))
         })?;
+        let retained_limit = if output_copy {
+            self.policy().output_bytes
+        } else {
+            self.policy().compressed_window_bytes
+        };
         self.policy()
             .check(
-                "compressed window",
+                if output_copy {
+                    "packet-copy output"
+                } else {
+                    "compressed window"
+                },
                 size,
-                self.policy().compressed_window_bytes,
+                retained_limit,
             )
             .map_err(io::Error::other)?;
-        let mut output = bounded_buffer(size)?;
+        let mut output = if output_copy {
+            bounded_buffer_with_limit(size, retained_limit)?
+        } else {
+            bounded_buffer(size)?
+        };
+        let scratch_limit = if output_copy {
+            self.policy().compressed_window_bytes
+        } else {
+            self.policy().compressed_window_bytes.saturating_sub(size)
+        };
         let mut cursor = 0;
         let mut index = 0;
         while index < packets.len() {
@@ -641,8 +679,7 @@ impl MediaSource {
                 let bounded_gap = gap <= gap_limit
                     && next_span <= span_limit
                     && next_span <= (next_payload as u64).saturating_mul(amplification)
-                    && next_span
-                        <= self.policy().compressed_window_bytes.saturating_sub(size) as u64;
+                    && next_span <= scratch_limit as u64;
                 if !contiguous && !bounded_gap {
                     break;
                 }
@@ -651,7 +688,16 @@ impl MediaSource {
                 index += 1;
             }
             if span == payload as u64 {
-                self.read_exact_counted(&mut output[cursor..cursor + payload], offset)?;
+                // Large packet-copy GOPs remain one output allocation, while
+                // every physical read and cancellation interval stays bounded.
+                let mut source_offset = offset;
+                for chunk in output[cursor..cursor + payload]
+                    .chunks_mut(self.policy().compressed_window_bytes.min(64 * 1024 * 1024))
+                {
+                    self.check_work().map_err(io::Error::other)?;
+                    self.read_exact_counted(chunk, source_offset)?;
+                    source_offset += chunk.len() as u64;
+                }
                 cursor += payload;
             } else {
                 let mut window = bounded_buffer(span as usize)?;
@@ -684,10 +730,14 @@ impl MediaSource {
 }
 
 fn bounded_buffer(len: usize) -> io::Result<Vec<u8>> {
-    if len > 64 * 1024 * 1024 {
+    bounded_buffer_with_limit(len, 64 * 1024 * 1024)
+}
+
+fn bounded_buffer_with_limit(len: usize, limit: usize) -> io::Result<Vec<u8>> {
+    if len > limit {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "source window exceeds 64 MiB budget",
+            "buffer exceeds configured budget",
         ));
     }
     let mut buffer = Vec::new();
@@ -998,6 +1048,51 @@ mod tests {
                     .to_vec())
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn packet_copy_output_can_span_bounded_reads_without_relaxing_other_limits() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("large-gop.bin");
+        let bytes = (0..600).map(|i| (i % 251) as u8).collect::<Vec<_>>();
+        fs::write(&path, &bytes).unwrap();
+        let packets = [packet(0, 150), packet(150, 150)];
+        let range = crate::packet::PacketRange { start: 0, end: 2 };
+        for output_bytes in [512, 299] {
+            let runtime = crate::EngineRuntime::new(crate::ResourcePolicy {
+                compressed_window_bytes: 200,
+                output_bytes,
+                ..crate::ResourcePolicy::default()
+            })
+            .unwrap();
+            let source =
+                MediaSource::open_with_context(&path, runtime, crate::WorkControl::default())
+                    .unwrap();
+            assert!(source.packet_payload(&packets, range).is_err());
+            assert!(source.read_at(0, 300).is_err());
+            let before = source.io_stats();
+            let output = source.packet_copy_payload(&packets, range);
+            if output_bytes == 512 {
+                assert_eq!(output.unwrap(), bytes[..300]);
+                assert_eq!(
+                    source.io_stats().1 - before.1,
+                    2,
+                    "copy reads must stay within the 200-byte source window"
+                );
+                let unordered = [packet(450, 150), packet(0, 150)];
+                assert_eq!(
+                    source.packet_copy_payload(&unordered, range).unwrap(),
+                    [&bytes[450..600], &bytes[..150]].concat()
+                );
+            } else {
+                assert!(output.is_err(), "output fragment ceiling remains enforced");
+                assert_eq!(
+                    source.io_stats(),
+                    before,
+                    "reject oversized output before reading or allocating it"
+                );
+            }
+        }
     }
 
     #[test]

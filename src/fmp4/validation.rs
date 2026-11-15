@@ -97,9 +97,14 @@ fn validate_trafs(
                     if sample.size == 0 {
                         bail!("fMP4 media fragment contains a zero-size sample");
                     }
-                    if sample.composition_time_offset < 0 {
-                        bail!("fMP4 media fragment contains a negative composition offset");
-                    }
+                    // inspect_trun accepts version 1, where CTS offsets are
+                    // signed. Reject invalid presentation times, not valid B
+                    // frames that are displayed before their decode timestamp.
+                    decode_time
+                        .checked_add_signed(i64::from(sample.composition_time_offset))
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("fMP4 sample presentation time is outside the timeline")
+                        })?;
                     let next_decode_time = decode_time
                         .checked_add(u64::from(sample.duration))
                         .ok_or_else(|| {

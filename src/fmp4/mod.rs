@@ -407,7 +407,7 @@ pub fn samples_from_packets_with_timescale(
     packets: &[PacketRef],
     timescale: u32,
 ) -> Vec<Fmp4Sample> {
-    let mut samples = packets
+    let samples = packets
         .iter()
         .map(|packet| {
             let duration = rescale_time(
@@ -443,17 +443,8 @@ pub fn samples_from_packets_with_timescale(
         })
         .collect::<Vec<_>>();
 
-    if let Some(min_offset) = samples
-        .iter()
-        .map(|sample| sample.composition_time_offset)
-        .min()
-        && min_offset < 0
-    {
-        for sample in &mut samples {
-            sample.composition_time_offset =
-                sample.composition_time_offset.saturating_sub(min_offset);
-        }
-    }
+    // Version-1 trun stores signed offsets. Shifting each fragment's CTS
+    // independently changes presentation times at GOP boundaries.
 
     samples
 }
@@ -614,17 +605,7 @@ pub fn fragment_track_from_chunk_samples(
     if expected_offset != payload.len() as u64 {
         bail!("packet-copy sample bytes do not match fMP4 fragment payload bytes");
     }
-    if let Some(min_offset) = out_samples
-        .iter()
-        .map(|sample| sample.composition_time_offset)
-        .min()
-        && min_offset < 0
-    {
-        for sample in &mut out_samples {
-            sample.composition_time_offset =
-                sample.composition_time_offset.saturating_sub(min_offset);
-        }
-    }
+    // Preserve PTS-DTS exactly; the version-1 trun writer supports signed CTS.
 
     Ok(Fmp4FragmentTrack {
         track_id,
@@ -1749,7 +1730,7 @@ mod tests {
     }
 
     #[test]
-    fn packet_samples_normalize_negative_composition_offsets() {
+    fn packet_samples_preserve_signed_composition_offsets() {
         let packets = vec![
             PacketRef {
                 source_offset: 0,
@@ -1779,9 +1760,9 @@ mod tests {
 
         let samples = samples_from_packets_with_timescale(&packets, 1_000);
 
-        assert_eq!(samples[0].composition_time_offset, 44);
-        assert_eq!(samples[1].composition_time_offset, 0);
-        assert_eq!(samples[2].composition_time_offset, 168);
+        assert_eq!(samples[0].composition_time_offset, 0);
+        assert_eq!(samples[1].composition_time_offset, -44);
+        assert_eq!(samples[2].composition_time_offset, 124);
     }
 
     #[test]
@@ -1967,7 +1948,7 @@ mod tests {
     }
 
     #[test]
-    fn packet_copy_fragment_normalizes_negative_composition_offsets() {
+    fn packet_copy_fragment_preserves_original_presentation_timestamps() {
         let samples = vec![
             ChunkSample {
                 index: 0,
@@ -1990,11 +1971,26 @@ mod tests {
         ];
 
         let track = fragment_track_from_chunk_samples(1, &samples, b"ab".to_vec(), 1_000)
-            .expect("normalized packet-copy fragment");
+            .expect("packet-copy fragment with signed offsets");
 
-        assert_eq!(track.samples[0].composition_time_offset, 0);
-        assert_eq!(track.samples[1].composition_time_offset, 40);
-        media_fragment(1, &[track]).expect("valid media fragment");
+        assert_eq!(track.samples[0].composition_time_offset, -40);
+        assert_eq!(track.samples[1].composition_time_offset, 0);
+        let mut dts = track.base_decode_time;
+        for (actual, original) in track.samples.iter().zip(&samples) {
+            assert_eq!(
+                dts.checked_add_signed(i64::from(actual.composition_time_offset))
+                    .unwrap(),
+                original.pts.as_millis()
+            );
+            dts += u64::from(actual.duration);
+        }
+        let mut invalid = track.clone();
+        invalid.samples[0].composition_time_offset = -41;
+        assert!(
+            media_fragment(1, &[invalid]).is_err(),
+            "signed offsets must not create negative presentation times"
+        );
+        media_fragment(1, &[track]).expect("valid signed-version-1 fragment");
     }
 
     #[test]

@@ -1186,9 +1186,37 @@ fn transcode_prepared_segment(
         .ok_or_else(|| anyhow::anyhow!("transcode segment {index} is out of range"))?;
     let video_start_ms = video_chunk.start.as_millis();
     let video_end_ms = video_start_ms.saturating_add(video_chunk.duration.as_millis());
-    let audio_decode_window = audio_pipeline
-        .as_ref()
-        .map(|pipeline| pipeline.input_window(&prepared.audio_track, video_start_ms, video_end_ms));
+    let media_end_ms = prepared
+        .video_chunks
+        .chunks
+        .last()
+        .map_or(video_end_ms, |chunk| {
+            chunk
+                .start
+                .as_millis()
+                .saturating_add(chunk.duration.as_millis())
+        });
+    let short_audio_tail =
+        video_end_ms.saturating_add(audio_pipeline::MAX_AUDIO_TAIL_MS) >= media_end_ms;
+    let audio_decode_window = audio_pipeline.as_ref().map(|pipeline| {
+        // At the actual media tail, exhaust source audio before permitting
+        // bounded silence. Missing lookahead elsewhere remains an error.
+        let read_end = if short_audio_tail {
+            media_end_ms
+        } else {
+            video_end_ms
+        };
+        let (read_start, read_end) =
+            pipeline.input_window(&prepared.audio_track, video_start_ms, read_end);
+        (
+            if short_audio_tail {
+                read_start.saturating_sub(audio_pipeline::MAX_AUDIO_TAIL_MS)
+            } else {
+                read_start
+            },
+            read_end,
+        )
+    });
     let (audio_read_start, audio_read_end) =
         audio_decode_window.unwrap_or((video_start_ms.saturating_sub(1_000), video_end_ms));
     // Share the sparse index and scan interleaved blocks once, with independent
@@ -1219,8 +1247,13 @@ fn transcode_prepared_segment(
             audio_packets,
         } => (video_packets.as_slice(), audio_packets.as_slice()),
     };
-    let (video_manifest, video_payload) =
-        extract_indexed_chunk(source, &prepared.video_track_id, video_packets, video_chunk)?;
+    let (video_manifest, video_payload) = extract_indexed_chunk(
+        source,
+        &prepared.video_track_id,
+        video_packets,
+        video_chunk,
+        options.video_mode == NativeFmp4VideoMode::Copy,
+    )?;
     let (audio_manifest, audio_payload) = extract_indexed_time_range(
         source,
         &prepared.audio_track_id,
@@ -1247,6 +1280,7 @@ fn transcode_prepared_segment(
     let audio_timer = StageTimer::new(&metrics.audio);
     let streaming_audio = audio_pipeline.is_some();
     let audio_segment = if let Some(pipeline) = audio_pipeline {
+        pipeline.allow_short_tail(short_audio_tail);
         pipeline.render(
             audio_manifest,
             &audio_payload,
@@ -1330,8 +1364,13 @@ fn extract_indexed_chunk(
     track_id: &str,
     packets: &[PacketRef],
     chunk: NativeChunk,
+    output_copy: bool,
 ) -> Result<(ExtractedChunk, Vec<u8>)> {
-    let payload = bytes.packet_payload(packets, chunk.packet_range)?;
+    let payload = if output_copy {
+        bytes.packet_copy_payload(packets, chunk.packet_range)?
+    } else {
+        bytes.packet_payload(packets, chunk.packet_range)?
+    };
     let samples = packet_samples_for_range(packets, chunk.packet_range)?;
     Ok((
         ExtractedChunk {
@@ -1403,7 +1442,7 @@ fn extract_indexed_time_range(
         packet_range: range,
         key_aligned: true,
     };
-    extract_indexed_chunk(bytes, track_id, packets, chunk)
+    extract_indexed_chunk(bytes, track_id, packets, chunk, false)
 }
 
 fn packet_contains_truehd_major_sync(

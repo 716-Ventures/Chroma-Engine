@@ -7,6 +7,7 @@ use crate::transcode::{
 use std::collections::VecDeque;
 
 const AAC_FRAME_SAMPLES: u64 = 1024;
+pub(super) const MAX_AUDIO_TAIL_MS: u64 = 2_000;
 // Warm both the codec synthesis history and the encoder's causal transient
 // detector before publishing a fresh worker's first AAC access unit.
 const AAC_PREROLL_FRAMES: u64 = 32;
@@ -28,6 +29,7 @@ pub(super) struct AudioPipeline {
     last_offset: Option<u64>,
     completed: Option<u32>,
     poisoned: bool,
+    short_tail: bool,
 }
 
 impl std::fmt::Debug for AudioPipeline {
@@ -87,6 +89,7 @@ impl AudioPipeline {
             last_offset: None,
             completed: None,
             poisoned: false,
+            short_tail: false,
         }))
     }
 
@@ -104,6 +107,11 @@ impl AudioPipeline {
     pub(super) fn complete(&mut self, index: u32) {
         self.completed = Some(index);
         self.poisoned = false;
+    }
+
+    // Enabled only after the caller reads through the end of the media.
+    pub(super) fn allow_short_tail(&mut self, allowed: bool) {
+        self.short_tail = allowed;
     }
 
     pub(super) fn render(
@@ -203,7 +211,13 @@ impl AudioPipeline {
             .next_pcm
             .is_none_or(|next| next < coded_end.saturating_add(AAC_FRAME_SAMPLES))
         {
-            bail!("audio source did not supply the bounded AAC lookahead window");
+            if self.short_tail {
+                // Keep the encoder open: the final video GOP still needs its
+                // own AAC window. Padding remains bounded to two seconds.
+                self.feed_silence(coded_end.saturating_add(AAC_FRAME_SAMPLES), &mut output)?;
+            } else {
+                bail!("audio source did not supply the bounded AAC lookahead window");
+            }
         }
         let encoder = self
             .encoder
@@ -334,7 +348,7 @@ impl AudioPipeline {
             .format
             .ok_or_else(|| anyhow::anyhow!("missing audio format"))?;
         if end.saturating_sub(self.next_pcm.unwrap_or(end))
-            > u64::from(format.sample_rate).saturating_mul(2)
+            > u64::from(format.sample_rate).saturating_mul(MAX_AUDIO_TAIL_MS) / 1000
         {
             bail!("audio silence padding exceeds the bounded correction window");
         }
@@ -477,6 +491,44 @@ mod tests {
                 pipeline.complete(index);
                 output
             };
+            // Audio ends around two seconds; video continues another half
+            // second. A nonfinal GOP must pad only after reading the full tail,
+            // and must leave the AAC encoder usable for the final GOP.
+            let tail_render = |pipeline: &mut AudioPipeline, index, start, end, eos| {
+                let (manifest, bytes) = extract_indexed_time_range(
+                    &source,
+                    "a0",
+                    &packets,
+                    (start, end),
+                    index,
+                    "dts",
+                    Some((start.saturating_sub(1_000), 2_600)),
+                )
+                .unwrap();
+                pipeline.render(manifest, &bytes, &packets, 128_000, eos, &source)
+            };
+            let mut strict = AudioPipeline::new(&track).unwrap().unwrap();
+            assert!(
+                tail_render(&mut strict, 0, 0, 2_200, false)
+                    .err()
+                    .expect("mid-file shortage must fail")
+                    .to_string()
+                    .contains("bounded AAC lookahead")
+            );
+            let mut tail = AudioPipeline::new(&track).unwrap().unwrap();
+            tail.allow_short_tail(true);
+            let penultimate = tail_render(&mut tail, 0, 0, 2_200, false).unwrap();
+            let last = tail_render(&mut tail, 1, 2_200, 2_500, true).unwrap();
+            assert_eq!(
+                penultimate.fragment.base_decode_time
+                    + penultimate
+                        .fragment
+                        .samples
+                        .iter()
+                        .map(|sample| u64::from(sample.duration))
+                        .sum::<u64>(),
+                last.fragment.base_decode_time
+            );
             let mut continuous = AudioPipeline::new(&track).unwrap().unwrap();
             let expected = render(&mut continuous, 0, 0, 1700, true);
             let mut first_worker = AudioPipeline::new(&track).unwrap().unwrap();
