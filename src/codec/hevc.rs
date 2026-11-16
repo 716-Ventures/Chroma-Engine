@@ -1,3 +1,6 @@
+mod color;
+pub use color::color_description;
+
 use crate::packet::ChunkSample;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

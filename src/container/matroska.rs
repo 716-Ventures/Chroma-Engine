@@ -901,6 +901,16 @@ fn parse_track_entry(payload: &[u8], index: u32) -> Option<MatroskaTrack> {
     }
 
     let codec = codec_id.map(|id| normalize_codec_id(&id))?;
+    if kind == MatroskaTrackKind::Video
+        && codec == "hevc"
+        && matches!(transfer_characteristics, None | Some(2))
+    {
+        transfer_characteristics = codec_private
+            .as_deref()
+            .and_then(crate::codec::hevc::color_description)
+            .map(|color| u64::from(color.transfer))
+            .or(transfer_characteristics);
+    }
     let pixel_format = (kind == MatroskaTrackKind::Video)
         .then(|| video_pixel_format_from_codec_private(&codec, codec_private.as_deref()))
         .flatten();
@@ -2008,6 +2018,34 @@ mod tests {
         );
         let entry = track_entry(1, 1, "V_MPEG4/ISO/AVC", &[mapping]);
         assert!(parse_track_entry(&entry[3..], 0).is_none_or(|t| t.dolby_vision_config.is_none()));
+    }
+
+    #[test]
+    fn hevc_sps_supplies_missing_color_but_preserves_explicit_container_color() {
+        let hex = "01222000000090000000000096f000fcfdfafa00000704a00001001940010c01ffff22200000030090000003000003009695890240a100010033420101222000000300900000030000030096a001e020021c4d965626ed208ffc00040005a84880482000000300200000030301a2000100064401c171c312a70002000a4e019004000003000080001e4e01891821342134199619968a488a483d133d1300989680000003000180";
+        let config: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+            .collect();
+        for (container_transfer, expected) in
+            [(None, 16), (Some(2), 16), (Some(1), 1), (Some(18), 18)]
+        {
+            let mut fields = vec![
+                elem(0xd7, &[1]),
+                elem(0x83, &[1]),
+                elem(0x86, b"V_MPEGH/ISO/HEVC"),
+                elem(0x63a2, &config),
+            ];
+            if let Some(transfer) = container_transfer {
+                fields.push(elem(0xe0, &elem(0x55b0, &elem(0x55ba, &[transfer]))));
+            }
+            assert_eq!(
+                parse_track_entry(&fields.concat(), 0)
+                    .unwrap()
+                    .transfer_characteristics,
+                Some(expected)
+            );
+        }
     }
 
     #[test]
