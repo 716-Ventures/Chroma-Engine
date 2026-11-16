@@ -1,6 +1,6 @@
 //! External Scenarist SCC: one NTSC field carrying the CC1/CC2 services.
 //! CEA-608 code assignments were checked against AndroidX Media3's Cea608Decoder:
-//! https://github.com/androidx/media/blob/release/libraries/extractor/src/main/java/androidx/media3/extractor/text/cea/Cea608Decoder.java
+//! <https://github.com/androidx/media/blob/release/libraries/extractor/src/main/java/androidx/media3/extractor/text/cea/Cea608Decoder.java>
 //! This does not extract broadcast captions from video elementary streams.
 use super::Cue;
 use anyhow::{Context, Result, bail};

@@ -45,6 +45,7 @@ pub fn fuzz_subtitles(bytes: &[u8]) {
     let Ok(text) = std::str::from_utf8(bytes) else {
         return;
     };
+    crate::codec::subtitle_resources::fuzz_text_normalization(text);
     let cues = crate::codec::subtitles::parse_subrip(text);
     let _ = crate::codec::subtitles::render_webvtt(&cues);
     let _ = crate::codec::subtitles::segment_webvtt(&cues, 1_000, "seg-");

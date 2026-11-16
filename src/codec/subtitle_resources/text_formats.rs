@@ -154,7 +154,52 @@ fn attr<'a>(node: roxmltree::Node<'a, '_>, name: &str) -> Option<&'a str> {
         .map(|a| a.value())
 }
 
+// Cap retained expansion separately from temporary copies and tree visits. Timed
+// spans may render the same paragraph many times, even for a small source file.
+struct TtmlContext<'a> {
+    timing: Timing,
+    styles: BTreeMap<&'a str, roxmltree::Node<'a, 'a>>,
+    remaining: usize,
+    copies: usize,
+    visits: usize,
+}
+impl TtmlContext<'_> {
+    fn visit(&mut self) -> Result<()> {
+        self.visits = self
+            .visits
+            .checked_sub(1)
+            .context("TTML work limit exceeded")?;
+        Ok(())
+    }
+    fn allocation(&mut self, size: usize) -> Result<()> {
+        if size > self.remaining {
+            bail!("TTML expanded text exceeds limit");
+        }
+        self.copies = self
+            .copies
+            .checked_sub(size)
+            .context("TTML copy work limit exceeded")?;
+        Ok(())
+    }
+    fn wrap(&mut self, text: String, prefix: &str, suffix: &str) -> Result<String> {
+        let size = text
+            .len()
+            .checked_add(prefix.len())
+            .and_then(|n| n.checked_add(suffix.len()))
+            .context("TTML text size overflow")?;
+        self.allocation(size)?;
+        Ok(format!("{prefix}{text}{suffix}"))
+    }
+}
 fn ttml(text: &str) -> Result<Vec<ConvertedTrack>> {
+    ttml_with_limits(text, SCRIPT_LIMIT, 512 * 1024 * 1024, 1_000_000)
+}
+fn ttml_with_limits(
+    text: &str,
+    retained: usize,
+    copies: usize,
+    visits: usize,
+) -> Result<Vec<ConvertedTrack>> {
     let options = roxmltree::ParsingOptions {
         allow_dtd: false,
         nodes_limit: 100_000,
@@ -201,7 +246,14 @@ fn ttml(text: &str) -> Result<Vec<ConvertedTrack>> {
         .filter_map(|n| attr(n, "id").map(|id| (id, n)))
         .collect::<BTreeMap<_, _>>();
     let mut cues = Vec::new();
-    walk_ttml(root, 0, 2_592_000_000, timing, &styles, &mut cues, 0)?;
+    let mut context = TtmlContext {
+        timing,
+        styles,
+        remaining: retained,
+        copies,
+        visits,
+    };
+    walk_ttml(root, 0, 2_592_000_000, &mut context, &mut cues, 0)?;
     Ok(vec![document(
         cues,
         attr(root, "lang").map(str::to_string),
@@ -248,18 +300,18 @@ fn walk_ttml<'a>(
     node: roxmltree::Node<'a, 'a>,
     base: u64,
     limit: u64,
-    timing: Timing,
-    styles: &BTreeMap<&str, roxmltree::Node<'a, 'a>>,
+    context: &mut TtmlContext<'a>,
     cues: &mut Vec<Cue>,
     depth: usize,
 ) -> Result<()> {
+    context.visit()?;
     if depth > 64 || cues.len() > 100_000 {
         bail!("TTML work limit exceeded");
     }
     if !node.is_element() {
         return Ok(());
     }
-    let (start, end) = interval(node, base, limit, timing)?;
+    let (start, end) = interval(node, base, limit, context.timing)?;
     if end <= start {
         return Ok(());
     }
@@ -270,7 +322,7 @@ fn walk_ttml<'a>(
                 || attr(child, "end").is_some()
                 || attr(child, "dur").is_some()
             {
-                let (s, e) = interval(child, start, end, timing)?;
+                let (s, e) = interval(child, start, end, context.timing)?;
                 boundaries.extend([s.max(start).min(end), e.max(start).min(end)]);
             }
             if boundaries.len() > 4096 {
@@ -280,8 +332,12 @@ fn walk_ttml<'a>(
         boundaries.sort_unstable();
         boundaries.dedup();
         for pair in boundaries.windows(2) {
-            let body = ttml_text(node, start, end, pair[0], timing, styles, 0)?;
+            let body = ttml_text(node, start, end, pair[0], context, 0)?;
             if !body.trim().is_empty() {
+                if cues.len() >= 100_000 {
+                    bail!("TTML cue count exceeded");
+                }
+                context.remaining -= body.len();
                 cues.push(Cue {
                     start: pair[0],
                     end: pair[1],
@@ -301,9 +357,9 @@ fn walk_ttml<'a>(
     let mut cursor = start;
     for child in node.children().filter(|n| n.is_element()) {
         let child_base = if sequential { cursor } else { start };
-        walk_ttml(child, child_base, end, timing, styles, cues, depth + 1)?;
+        walk_ttml(child, child_base, end, context, cues, depth + 1)?;
         if sequential {
-            cursor = interval(child, child_base, end, timing)?.1;
+            cursor = interval(child, child_base, end, context.timing)?.1;
         }
     }
     Ok(())
@@ -313,64 +369,107 @@ fn ttml_text<'a>(
     base: u64,
     limit: u64,
     at: u64,
-    timing: Timing,
-    styles: &BTreeMap<&str, roxmltree::Node<'a, 'a>>,
+    context: &mut TtmlContext<'a>,
     depth: usize,
 ) -> Result<String> {
+    context.visit()?;
     if depth > 64 {
         bail!("TTML text depth limit exceeded");
     }
     if node.is_text() {
-        return Ok(escaped(node.text().unwrap_or("")));
+        let text = node.text().unwrap_or("");
+        let mut size = text.len();
+        for byte in text.bytes() {
+            size = size
+                .checked_add(match byte {
+                    b'&' => 4,
+                    b'<' | b'>' => 3,
+                    _ => 0,
+                })
+                .context("TTML escaped text size overflow")?;
+        }
+        context.allocation(size)?;
+        if size == text.len() {
+            return Ok(text.to_owned());
+        }
+        let mut output = String::new();
+        output
+            .try_reserve_exact(size)
+            .context("TTML text allocation failed")?;
+        for ch in text.chars() {
+            match ch {
+                '&' => output.push_str("&amp;"),
+                '<' => output.push_str("&lt;"),
+                '>' => output.push_str("&gt;"),
+                _ => output.push(ch),
+            }
+        }
+        return Ok(output);
     }
     if node.has_tag_name("br") {
+        context.allocation(1)?;
         return Ok("\n".into());
     }
     let (start, end) = if node.has_tag_name("p") {
         (base, limit)
     } else {
-        interval(node, base, limit, timing)?
+        interval(node, base, limit, context.timing)?
     };
     if at < start || at >= end {
         return Ok(String::new());
     }
     let mut result = String::new();
     for child in node.children() {
-        result.push_str(&ttml_text(
-            child,
-            start,
-            end,
-            at,
-            timing,
-            styles,
-            depth + 1,
-        )?);
-        if result.len() > SCRIPT_LIMIT {
-            bail!("TTML cue text exceeds limit");
+        let child = ttml_text(child, start, end, at, context, depth + 1)?;
+        let size = result
+            .len()
+            .checked_add(child.len())
+            .context("TTML text size overflow")?;
+        if size > context.remaining {
+            bail!("TTML expanded text exceeds limit");
         }
+        context.copies = context
+            .copies
+            .checked_sub(child.len())
+            .context("TTML copy work limit exceeded")?;
+        result.push_str(&child);
     }
     let mut references = Vec::new();
-    resolve_styles(node, styles, &mut references, 0)?;
+    resolve_styles(
+        node,
+        &context.styles,
+        &mut references,
+        0,
+        &mut context.copies,
+    )?;
+    context.visits = context
+        .visits
+        .checked_sub(references.len())
+        .context("TTML work limit exceeded")?;
     references.push(node);
     for style in references {
         if attr(style, "fontWeight") == Some("bold") {
-            result = format!("<b>{result}</b>");
+            result = context.wrap(result, "<b>", "</b>")?;
         }
         if attr(style, "fontStyle") == Some("italic") {
-            result = format!("<i>{result}</i>");
+            result = context.wrap(result, "<i>", "</i>")?;
         }
         if attr(style, "textDecoration")
             .is_some_and(|s| s.split_whitespace().any(|s| s == "underline"))
         {
-            result = format!("<u>{result}</u>");
+            result = context.wrap(result, "<u>", "</u>")?;
         }
         if let Some(color) = attr(style, "color").and_then(ttml_color) {
-            result = format!("<c.ttmlc{color}>{result}</c>");
+            result = context.wrap(result, &format!("<c.ttmlc{color}>"), "</c>")?;
         }
     }
     Ok(result)
 }
 fn ttml_color(value: &str) -> Option<String> {
+    // Supported names and #RRGGBB[AA] never exceed nine bytes.
+    if value.len() > 9 {
+        return None;
+    }
     if let Some(hex) = value
         .strip_prefix('#')
         .filter(|v| (v.len() == 6 || v.len() == 8) && v.bytes().all(|b| b.is_ascii_hexdigit()))
@@ -399,13 +498,18 @@ fn resolve_styles<'a>(
     styles: &BTreeMap<&str, roxmltree::Node<'a, 'a>>,
     out: &mut Vec<roxmltree::Node<'a, 'a>>,
     depth: usize,
+    work: &mut usize,
 ) -> Result<()> {
     if depth > 16 || out.len() > 256 {
         bail!("cyclic or excessive TTML style references");
     }
-    for id in attr(node, "style").unwrap_or("").split_whitespace() {
+    let references = attr(node, "style").unwrap_or("");
+    *work = work
+        .checked_sub(references.len())
+        .context("TTML style work limit exceeded")?;
+    for id in references.split_whitespace() {
         if let Some(style) = styles.get(id) {
-            resolve_styles(*style, styles, out, depth + 1)?;
+            resolve_styles(*style, styles, out, depth + 1, work)?;
             out.push(*style);
         }
     }
@@ -548,6 +652,10 @@ fn sami(text: &str, duration: Option<u64>) -> Result<Vec<ConvertedTrack>> {
     let mut tags = 0;
     while !rest.is_empty() {
         if rest.starts_with('<') {
+            tags += 1;
+            if tags > 200_000 {
+                bail!("SAMI work limit exceeded");
+            }
             let end = rest
                 .find('>')
                 .filter(|n| *n <= 4096)
@@ -589,18 +697,14 @@ fn sami(text: &str, duration: Option<u64>) -> Result<Vec<ConvertedTrack>> {
             } else if matches!(name.as_str(), "script" | "style") {
                 let close = format!("</{name}>");
                 let tail = &rest[end + 1..];
-                let n = tail
-                    .to_ascii_lowercase()
+                let offset = text.len() - tail.len();
+                let n = lower[offset..]
                     .find(&close)
                     .context("unclosed SAMI metadata block")?;
                 rest = &tail[n + close.len()..];
                 continue;
             }
             rest = &rest[end + 1..];
-            tags += 1;
-            if tags > 200_000 {
-                bail!("SAMI work limit exceeded");
-            }
         } else {
             let end = rest.find('<').unwrap_or(rest.len());
             if at.is_some() {
@@ -703,6 +807,80 @@ fn scc(text: &str, duration: Option<u64>) -> Result<Vec<ConvertedTrack>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn ttml_bounds_retained_timed_span_expansion_before_collecting_cues() {
+        let text =
+            "<tt><body><p dur='4s'>abcdefgh<span begin='1s' dur='1s'>x</span></p></body></tt>";
+        let error = ttml_with_limits(text, 24, 4096, 1000).err().unwrap();
+        assert!(error.to_string().contains("expanded text"));
+        let tracks = ttml_with_limits(text, 25, 4096, 1000).unwrap();
+        assert!(
+            tracks[0]
+                .webvtt
+                .contains("00:00:01.000 --> 00:00:02.000\nabcdefghx")
+        );
+    }
+    #[test]
+    fn ttml_bounds_escaping_styling_and_repeated_tree_work() {
+        let escaped = "<tt><body><p dur='1s'>日本&amp;&lt;&gt;</p></body></tt>";
+        assert!(ttml_with_limits(escaped, 18, 4096, 1000).is_err());
+        assert!(
+            ttml_with_limits(escaped, 19, 4096, 1000).unwrap()[0]
+                .webvtt
+                .contains("日本&amp;&lt;&gt;")
+        );
+        let styled = "<tt><body><p dur='1s' fontWeight='bold'>abc</p></body></tt>";
+        assert!(ttml_with_limits(styled, 9, 4096, 1000).is_err());
+        assert!(ttml_with_limits(styled, 10, 4096, 1000).is_ok());
+        assert!(
+            ttml_with_limits(styled, 100, 5, 1000)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("copy work")
+        );
+        assert!(
+            ttml_with_limits(styled, 100, 4096, 2)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("work limit")
+        );
+    }
+    #[test]
+    fn ttml_bounds_unknown_style_reference_work_too() {
+        let text =
+            "<tt><body><p dur='1s' style='unknown unknown unknown unknown'>abc</p></body></tt>";
+        assert!(
+            ttml_with_limits(text, 100, 30, 1000)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("style work")
+        );
+        assert!(ttml_with_limits(text, 100, 1000, 1000).is_ok());
+        assert!(ttml_color(&"red".repeat(1000)).is_none());
+    }
+    #[test]
+    fn sami_skips_repeated_metadata_without_copying_the_remaining_document() {
+        let mut text = String::from("<SAMI><BODY>");
+        text.push_str(&"<ScRiPt>日本語</sCrIpT><STYLE></style>".repeat(10_000));
+        text.push_str("<SYNC Start=0><P Class=ENCC>Dialogue<SYNC Start=1000></BODY></SAMI>");
+        let tracks = sami(&text, Some(2000)).unwrap();
+        assert!(
+            tracks[0]
+                .webvtt
+                .contains("00:00:00.000 --> 00:00:01.000\nDialogue")
+        );
+        let text = format!("<SAMI><BODY>{}", "<script></script>".repeat(200_001));
+        assert!(
+            sami(&text, None)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("work limit")
+        );
+    }
     #[test]
     fn ttml_parent_timing_frames_ticks_and_styles_are_source_timed() {
         let text = r#"<tt xmlns="http://www.w3.org/ns/ttml" xmlns:ttp="http://www.w3.org/ns/ttml#parameter" xmlns:tts="http://www.w3.org/ns/ttml#styling" xml:lang="en" ttp:frameRate="25" ttp:tickRate="100"><head><styling><style xml:id="bold" tts:fontWeight="bold"/></styling></head><body begin="1s"><div><p begin="25f" dur="100t" style="bold">A &amp; B<br/>line</p></div></body></tt>"#;

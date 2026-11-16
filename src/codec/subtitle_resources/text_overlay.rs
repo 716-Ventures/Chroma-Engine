@@ -146,13 +146,27 @@ pub(super) fn webvtt_to_ass(text: &str, width: u32, height: u32) -> Result<Strin
         let settings = right.collect::<Vec<_>>();
         let alignment = alignment(&settings);
         let body = lines[index + 1..].join("\n");
-        let body = markup(&body, &base, &classes)?;
-        output.push_str(&format!(
-            "Dialogue: 0,{},{},Default,,0,0,0,,{{\\an{alignment}}}{}{body}\n",
+        let prefix = format!(
+            "Dialogue: 0,{},{},Default,,0,0,0,,{{\\an{alignment}}}{}",
             ass_time(start),
             ass_time(end),
             base.tags()
-        ));
+        );
+        let overhead = output
+            .len()
+            .checked_add(prefix.len())
+            .and_then(|n| n.checked_add(1))
+            .context("subtitle overlay size overflow")?;
+        let remaining = SCRIPT_LIMIT
+            .checked_sub(overhead)
+            .context("subtitle overlay exceeds size limit")?;
+        let body = markup_with_limit(&body, &base, &classes, remaining)?;
+        output
+            .try_reserve(prefix.len() + body.len() + 1)
+            .context("subtitle overlay allocation failed")?;
+        output.push_str(&prefix);
+        output.push_str(&body);
+        output.push('\n');
         if output.len() > SCRIPT_LIMIT {
             bail!("subtitle overlay script size limit exceeded");
         }
@@ -382,21 +396,49 @@ fn color(value: &str) -> Option<String> {
     ))
 }
 
+#[cfg(test)]
 fn markup(text: &str, base: &Style, classes: &BTreeMap<String, Style>) -> Result<String> {
+    markup_with_limit(text, base, classes, SCRIPT_LIMIT)
+}
+fn markup_with_limit(
+    text: &str,
+    base: &Style,
+    classes: &BTreeMap<String, Style>,
+    limit: usize,
+) -> Result<String> {
+    fn append(output: &mut String, value: &str, limit: usize) -> Result<()> {
+        if value.len() > limit.saturating_sub(output.len()) {
+            bail!("subtitle markup expansion exceeds limit");
+        }
+        output
+            .try_reserve(value.len())
+            .context("subtitle markup allocation failed")?;
+        output.push_str(value);
+        Ok(())
+    }
     let mut result = String::new();
     let mut stack: Vec<(String, Style)> = Vec::new();
     let mut style = base.clone();
     let mut rest = text;
     while !rest.is_empty() {
+        // Copy plain runs together: most dialogue needs neither markup nor escaping.
+        let plain = rest
+            .find(['<', '&', '\n', '{', '}', '\\'])
+            .unwrap_or(rest.len());
+        if plain > 0 {
+            append(&mut result, &rest[..plain], limit)?;
+            rest = &rest[plain..];
+            continue;
+        }
         if rest.starts_with('<')
-            && let Some(end) = rest.find('>').filter(|n| *n < 1024)
+            && let Some(end) = rest.bytes().take(1024).position(|b| b == b'>')
         {
             let tag = &rest[1..end];
             if let Some(close) = tag.strip_prefix('/') {
                 if let Some(index) = stack.iter().rposition(|(name, _)| name == close) {
                     style = stack[index].1.clone();
                     stack.truncate(index);
-                    result.push_str(&style.tags());
+                    append(&mut result, &style.tags(), limit)?;
                 }
             } else {
                 let name = tag.split(['.', ' ']).next().unwrap_or("");
@@ -438,9 +480,9 @@ fn markup(text: &str, base: &Style, classes: &BTreeMap<String, Style>) -> Result
                         }
                         _ => {}
                     }
-                    result.push_str(&style.tags());
+                    append(&mut result, &style.tags(), limit)?;
                 } else if name == "br" || name == "br/" {
-                    result.push_str("\\N");
+                    append(&mut result, "\\N", limit)?;
                 }
             }
             rest = &rest[end + 1..];
@@ -449,12 +491,12 @@ fn markup(text: &str, base: &Style, classes: &BTreeMap<String, Style>) -> Result
         let ch = rest.chars().next().unwrap();
         rest = &rest[ch.len_utf8()..];
         match ch {
-            '\n' => result.push_str("\\N"),
-            '{' => result.push_str("\\{"),
-            '}' => result.push_str("\\}"),
-            '\\' => result.push_str("\\\\"),
+            '\n' => append(&mut result, "\\N", limit)?,
+            '{' => append(&mut result, "\\{", limit)?,
+            '}' => append(&mut result, "\\}", limit)?,
+            '\\' => append(&mut result, "\\\\", limit)?,
             '&' => {
-                if let Some(end) = rest.find(';').filter(|v| *v < 16) {
+                if let Some(end) = rest.bytes().take(16).position(|b| b == b';') {
                     let name = &rest[..end];
                     let decoded = match name {
                         "amp" => Some('&'),
@@ -472,16 +514,16 @@ fn markup(text: &str, base: &Style, classes: &BTreeMap<String, Style>) -> Result
                     if let Some(ch) =
                         decoded.filter(|c| !c.is_control() && !matches!(c, '{' | '}' | '\\'))
                     {
-                        result.push(ch);
+                        append(&mut result, ch.encode_utf8(&mut [0; 4]), limit)?;
                         rest = &rest[end + 1..];
                     } else {
-                        result.push('&');
+                        append(&mut result, "&", limit)?;
                     }
                 } else {
-                    result.push('&');
+                    append(&mut result, "&", limit)?;
                 }
             }
-            _ => result.push(ch),
+            _ => append(&mut result, ch.encode_utf8(&mut [0; 4]), limit)?,
         }
     }
     Ok(result)
@@ -490,6 +532,36 @@ fn markup(text: &str, base: &Style, classes: &BTreeMap<String, Style>) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn malformed_markup_lookahead_is_bounded_and_unicode_safe() {
+        let text = format!("{}{}日本語", "<".repeat(65_536), "&".repeat(65_536));
+        assert_eq!(
+            markup(&text, &Style::default(), &BTreeMap::new()).unwrap(),
+            text
+        );
+        let edge = format!("<{}>", "日".repeat(342));
+        assert_eq!(
+            markup(&edge, &Style::default(), &BTreeMap::new()).unwrap(),
+            edge
+        );
+    }
+    #[test]
+    fn markup_bounds_style_and_escape_expansion_before_appending() {
+        let style = Style::default();
+        let classes = BTreeMap::new();
+        let expected = markup("<b>A</b>", &style, &classes).unwrap();
+        assert_eq!(
+            markup_with_limit("<b>A</b>", &style, &classes, expected.len()).unwrap(),
+            expected
+        );
+        assert!(markup_with_limit("<b>A</b>", &style, &classes, expected.len() - 1).is_err());
+        assert!(markup_with_limit(&"<b></b>".repeat(1000), &style, &classes, 1024).is_err());
+        assert!(markup_with_limit("日本{", &style, &classes, 7).is_err());
+        assert_eq!(
+            markup_with_limit("日本{", &style, &classes, 8).unwrap(),
+            "日本\\{"
+        );
+    }
     #[test]
     fn preserves_native_cue_timing_styles_and_secondary_safe_ass() {
         let vtt = "WEBVTT\n\nSTYLE\n::cue { font-family: \"Authored Font\", sans-serif; color: rgba(255, 255, 255, 1); }\n::cue(.tx3g1) { font-size: 84%; color: rgba(255, 0, 0, 1); }\n\ncue\n00:00:06.170 --> 00:00:10.380 align:center line:100%,end\n<c.tx3g1><b>A &amp; B</b></c>\nNext line\n\n";

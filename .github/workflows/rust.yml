@@ -173,7 +173,8 @@ jobs:
           cargo +nightly fuzz build
       - name: Seed container and fragment fuzzers with valid synthetic structure
         run: |
-          mkdir -p fuzz/corpus/containers fuzz/corpus/fmp4
+          mkdir -p fuzz/corpus/containers fuzz/corpus/fmp4 fuzz/corpus/subtitles
+          cp fuzz/seeds/subtitles/* fuzz/corpus/subtitles/
           cargo +nightly run --locked --example make-test-media -- fuzz/corpus/containers/generated.mkv 6
           cargo +nightly run --locked --bin chroma-engine -- transcode-fmp4-segments fuzz/corpus/containers/generated.mkv fuzz/corpus/fmp4 --start-index 0 --count 2 --video-mode copy
       - name: Smoke fuzz containers

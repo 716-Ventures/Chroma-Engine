@@ -1191,3 +1191,12 @@ mod extraction_tests {
         assert!(error.to_string().contains("font resource limit"));
     }
 }
+
+/// Exercises normalization without exposing internal subtitle APIs in shipping builds.
+#[cfg(feature = "fuzzing")]
+pub(crate) fn fuzz_text_normalization(text: &str) {
+    for extension in ["ttml", "sami", "sub", "sbv", "scc"] {
+        let _ = text_formats::convert(extension, text, Some(60_000), Some(24.0));
+    }
+    let _ = text_overlay::webvtt_to_ass(text, 1920, 1080);
+}

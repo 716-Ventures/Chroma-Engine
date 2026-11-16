@@ -125,6 +125,30 @@ fn bench_sidecar_inventory(c: &mut Criterion) {
     });
 }
 
+fn bench_ttml_timed_spans(c: &mut Criterion) {
+    let directory = tempfile::tempdir().expect("TTML fixture");
+    let input = directory.path().join("Fixture.mp4");
+    std::fs::write(&input, minimal_mp4()).expect("media");
+    let mut text = String::from(
+        "<tt><head><styling><style xml:id='b' fontWeight='bold'/></styling></head><body>",
+    );
+    for i in 0..100 {
+        text.push_str(&format!("<p begin='{}s' dur='3s' style='b'>Dialogue &amp; signs <span begin='1s' dur='1s'>timed</span></p>", i * 4));
+    }
+    text.push_str("</body></tt>");
+    std::fs::write(directory.path().join("Fixture.en.ttml"), text).expect("TTML");
+    let output = directory.path().join("resources");
+    std::fs::create_dir(&output).expect("output");
+    c.bench_function("subtitle_resources/ttml_timed_spans", |b| {
+        b.iter(|| {
+            let resources =
+                write_subtitle_resources(black_box(&input), black_box(&output)).expect("resources");
+            assert_eq!(resources.tracks.len(), 1);
+            black_box(resources)
+        });
+    });
+}
+
 fn synthetic_packets(count: usize) -> Vec<PacketRef> {
     let scale = TimeScale {
         units_per_second: 1_000,
@@ -437,6 +461,7 @@ criterion_group!(
     bench_packet_planning,
     bench_stateful_segments,
     bench_subtitles,
-    bench_sidecar_inventory
+    bench_sidecar_inventory,
+    bench_ttml_timed_spans
 );
 criterion_main!(benches);

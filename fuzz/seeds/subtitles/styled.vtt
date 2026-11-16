@@ -1,0 +1,8 @@
+WEBVTT
+
+STYLE
+::cue { font-family: "Authored Font"; color: #ff0000; }
+
+00:00:01.000 --> 00:00:04.000 line:0% align:left
+<b>A &amp; B</b> 日本語
+<unclosed &&&& <<<<

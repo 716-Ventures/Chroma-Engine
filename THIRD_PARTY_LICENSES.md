@@ -6029,7 +6029,7 @@ DEALINGS IN THE SOFTWARE.
 - proc-macro2 1.0.107 — https://github.com/dtolnay/proc-macro2
 - quote 1.0.47 — https://github.com/dtolnay/quote
 - rustc-hash 1.1.0 — https://github.com/rust-lang-nursery/rustc-hash
-- rustix 1.1.4 — https://github.com/bytecodealliance/rustix
+- rustix 1.1.6 — https://github.com/bytecodealliance/rustix
 - rustversion 1.0.23 — https://github.com/dtolnay/rustversion
 - serde 1.0.229 — https://github.com/serde-rs/serde
 - serde_core 1.0.229 — https://github.com/serde-rs/serde
