@@ -140,13 +140,14 @@ impl std::fmt::Debug for CpuH264EncoderSession {
 impl CpuH264EncoderSession {
     /// Creates one portable H.264 software encoder that can serve multiple batches.
     pub fn new(format: RawVideoFormat, bitrate: u32) -> Result<Self, VideoEncodeError> {
-        Self::new_with_threads(format, bitrate, 2)
+        Self::new_with_threads(format, bitrate, 2, false)
     }
 
     fn new_with_threads(
         format: RawVideoFormat,
         bitrate: u32,
         threads: u32,
+        preserve_frames: bool,
     ) -> Result<Self, VideoEncodeError> {
         validate_raw_video_format(format)?;
         validate_openh264_format(format)?;
@@ -162,7 +163,9 @@ impl CpuH264EncoderSession {
             .max_frame_rate(openh264::encoder::FrameRate::from_hz(frame_rate))
             .rate_control_mode(openh264::encoder::RateControlMode::Bitrate)
             .profile(openh264::encoder::Profile::Main)
-            .skip_frames(true)
+            // Fragment timelines preserve every input presentation timestamp.
+            // At a low rendition bitrate, reduce quality rather than dropping a frame.
+            .skip_frames(!preserve_frames)
             .vui(openh264::encoder::VuiConfig::bt709());
         let encoder = openh264::encoder::Encoder::with_api_config(
             openh264::OpenH264API::from_source(),
@@ -272,13 +275,14 @@ pub enum H264EncoderSession {
 impl H264EncoderSession {
     /// Creates the preferred executable H.264 encoder for the current host.
     pub fn new(format: RawVideoFormat, bitrate: u32) -> Result<Self, VideoEncodeError> {
-        Self::new_with_policy(format, bitrate, &crate::ResourcePolicy::default())
+        Self::new_with_policy(format, bitrate, &crate::ResourcePolicy::default(), false)
     }
 
     pub(crate) fn new_with_policy(
         format: RawVideoFormat,
         bitrate: u32,
         policy: &crate::ResourcePolicy,
+        preserve_frames: bool,
     ) -> Result<Self, VideoEncodeError> {
         #[cfg(target_os = "macos")]
         if let Ok(session) = VideoToolboxH264EncoderSession::new(format, bitrate) {
@@ -300,19 +304,25 @@ impl H264EncoderSession {
         if let Ok(session) = VaapiH264EncoderSession::new(format, bitrate) {
             return Ok(Self::Vaapi(Box::new(session)));
         }
-        Self::new_software(format, bitrate, policy)
+        Self::new_software(format, bitrate, policy, preserve_frames)
     }
 
     pub(crate) fn new_software(
         format: RawVideoFormat,
         bitrate: u32,
         policy: &crate::ResourcePolicy,
+        preserve_frames: bool,
     ) -> Result<Self, VideoEncodeError> {
         if !policy.allow_software_video {
             return Err(VideoEncodeError::BackendFailed { reason: "hardware encoder unavailable and resource policy forbids software video fallback".into() });
         }
-        CpuH264EncoderSession::new_with_threads(format, bitrate, policy.codec_threads)
-            .map(|session| Self::Cpu(Box::new(session)))
+        CpuH264EncoderSession::new_with_threads(
+            format,
+            bitrate,
+            policy.codec_threads,
+            preserve_frames,
+        )
+        .map(|session| Self::Cpu(Box::new(session)))
     }
 
     /// Encodes one ordered frame batch using the selected retained backend.

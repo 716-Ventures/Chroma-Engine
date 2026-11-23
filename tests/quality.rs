@@ -11,7 +11,7 @@ fn native_cli_quality_limits_reach_the_encoded_init_segment() {
     let init = dir.path().join("init.mp4");
     let segment = dir.path().join("segment.m4s");
     std::fs::write(&source, fixture::modern_mkv(1)).unwrap();
-    Command::cargo_bin("chroma-engine")
+    let startup = Command::cargo_bin("chroma-engine")
         .unwrap()
         .arg("transcode-fmp4-start")
         .arg(&source)
@@ -32,7 +32,15 @@ fn native_cli_quality_limits_reach_the_encoded_init_segment() {
             "1000000",
         ])
         .assert()
-        .success();
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let startup: Value = serde_json::from_slice(&startup).unwrap();
+    assert_eq!(startup["videoWidth"], 16);
+    assert_eq!(startup["videoHeight"], 16);
+    let codec = startup["avcCodecString"].as_str().unwrap();
+    assert!(codec.starts_with("avc1.") && codec.len() == 11);
     let output = Command::cargo_bin("chroma-engine")
         .unwrap()
         .arg("probe")

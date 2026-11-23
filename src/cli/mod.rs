@@ -268,6 +268,9 @@ enum Command {
     /// Write a contiguous fMP4 segment window with retained native codecs.
     TranscodeFmp4Segments {
         input: PathBuf,
+        /// Preserve presentation timestamps when preparing a complete rendition offline.
+        #[arg(long)]
+        preserve_frames: bool,
         output_dir: PathBuf,
         #[arg(long)]
         init_output: Option<PathBuf>,
@@ -936,6 +939,7 @@ pub fn run() -> Result<()> {
                     max_width,
                     max_height,
                     audio_bitrate,
+                    preserve_frames: false,
                     video_mode: video_mode.into(),
                 },
             )?;
@@ -966,6 +970,7 @@ pub fn run() -> Result<()> {
                     max_width,
                     max_height,
                     audio_bitrate,
+                    preserve_frames: false,
                     video_mode: video_mode.into(),
                 },
             )?;
@@ -998,6 +1003,7 @@ pub fn run() -> Result<()> {
                     max_width,
                     max_height,
                     audio_bitrate,
+                    preserve_frames: false,
                     video_mode: video_mode.into(),
                 },
             )?;
@@ -1005,6 +1011,7 @@ pub fn run() -> Result<()> {
         }
         Command::TranscodeFmp4Segments {
             input,
+            preserve_frames,
             output_dir,
             init_output,
             start_index,
@@ -1028,6 +1035,7 @@ pub fn run() -> Result<()> {
                     max_width,
                     max_height,
                     audio_bitrate,
+                    preserve_frames,
                     video_mode: video_mode.into(),
                 },
             )?;

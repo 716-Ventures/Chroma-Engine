@@ -74,6 +74,8 @@ pub struct NativeFmp4TranscodeOptions {
     pub max_height: Option<u32>,
     /// Target bitrate for transcoded audio.
     pub audio_bitrate: u32,
+    /// Preserve all video samples during offline rendition preparation.
+    pub preserve_frames: bool,
     /// Output video path.
     pub video_mode: NativeFmp4VideoMode,
 }
@@ -140,6 +142,16 @@ pub struct NativeFmp4TranscodeSegmentOutput {
 #[serde(rename_all = "camelCase")]
 /// Summary emitted after writing native transcode startup assets.
 pub struct NativeFmp4TranscodeStartOutput {
+    /// First video presentation timestamp, including the first segment in a window.
+    pub first_video_pts_ms: Option<u64>,
+    /// First audio presentation timestamp, including the first segment in a window.
+    pub first_audio_pts_ms: Option<u64>,
+    /// RFC 6381 AVC codec identifier derived from the emitted decoder configuration.
+    pub avc_codec_string: Option<String>,
+    /// Emitted AVC sample entry width.
+    pub video_width: Option<u16>,
+    /// Emitted AVC sample entry height.
+    pub video_height: Option<u16>,
     /// Init segment path written by the engine.
     pub init_output: String,
     /// Media segment path written by the engine.
@@ -578,6 +590,11 @@ impl NativeFmp4TranscodeSession {
         self.source.validate_current()?;
         segment.media_segment.publish(segment_output)?;
         Ok(NativeFmp4TranscodeStartOutput {
+            first_video_pts_ms: segment.first_video_pts.map(TimePoint::as_millis),
+            first_audio_pts_ms: segment.first_audio_pts.map(TimePoint::as_millis),
+            avc_codec_string: segment.avc.as_ref().map(|(codec, _, _)| codec.clone()),
+            video_width: segment.avc.as_ref().map(|(_, width, _)| *width),
+            video_height: segment.avc.as_ref().map(|(_, _, height)| *height),
             init_output: init_output.display().to_string(),
             segment_output: segment_output.display().to_string(),
             index,
@@ -652,6 +669,7 @@ impl Default for NativeFmp4TranscodeOptions {
             max_width: None,
             max_height: None,
             audio_bitrate: DEFAULT_AUDIO_BITRATE,
+            preserve_frames: false,
             video_mode: NativeFmp4VideoMode::Copy,
         }
     }
@@ -692,6 +710,7 @@ pub fn write_native_fmp4_transcode_start(
 }
 
 struct TranscodedSegment {
+    avc: Option<(String, u16, u16)>,
     video_track_id: String,
     audio_track_id: String,
     video_codec: String,
@@ -900,9 +919,19 @@ impl NativeVideoCodecPipeline {
         Ok(Self {
             software_only,
             encoder: if software_only {
-                H264EncoderSession::new_software(encode_format, video_bitrate, &policy)?
+                H264EncoderSession::new_software(
+                    encode_format,
+                    video_bitrate,
+                    &policy,
+                    options.preserve_frames,
+                )?
             } else {
-                H264EncoderSession::new_with_policy(encode_format, video_bitrate, &policy)?
+                H264EncoderSession::new_with_policy(
+                    encode_format,
+                    video_bitrate,
+                    &policy,
+                    options.preserve_frames,
+                )?
             },
             policy,
             decoder,
@@ -1300,6 +1329,20 @@ fn transcode_prepared_segment(
 
     drop(audio_timer);
     let _mux_timer = StageTimer::new(&metrics.mux);
+    let avc = match &video_segment.sample_entry {
+        Fmp4SampleEntry::Avc {
+            codec_config,
+            width,
+            height,
+        } => codec_config.get(1..4).map(|config| {
+            (
+                format!("avc1.{:02X}{:02X}{:02X}", config[0], config[1], config[2]),
+                *width,
+                *height,
+            )
+        }),
+        _ => None,
+    };
     let tracks = vec![
         Fmp4Track {
             id: VIDEO_TRACK_ID,
@@ -1344,6 +1387,7 @@ fn transcode_prepared_segment(
     )?;
 
     Ok(TranscodedSegment {
+        avc,
         video_track_id: prepared.video_track_id.clone(),
         audio_track_id: prepared.audio_track_id.clone(),
         video_codec: video_segment.codec,
