@@ -74,7 +74,7 @@ pub struct NativeFmp4TranscodeOptions {
     pub max_height: Option<u32>,
     /// Target bitrate for transcoded audio.
     pub audio_bitrate: u32,
-    /// Preserve all video samples during offline rendition preparation.
+    /// Preserve all source video samples for aligned HLS renditions.
     pub preserve_frames: bool,
     /// Output video path.
     pub video_mode: NativeFmp4VideoMode,
@@ -1735,6 +1735,66 @@ fn copy_native_video_segment(
     })
 }
 
+/// Decode batches follow packet order, which can place later reference pictures
+/// ahead of B-frames belonging to the next batch. A low-delay encoder must see
+/// the pictures in presentation order across every batch, not just within one.
+struct PresentationQueue<Frame> {
+    pending: Vec<Frame>,
+    last: Option<TimePoint>,
+}
+
+impl<Frame> PresentationQueue<Frame> {
+    fn new() -> Self {
+        Self {
+            pending: Vec::new(),
+            last: None,
+        }
+    }
+
+    fn take_ready(
+        &mut self,
+        frames: Vec<Frame>,
+        earliest_unsubmitted: Option<TimePoint>,
+        pts: impl Fn(&Frame) -> TimePoint,
+    ) -> Result<Vec<Frame>> {
+        self.pending.extend(frames);
+        self.pending
+            .sort_by(|a, b| presentation_cmp(pts(a), pts(b)));
+        let ready_count = self.pending.partition_point(|frame| {
+            earliest_unsubmitted.is_none_or(|cutoff| presentation_cmp(pts(frame), cutoff).is_lt())
+        });
+        let waiting = self.pending.split_off(ready_count);
+        let ready = std::mem::replace(&mut self.pending, waiting);
+        for frame in &ready {
+            let position = pts(frame);
+            if self
+                .last
+                .is_some_and(|last| !presentation_cmp(last, position).is_lt())
+            {
+                bail!("decoded video did not advance in presentation order");
+            }
+            self.last = Some(position);
+        }
+        Ok(ready)
+    }
+}
+
+fn presentation_cmp(a: TimePoint, b: TimePoint) -> std::cmp::Ordering {
+    (u128::from(a.units) * u128::from(b.scale.units_per_second))
+        .cmp(&(u128::from(b.units) * u128::from(a.scale.units_per_second)))
+}
+
+fn earliest_unsubmitted_pts(samples: &[ChunkSample]) -> Vec<Option<TimePoint>> {
+    let mut bounds = vec![None; samples.len() + 1];
+    for (index, sample) in samples.iter().enumerate().rev() {
+        bounds[index] = Some(match bounds[index + 1] {
+            Some(next) if presentation_cmp(next, sample.pts).is_lt() => next,
+            _ => sample.pts,
+        });
+    }
+    bounds
+}
+
 fn transcode_h264_video_segment(
     _track: &PreparedVideoTrack,
     codec: VideoCodec,
@@ -1750,8 +1810,10 @@ fn transcode_h264_video_segment(
         encode_format,
         codec_pipeline.policy.decoded_batch_bytes,
     )?;
-    let sample_batches = manifest.samples.chunks(batch_packets);
-    let batch_count = sample_batches.len();
+    let presentation_bounds = earliest_unsubmitted_pts(&manifest.samples);
+    let mut cpu_frames = PresentationQueue::new();
+    #[cfg(target_os = "macos")]
+    let mut native_frames = PresentationQueue::new();
     let mut encoded_frames = Vec::new();
     let mut output_decoder_config = None;
     let mut output_time_scale = None;
@@ -1768,16 +1830,27 @@ fn transcode_h264_video_segment(
     // still needs a sync access unit at its first encoded presentation frame.
     let mut submitted_frame = false;
 
-    for (batch_index, samples) in sample_batches.enumerate() {
+    let mut offset = 0;
+    while offset < manifest.samples.len() {
         codec_pipeline.control.check()?;
+        let pending = cpu_frames.pending.len();
+        #[cfg(target_os = "macos")]
+        let pending = pending + native_frames.pending.len();
+        let capacity = batch_packets.saturating_sub(pending);
+        if capacity == 0 {
+            bail!("video presentation reorder exceeds decoded batch memory budget");
+        }
+        let end = (offset + capacity).min(manifest.samples.len());
         let mut decode_input = build_video_decode_input(
             codec,
             chunk_time_scale(manifest),
             Some(&decoder_config),
-            samples,
+            &manifest.samples[offset..end],
             payload,
-            batch_index + 1 == batch_count,
+            end == manifest.samples.len(),
         )?;
+        offset = end;
+        let earliest_unsubmitted = presentation_bounds[end];
         if let Some(length_size) = hevc_length_size {
             // H.265 random access: leading RASL pictures at the initial CRA
             // may reference pictures before the seek and must not be decoded.
@@ -1803,8 +1876,13 @@ fn transcode_h264_video_segment(
             H264EncoderSession::VideoToolbox(encoder),
         ) = (&mut codec_pipeline.decoder, &mut codec_pipeline.encoder)
         {
-            let mut surfaces = decoder.decode_surfaces(&decode_input)?;
-            decoded_frame_count += surfaces.len();
+            let decoded = decoder.decode_surfaces(&decode_input)?;
+            decoded_frame_count += decoded.len();
+            let mut surfaces = native_frames.take_ready(
+                decoded,
+                earliest_unsubmitted,
+                |frame: &super::surface::AppleVideoFrame| frame.pts,
+            )?;
             if surfaces.is_empty() {
                 continue;
             }
@@ -1822,7 +1900,12 @@ fn transcode_h264_video_segment(
         } else {
             let decoded = codec_pipeline.decoder.decode(&decode_input)?;
             decoded_frame_count += decoded.frames.len();
-            if decoded.frames.is_empty() {
+            let frames = cpu_frames.take_ready(
+                decoded.frames,
+                earliest_unsubmitted,
+                |frame: &super::DecodedVideoFrame| frame.pts,
+            )?;
+            if frames.is_empty() {
                 continue;
             }
             let needs_scale = decode_format.width != encode_format.width
@@ -1830,17 +1913,12 @@ fn transcode_h264_video_segment(
             if needs_scale {
                 codec_pipeline
                     .scaled_buffers
-                    .resize_with(decoded.frames.len(), Vec::new);
-                for (frame, buffer) in decoded
-                    .frames
-                    .iter()
-                    .zip(&mut codec_pipeline.scaled_buffers)
-                {
+                    .resize_with(frames.len(), Vec::new);
+                for (frame, buffer) in frames.iter().zip(&mut codec_pipeline.scaled_buffers) {
                     codec_pipeline.scaler.scale_into(&frame.pixels, buffer)?;
                 }
             }
-            let raw_frames = decoded
-                .frames
+            let raw_frames = frames
                 .iter()
                 .enumerate()
                 .map(|(index, frame)| RawVideoFrameRef {
@@ -2408,6 +2486,40 @@ mod tests {
                 &small_budget
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn later_decode_batch_can_contain_earlier_presentation_frames() {
+        let mut queue = PresentationQueue::new();
+        let staged = queue
+            .take_ready(
+                vec![TimePoint::millis(0), TimePoint::millis(120)],
+                Some(TimePoint::millis(40)),
+                |frame| *frame,
+            )
+            .unwrap();
+        assert_eq!(staged, vec![TimePoint::millis(0)]);
+
+        let remainder = queue
+            .take_ready(
+                vec![TimePoint::millis(80), TimePoint::millis(40)],
+                None,
+                |frame| *frame,
+            )
+            .unwrap();
+        assert_eq!(
+            remainder,
+            vec![
+                TimePoint::millis(40),
+                TimePoint::millis(80),
+                TimePoint::millis(120)
+            ]
+        );
+        assert!(
+            queue
+                .take_ready(vec![TimePoint::millis(100)], None, |frame| *frame)
+                .is_err()
         );
     }
 

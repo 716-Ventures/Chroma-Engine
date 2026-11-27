@@ -268,7 +268,7 @@ enum Command {
     /// Write a contiguous fMP4 segment window with retained native codecs.
     TranscodeFmp4Segments {
         input: PathBuf,
-        /// Preserve presentation timestamps when preparing a complete rendition offline.
+        /// Preserve presentation order across decode batches without dropping source frames.
         #[arg(long)]
         preserve_frames: bool,
         output_dir: PathBuf,
